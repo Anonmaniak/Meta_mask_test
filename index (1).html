@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MetaMask Payment System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 700px;
+            width: 100%;
+        }
+
+        .metamask-logo {
+            text-align: center;
+            font-size: 80px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .status-box {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: center;
+            border: 3px solid #e0e0e0;
+        }
+
+        .status-box.connected {
+            background: #d4edda;
+            border-color: #28a745;
+        }
+
+        .status-box.error {
+            background: #f8d7da;
+            border-color: #dc3545;
+        }
+
+        .status-box.warning {
+            background: #fff3cd;
+            border-color: #ffc107;
+        }
+
+        .status-text {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        button {
+            background: linear-gradient(135deg, #f6851b 0%, #e2761b 100%);
+            color: white;
+            border: none;
+            padding: 16px 32px;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            margin: 10px 0;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(246, 133, 27, 0.3);
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(246, 133, 27, 0.4);
+        }
+
+        button:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        button.connected {
+            background: linear-gradient(135deg, #28a745 0%, #218838 100%);
+        }
+
+        .info-section {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .info-section.show {
+            display: block;
+        }
+
+        .info-card {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 15px 0;
+            border-left: 4px solid #667eea;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            font-size: 16px;
+            color: #333;
+            font-weight: 500;
+            word-break: break-all;
+        }
+
+        .payment-form {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 12px;
+            margin-top: 20px;
+        }
+
+        .payment-form h3 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 8px;
+        }
+
+        input {
+            width: 100%;
+            padding: 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 15px;
+            transition: all 0.3s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .fee-info {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+
+        .fee-info h4 {
+            color: #856404;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        .fee-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            font-size: 14px;
+        }
+
+        .fee-row.total {
+            font-weight: 700;
+            font-size: 16px;
+            padding-top: 10px;
+            border-top: 2px solid #ffc107;
+            margin-top: 10px;
+        }
+
+        .transaction-history {
+            margin-top: 30px;
+        }
+
+        .transaction-item {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+
+        .transaction-item .tx-hash {
+            font-family: monospace;
+            font-size: 12px;
+            color: #667eea;
+            word-break: break-all;
+        }
+
+        .transaction-item .tx-status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        .tx-status.pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .tx-status.verified {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+
+        .tx-status.completed {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .tx-status.failed {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.8s linear infinite;
+            margin-left: 8px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .network-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            background: #667eea;
+            color: white;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .error-text {
+            color: #dc3545;
+            font-size: 13px;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="metamask-logo">🦊</div>
+        <h1>MetaMask Payment System</h1>
+        <div class="subtitle">Secure payments with 1% platform fee</div>
+        
+        <div id="statusBox" class="status-box">
+            <div class="status-text" id="statusText">Ready to Connect</div>
+        </div>
+
+        <button id="connectBtn" onclick="connectMetaMask()">
+            <span id="btnText">Connect to MetaMask</span>
+        </button>
+
+        <div id="walletSection" class="info-section">
+            <div class="info-card">
+                <div class="info-label">Your Wallet Address</div>
+                <div class="info-value" id="walletAddress">-</div>
+            </div>
+
+            <div class="info-card">
+                <div class="info-label">Network</div>
+                <div class="info-value">
+                    <span id="networkName">-</span>
+                    <span id="chainBadge" class="network-badge">-</span>
+                </div>
+            </div>
+
+            <div class="info-card">
+                <div class="info-label">Balance</div>
+                <div class="info-value" id="balance">-</div>
+            </div>
+
+            <div class="payment-form">
+                <h3>💸 Send Payment</h3>
+                
+                <div class="form-group">
+                    <label for="destinationAddress">Destination Address</label>
+                    <input 
+                        type="text" 
+                        id="destinationAddress" 
+                        placeholder="Enter recipient's wallet address (0x...)"
+                    >
+                    <div id="addressError" class="error-text hidden"></div>
+                </div>
+
+                <div class="form-group">
+                    <label for="amount">Amount (ETH)</label>
+                    <input 
+                        type="number" 
+                        id="amount" 
+                        placeholder="Enter amount to send"
+                        step="0.0001"
+                        min="0.0001"
+                        oninput="calculateFees()"
+                    >
+                    <div id="amountError" class="error-text hidden"></div>
+                </div>
+
+                <div class="fee-info" id="feeBreakdown" style="display: none;">
+                    <h4>💰 Payment Breakdown</h4>
+                    <div class="fee-row">
+                        <span>Amount to Send:</span>
+                        <span id="sendAmount">0 ETH</span>
+                    </div>
+                    <div class="fee-row">
+                        <span>Platform Fee (1%):</span>
+                        <span id="platformFee">0 ETH</span>
+                    </div>
+                    <div class="fee-row">
+                        <span>Recipient Receives:</span>
+                        <span id="recipientReceives">0 ETH</span>
+                    </div>
+                    <div class="fee-row total">
+                        <span>Total You Pay:</span>
+                        <span id="totalAmount">0 ETH</span>
+                    </div>
+                </div>
+
+                <button onclick="initiatePayment()" id="paymentBtn">
+                    Send Payment
+                </button>
+            </div>
+
+            <div class="transaction-history" id="transactionHistory">
+                <h3 style="margin-bottom: 15px;">📋 Transaction History</h3>
+                <div id="transactionList">
+                    <p style="text-align: center; color: #999;">No transactions yet</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const CONFIG = {
+            FEE_WALLET: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb4', // CHANGE THIS to your fee collection wallet
+            ADMIN_WALLET: '0x9876543210987654321098765432109876543210', // CHANGE THIS to your admin wallet
+            FEE_PERCENTAGE: 1, // 1% fee
+            BACKEND_URL: 'https://metamask-payment-backend.onrender.com/api' // TEMPORARY - Change to your backend URL
+        };
+
+        let currentAccount = null;
+        let currentChainId = null;
+        let transactions = [];
+
+        // Connect to MetaMask
+        async function connectMetaMask() {
+            const btn = document.getElementById('connectBtn');
+            const btnText = document.getElementById('btnText');
+            
+            if (typeof window.ethereum === 'undefined') {
+                updateStatus('MetaMask is not installed!', 'error');
+                alert('Please install MetaMask extension first!');
+                return;
+            }
+
+            try {
+                btnText.innerHTML = 'Connecting<span class="spinner"></span>';
+                btn.disabled = true;
+
+                const accounts = await window.ethereum.request({
+                    method: 'eth_requestAccounts'
+                });
+
+                if (accounts.length === 0) {
+                    throw new Error('No accounts found');
+                }
+
+                currentAccount = accounts[0];
+                currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+
+                updateStatus('✅ Connected Successfully!', 'connected');
+                btnText.textContent = '✓ Connected';
+                btn.classList.add('connected');
+
+                await displayWalletInfo();
+                document.getElementById('walletSection').classList.add('show');
+                setupEventListeners();
+
+                // Load transaction history
+                await loadTransactionHistory();
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateStatus(error.message || 'Connection failed', 'error');
+                btnText.textContent = 'Connect to MetaMask';
+                btn.disabled = false;
+            }
+        }
+
+        // Display wallet info
+        async function displayWalletInfo() {
+            document.getElementById('walletAddress').textContent = currentAccount;
+            
+            const networkName = getNetworkName(currentChainId);
+            document.getElementById('networkName').textContent = networkName;
+            document.getElementById('chainBadge').textContent = `Chain ${parseInt(currentChainId, 16)}`;
+
+            await refreshBalance();
+        }
+
+        // Refresh balance
+        async function refreshBalance() {
+            try {
+                const balance = await window.ethereum.request({
+                    method: 'eth_getBalance',
+                    params: [currentAccount, 'latest']
+                });
+
+                const balanceInEth = parseInt(balance, 16) / Math.pow(10, 18);
+                document.getElementById('balance').textContent = `${balanceInEth.toFixed(6)} ETH`;
+            } catch (error) {
+                console.error('Error getting balance:', error);
+            }
+        }
+
+        // Calculate fees
+        function calculateFees() {
+            const amount = parseFloat(document.getElementById('amount').value) || 0;
+            
+            if (amount > 0) {
+                const platformFee = amount * (CONFIG.FEE_PERCENTAGE / 100);
+                const recipientReceives = amount;
+                const totalAmount = amount + platformFee;
+
+                document.getElementById('sendAmount').textContent = `${amount.toFixed(6)} ETH`;
+                document.getElementById('platformFee').textContent = `${platformFee.toFixed(6)} ETH`;
+                document.getElementById('recipientReceives').textContent = `${recipientReceives.toFixed(6)} ETH`;
+                document.getElementById('totalAmount').textContent = `${totalAmount.toFixed(6)} ETH`;
+                
+                document.getElementById('feeBreakdown').style.display = 'block';
+            } else {
+                document.getElementById('feeBreakdown').style.display = 'none';
+            }
+        }
+
+        // Validate address
+        function validateAddress(address) {
+            return address && address.startsWith('0x') && address.length === 42;
+        }
+
+        // Initiate payment
+        async function initiatePayment() {
+            const destinationAddress = document.getElementById('destinationAddress').value.trim();
+            const amount = parseFloat(document.getElementById('amount').value);
+
+            // Clear previous errors
+            document.getElementById('addressError').classList.add('hidden');
+            document.getElementById('amountError').classList.add('hidden');
+
+            // Validate inputs
+            if (!validateAddress(destinationAddress)) {
+                document.getElementById('addressError').textContent = 'Invalid Ethereum address';
+                document.getElementById('addressError').classList.remove('hidden');
+                return;
+            }
+
+            if (!amount || amount <= 0) {
+                document.getElementById('amountError').textContent = 'Please enter a valid amount';
+                document.getElementById('amountError').classList.remove('hidden');
+                return;
+            }
+
+            const platformFee = amount * (CONFIG.FEE_PERCENTAGE / 100);
+            const totalAmount = amount + platformFee;
+
+            try {
+                updateStatus('Processing payment...', 'warning');
+                document.getElementById('paymentBtn').disabled = true;
+                document.getElementById('paymentBtn').innerHTML = 'Processing<span class="spinner"></span>';
+
+                // Step 1: Send fee to platform wallet
+                const feeAmountWei = '0x' + Math.floor(platformFee * Math.pow(10, 18)).toString(16);
+                
+                const feeTxHash = await window.ethereum.request({
+                    method: 'eth_sendTransaction',
+                    params: [{
+                        from: currentAccount,
+                        to: CONFIG.FEE_WALLET,
+                        value: feeAmountWei,
+                        gas: '0x5208'
+                    }]
+                });
+
+                console.log('Fee transaction sent:', feeTxHash);
+
+                // Step 2: Send main amount to admin wallet
+                const mainAmountWei = '0x' + Math.floor(amount * Math.pow(10, 18)).toString(16);
+                
+                const mainTxHash = await window.ethereum.request({
+                    method: 'eth_sendTransaction',
+                    params: [{
+                        from: currentAccount,
+                        to: CONFIG.ADMIN_WALLET,
+                        value: mainAmountWei,
+                        gas: '0x5208'
+                    }]
+                });
+
+                console.log('Main transaction sent:', mainTxHash);
+
+                // Step 3: Save transaction to backend
+                const transactionData = {
+                    senderAddress: currentAccount,
+                    destinationAddress: destinationAddress,
+                    amount: amount,
+                    platformFee: platformFee,
+                    totalAmount: totalAmount,
+                    feeTxHash: feeTxHash,
+                    mainTxHash: mainTxHash,
+                    adminWallet: CONFIG.ADMIN_WALLET,
+                    status: 'pending',
+                    timestamp: new Date().toISOString(),
+                    chainId: currentChainId
+                };
+
+                // Send to backend
+                await saveTransactionToBackend(transactionData);
+
+                updateStatus('✅ Payment initiated successfully!', 'connected');
+                
+                // Add to local transaction list
+                addTransactionToList(transactionData);
+
+                // Clear form
+                document.getElementById('destinationAddress').value = '';
+                document.getElementById('amount').value = '';
+                document.getElementById('feeBreakdown').style.display = 'none';
+
+                // Refresh balance
+                setTimeout(refreshBalance, 3000);
+
+            } catch (error) {
+                console.error('Payment error:', error);
+                
+                let errorMsg = 'Payment failed!';
+                if (error.code === 4001) {
+                    errorMsg = 'Transaction rejected by user';
+                } else if (error.message) {
+                    errorMsg = error.message;
+                }
+                
+                updateStatus(errorMsg, 'error');
+            } finally {
+                document.getElementById('paymentBtn').disabled = false;
+                document.getElementById('paymentBtn').textContent = 'Send Payment';
+            }
+        }
+
+        // Save transaction to backend
+        async function saveTransactionToBackend(data) {
+            try {
+                const response = await fetch(`${CONFIG.BACKEND_URL}/transaction`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to save transaction to backend');
+                }
+
+                const result = await response.json();
+                console.log('Transaction saved:', result);
+                
+                return result;
+            } catch (error) {
+                console.error('Backend save error:', error);
+                // Continue even if backend fails - transaction is already on blockchain
+            }
+        }
+
+        // Load transaction history
+        async function loadTransactionHistory() {
+            try {
+                const response = await fetch(`${CONFIG.BACKEND_URL}/transactions/${currentAccount}`);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    transactions = data.transactions || [];
+                    
+                    if (transactions.length > 0) {
+                        displayTransactions();
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading transaction history:', error);
+            }
+        }
+
+        // Add transaction to list
+        function addTransactionToList(transaction) {
+            transactions.unshift(transaction);
+            displayTransactions();
+        }
+
+        // Display transactions
+        function displayTransactions() {
+            const listDiv = document.getElementById('transactionList');
+            
+            if (transactions.length === 0) {
+                listDiv.innerHTML = '<p style="text-align: center; color: #999;">No transactions yet</p>';
+                return;
+            }
+
+            listDiv.innerHTML = transactions.map(tx => `
+                <div class="transaction-item">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;">
+                        <div>
+                            <strong>To:</strong> ${tx.destinationAddress.substring(0, 10)}...${tx.destinationAddress.substring(32)}
+                        </div>
+                        <span class="tx-status ${tx.status}">${tx.status.toUpperCase()}</span>
+                    </div>
+                    <div style="margin: 5px 0;">
+                        <strong>Amount:</strong> ${tx.amount} ETH (Fee: ${tx.platformFee} ETH)
+                    </div>
+                    <div style="margin: 5px 0;">
+                        <strong>Fee TX:</strong> <span class="tx-hash">${tx.feeTxHash}</span>
+                    </div>
+                    <div style="margin: 5px 0;">
+                        <strong>Main TX:</strong> <span class="tx-hash">${tx.mainTxHash}</span>
+                    </div>
+                    <div style="margin: 5px 0; font-size: 12px; color: #666;">
+                        ${new Date(tx.timestamp).toLocaleString()}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Setup event listeners
+        function setupEventListeners() {
+            window.ethereum.on('accountsChanged', (accounts) => {
+                if (accounts.length === 0) {
+                    location.reload();
+                } else {
+                    currentAccount = accounts[0];
+                    displayWalletInfo();
+                    loadTransactionHistory();
+                }
+            });
+
+            window.ethereum.on('chainChanged', () => {
+                location.reload();
+            });
+        }
+
+        // Get network name
+        function getNetworkName(chainId) {
+            const networks = {
+                '0x1': 'Ethereum Mainnet',
+                '0x5': 'Goerli Testnet',
+                '0xaa36a7': 'Sepolia Testnet',
+                '0x89': 'Polygon Mainnet',
+                '0x13881': 'Mumbai Testnet',
+                '0x38': 'BSC Mainnet',
+                '0x61': 'BSC Testnet',
+            };
+            
+            return networks[chainId] || 'Unknown Network';
+        }
+
+        // Update status
+        function updateStatus(message, type) {
+            const statusBox = document.getElementById('statusBox');
+            const statusText = document.getElementById('statusText');
+            
+            statusText.textContent = message;
+            statusBox.className = 'status-box ' + type;
+        }
+
+        // Check if already connected
+        window.addEventListener('load', async () => {
+            if (typeof window.ethereum !== 'undefined') {
+                try {
+                    const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+                    
+                    if (accounts.length > 0) {
+                        currentAccount = accounts[0];
+                        currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+                        
+                        document.getElementById('connectBtn').classList.add('connected');
+                        document.getElementById('btnText').textContent = '✓ Connected';
+                        document.getElementById('connectBtn').disabled = true;
+                        updateStatus('✅ Connected Successfully!', 'connected');
+                        
+                        await displayWalletInfo();
+                        document.getElementById('walletSection').classList.add('show');
+                        setupEventListeners();
+                        await loadTransactionHistory();
+                    }
+                } catch (error) {
+                    console.log('Not previously connected');
+                }
+            }
+        });
+    </script>
+</body>
+</html>
