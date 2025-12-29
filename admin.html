@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Dashboard - Payment System</title>
+    <title>Admin - Transaction Monitor</title>
     <style>
         * {
             margin: 0;
@@ -18,7 +18,7 @@
         }
 
         .container {
-            max-width: 1400px;
+            max-width: 1200px;
             margin: 0 auto;
         }
 
@@ -34,210 +34,72 @@
             margin-bottom: 10px;
         }
 
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
+        .note {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 20px 0;
         }
 
-        .stat-card {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        .note h3 {
+            color: #856404;
+            margin-bottom: 5px;
         }
 
-        .stat-card h3 {
-            color: #666;
+        .note p {
+            color: #856404;
             font-size: 14px;
-            margin-bottom: 10px;
-            text-transform: uppercase;
         }
 
-        .stat-value {
-            font-size: 32px;
-            font-weight: 700;
-            color: #333;
-        }
-
-        .stat-label {
-            font-size: 12px;
-            color: #999;
-            margin-top: 5px;
-        }
-
-        .controls {
+        .info {
             background: white;
             padding: 20px;
             border-radius: 12px;
-            margin-bottom: 20px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
 
-        .controls button {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            margin-right: 10px;
+        .info h2 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+
+        .info p {
+            color: #666;
+            line-height: 1.6;
             margin-bottom: 10px;
         }
 
-        .controls button:hover {
-            background: #5568d3;
-        }
-
-        .transactions-section {
-            background: white;
-            padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-
-        .filter-tabs {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-            border-bottom: 2px solid #e0e0e0;
-            padding-bottom: 10px;
-        }
-
-        .filter-tab {
-            padding: 10px 20px;
-            background: none;
-            border: none;
-            cursor: pointer;
-            font-weight: 600;
-            color: #666;
-            border-bottom: 3px solid transparent;
-            transition: all 0.3s;
-        }
-
-        .filter-tab.active {
-            color: #667eea;
-            border-bottom-color: #667eea;
-        }
-
-        .transaction-table {
-            width: 100%;
-            border-collapse: collapse;
-            overflow-x: auto;
-        }
-
-        .transaction-table th {
-            background: #f8f9fa;
-            padding: 15px;
-            text-align: left;
-            font-weight: 600;
-            color: #555;
-            border-bottom: 2px solid #e0e0e0;
-        }
-
-        .transaction-table td {
-            padding: 15px;
-            border-bottom: 1px solid #f0f0f0;
-        }
-
-        .transaction-table tr:hover {
-            background: #f8f9fa;
-        }
-
-        .status-badge {
-            display: inline-block;
-            padding: 5px 12px;
-            border-radius: 12px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-
-        .status-pending {
-            background: #fff3cd;
-            color: #856404;
-        }
-
-        .status-verified {
-            background: #d1ecf1;
-            color: #0c5460;
-        }
-
-        .status-completed {
+        .security-features {
             background: #d4edda;
+            border: 2px solid #28a745;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .security-features h3 {
             color: #155724;
+            margin-bottom: 15px;
         }
 
-        .status-failed {
-            background: #f8d7da;
-            color: #721c24;
+        .security-features ul {
+            list-style: none;
+            padding: 0;
         }
 
-        .tx-hash {
-            font-family: monospace;
-            font-size: 12px;
-            color: #667eea;
-            cursor: pointer;
+        .security-features li {
+            color: #155724;
+            padding: 8px 0;
+            padding-left: 25px;
+            position: relative;
         }
 
-        .tx-hash:hover {
-            text-decoration: underline;
-        }
-
-        .address {
-            font-family: monospace;
-            font-size: 12px;
-        }
-
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #999;
-        }
-
-        .spinner {
-            display: inline-block;
-            width: 40px;
-            height: 40px;
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .no-data {
-            text-align: center;
-            padding: 40px;
-            color: #999;
-        }
-
-        .action-button {
-            background: #28a745;
-            color: white;
-            border: none;
-            padding: 6px 12px;
-            border-radius: 5px;
-            font-size: 12px;
-            cursor: pointer;
-        }
-
-        .action-button:hover {
-            background: #218838;
-        }
-
-        .action-button.danger {
-            background: #dc3545;
-        }
-
-        .action-button.danger:hover {
-            background: #c82333;
+        .security-features li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            font-weight: bold;
         }
     </style>
 </head>
@@ -245,267 +107,91 @@
     <div class="container">
         <header>
             <h1>🔐 Admin Dashboard</h1>
-            <p>Payment System Management Console</p>
+            <p>Secure Payment Gateway - Privacy-First System</p>
         </header>
 
-        <div class="stats-grid">
-            <div class="stat-card">
-                <h3>Total Transactions</h3>
-                <div class="stat-value" id="totalTransactions">0</div>
-                <div class="stat-label">All time</div>
-            </div>
-            
-            <div class="stat-card">
-                <h3>Pending</h3>
-                <div class="stat-value" id="pendingTransactions">0</div>
-                <div class="stat-label">Awaiting verification</div>
-            </div>
-            
-            <div class="stat-card">
-                <h3>Verified</h3>
-                <div class="stat-value" id="verifiedTransactions">0</div>
-                <div class="stat-label">Ready to forward</div>
-            </div>
-            
-            <div class="stat-card">
-                <h3>Completed</h3>
-                <div class="stat-value" id="completedTransactions">0</div>
-                <div class="stat-label">Successfully sent</div>
-            </div>
-            
-            <div class="stat-card">
-                <h3>Total Volume</h3>
-                <div class="stat-value" id="totalVolume">0</div>
-                <div class="stat-label">ETH processed</div>
-            </div>
-            
-            <div class="stat-card">
-                <h3>Total Fees</h3>
-                <div class="stat-value" id="totalFees">0</div>
-                <div class="stat-label">ETH collected</div>
-            </div>
+        <div class="note">
+            <h3>📝 Important Note</h3>
+            <p><strong>No admin dashboard needed!</strong> This system uses temporary storage for maximum privacy. All transaction data is automatically deleted after completion (60 seconds) or failure (5 minutes). There is no persistent data to monitor.</p>
         </div>
 
-        <div class="controls">
-            <button onclick="refreshData()">🔄 Refresh</button>
-            <button onclick="exportJSON()">📥 Export JSON</button>
-            <button onclick="clearFilters()">🔍 Show All</button>
-            <span id="lastUpdate" style="margin-left: 20px; color: #666; font-size: 14px;"></span>
+        <div class="info">
+            <h2>How This System Works</h2>
+            
+            <p><strong>Step 1: User Payment</strong><br>
+            User sends full amount to your escrow wallet (one transaction only)</p>
+
+            <p><strong>Step 2: Blockchain Verification</strong><br>
+            System waits for 3 confirmations (~45-90 seconds on Sepolia)</p>
+
+            <p><strong>Step 3: Automatic Forwarding</strong><br>
+            System forwards amount to destination minus 1% fee</p>
+
+            <p><strong>Step 4: Data Deletion</strong><br>
+            All transaction records automatically deleted after 60 seconds</p>
         </div>
 
-        <div class="transactions-section">
-            <h2 style="margin-bottom: 20px;">All Transactions</h2>
+        <div class="security-features">
+            <h3>🛡️ Privacy & Security Features</h3>
+            <ul>
+                <li><strong>Single Transaction:</strong> User only sends to your wallet</li>
+                <li><strong>Hidden Identity:</strong> Destination never sees sender's address</li>
+                <li><strong>Automatic Fee:</strong> 1% deducted when forwarding to destination</li>
+                <li><strong>Temporary Storage:</strong> All data in memory, not saved to disk</li>
+                <li><strong>Auto-Deletion:</strong> Completed transactions deleted after 60 seconds</li>
+                <li><strong>Failed Cleanup:</strong> Failed transactions deleted after 5 minutes</li>
+                <li><strong>No Database:</strong> Nothing persists between deployments</li>
+                <li><strong>Serverless:</strong> Runs entirely on Vercel (free tier)</li>
+            </ul>
+        </div>
+
+        <div class="info">
+            <h2>Monitoring Your System</h2>
             
-            <div class="filter-tabs">
-                <button class="filter-tab active" onclick="filterTransactions('all')">All</button>
-                <button class="filter-tab" onclick="filterTransactions('pending')">Pending</button>
-                <button class="filter-tab" onclick="filterTransactions('verified')">Verified</button>
-                <button class="filter-tab" onclick="filterTransactions('completed')">Completed</button>
-                <button class="filter-tab" onclick="filterTransactions('failed')">Failed</button>
-            </div>
+            <p><strong>Check Blockchain Directly:</strong><br>
+            Monitor your escrow wallet on Etherscan:<br>
+            - <a href="https://sepolia.etherscan.io/" target="_blank">Sepolia Testnet</a><br>
+            - <a href="https://etherscan.io/" target="_blank">Ethereum Mainnet</a></p>
 
-            <div id="loadingState" class="loading">
-                <div class="spinner"></div>
-                <p>Loading transactions...</p>
-            </div>
+            <p><strong>View Vercel Logs:</strong><br>
+            1. Go to Vercel dashboard<br>
+            2. Click your project<br>
+            3. Click "Functions" tab<br>
+            4. See real-time logs of verification and forwarding</p>
 
-            <div id="transactionTableContainer" style="display: none;">
-                <table class="transaction-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>From</th>
-                            <th>To</th>
-                            <th>Amount</th>
-                            <th>Fee</th>
-                            <th>Status</th>
-                            <th>Main TX</th>
-                            <th>Final TX</th>
-                            <th>Time</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="transactionTableBody">
-                    </tbody>
-                </table>
-            </div>
+            <p><strong>Check Your Wallet Balance:</strong><br>
+            Your escrow wallet accumulates 1% fees from each transaction. Monitor it directly in MetaMask or on blockchain explorers.</p>
+        </div>
 
-            <div id="noDataState" class="no-data" style="display: none;">
-                <p>No transactions found</p>
-            </div>
+        <div class="info">
+            <h2>Configuration</h2>
+            
+            <p><strong>Your Escrow Wallet:</strong><br>
+            Update in <code>index.html</code>:<br>
+            <code>ESCROW_WALLET: '0xYourWalletAddress'</code></p>
+
+            <p><strong>Environment Variables (Vercel):</strong><br>
+            - <code>RPC_URL</code>: Your Alchemy API URL<br>
+            - <code>ADMIN_PRIVATE_KEY</code>: Your escrow wallet private key</p>
+
+            <p><strong>Fee Percentage:</strong><br>
+            Default is 1%. To change, update in both:<br>
+            - <code>index.html</code>: <code>FEE_PERCENTAGE: 1</code><br>
+            - <code>api/verify.js</code>: <code>FEE_PERCENTAGE: 1</code></p>
+        </div>
+
+        <div class="security-features">
+            <h3>💡 Best Practices</h3>
+            <ul>
+                <li>Always test on Sepolia testnet first</li>
+                <li>Keep your private key secure (only in Vercel env vars)</li>
+                <li>Monitor your escrow wallet balance regularly</li>
+                <li>Check Vercel function logs for any errors</li>
+                <li>Ensure escrow wallet has ETH for gas fees</li>
+                <li>Start with small amounts to test the flow</li>
+                <li>Never share your escrow wallet private key</li>
+            </ul>
         </div>
     </div>
-
-    <script>
-        const API_URL = '/api'; // Vercel serverless functions
-        let allTransactions = [];
-        let currentFilter = 'all';
-
-        // Load data on page load
-        window.addEventListener('load', () => {
-            loadStats();
-            loadTransactions();
-            setInterval(loadStats, 30000); // Auto-refresh every 30 seconds
-            setInterval(loadTransactions, 30000);
-        });
-
-        // Load statistics
-        async function loadStats() {
-            try {
-                const response = await fetch(`${API_URL}/stats`);
-                const data = await response.json();
-
-                if (data.success) {
-                    document.getElementById('totalTransactions').textContent = data.stats.total;
-                    document.getElementById('pendingTransactions').textContent = data.stats.pending;
-                    document.getElementById('verifiedTransactions').textContent = data.stats.verified;
-                    document.getElementById('completedTransactions').textContent = data.stats.completed;
-                    document.getElementById('totalVolume').textContent = data.stats.totalVolume.toFixed(4);
-                    document.getElementById('totalFees').textContent = data.stats.totalFees.toFixed(4);
-                }
-
-                updateLastRefresh();
-            } catch (error) {
-                console.error('Error loading stats:', error);
-            }
-        }
-
-        // Load all transactions
-        async function loadTransactions() {
-            try {
-                const response = await fetch(`${API_URL}/admin/transactions`);
-                const data = await response.json();
-
-                if (data.success) {
-                    allTransactions = data.transactions;
-                    displayTransactions();
-                    document.getElementById('loadingState').style.display = 'none';
-                }
-            } catch (error) {
-                console.error('Error loading transactions:', error);
-                document.getElementById('loadingState').innerHTML = 
-                    '<p style="color: red;">Error loading transactions. Make sure backend is running.</p>';
-            }
-        }
-
-        // Display transactions
-        function displayTransactions() {
-            let filtered = allTransactions;
-
-            if (currentFilter !== 'all') {
-                filtered = allTransactions.filter(tx => tx.status === currentFilter);
-            }
-
-            if (filtered.length === 0) {
-                document.getElementById('transactionTableContainer').style.display = 'none';
-                document.getElementById('noDataState').style.display = 'block';
-                return;
-            }
-
-            document.getElementById('transactionTableContainer').style.display = 'block';
-            document.getElementById('noDataState').style.display = 'none';
-
-            const tbody = document.getElementById('transactionTableBody');
-            tbody.innerHTML = filtered.map(tx => `
-                <tr>
-                    <td><strong>${tx.id || '-'}</strong></td>
-                    <td class="address" title="${tx.senderAddress}">
-                        ${tx.senderAddress.substring(0, 6)}...${tx.senderAddress.substring(38)}
-                    </td>
-                    <td class="address" title="${tx.destinationAddress}">
-                        ${tx.destinationAddress.substring(0, 6)}...${tx.destinationAddress.substring(38)}
-                    </td>
-                    <td><strong>${tx.amount} ETH</strong></td>
-                    <td>${tx.platformFee} ETH</td>
-                    <td><span class="status-badge status-${tx.status}">${tx.status.toUpperCase()}</span></td>
-                    <td>
-                        <a href="https://etherscan.io/tx/${tx.mainTxHash}" target="_blank" class="tx-hash">
-                            ${tx.mainTxHash.substring(0, 10)}...
-                        </a>
-                    </td>
-                    <td>
-                        ${tx.finalTxHash ? 
-                            `<a href="https://etherscan.io/tx/${tx.finalTxHash}" target="_blank" class="tx-hash">
-                                ${tx.finalTxHash.substring(0, 10)}...
-                            </a>` : 
-                            '<span style="color: #999;">-</span>'
-                        }
-                    </td>
-                    <td>${new Date(tx.timestamp).toLocaleString()}</td>
-                    <td>
-                        ${tx.status === 'pending' ? 
-                            `<button class="action-button" onclick="verifyTransaction('${tx.id}')">Verify</button>` : 
-                            ''
-                        }
-                    </td>
-                </tr>
-            `).join('');
-        }
-
-        // Filter transactions
-        function filterTransactions(status) {
-            currentFilter = status;
-            
-            // Update active tab
-            document.querySelectorAll('.filter-tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            event.target.classList.add('active');
-
-            displayTransactions();
-        }
-
-        // Verify specific transaction
-        async function verifyTransaction(id) {
-            try {
-                const response = await fetch(`${API_URL}/verify/${id}`, {
-                    method: 'POST'
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    alert(`Verification Results:\n\nFee TX: ${data.feeVerification.status}\nMain TX: ${data.mainVerification.status}`);
-                    loadTransactions();
-                }
-            } catch (error) {
-                console.error('Error verifying transaction:', error);
-                alert('Failed to verify transaction');
-            }
-        }
-
-        // Export to JSON
-        function exportJSON() {
-            const dataStr = JSON.stringify({ transactions: allTransactions }, null, 2);
-            const dataBlob = new Blob([dataStr], { type: 'application/json' });
-            const url = URL.createObjectURL(dataBlob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `transactions-${Date.now()}.json`;
-            link.click();
-        }
-
-        // Refresh data
-        function refreshData() {
-            loadStats();
-            loadTransactions();
-        }
-
-        // Clear filters
-        function clearFilters() {
-            currentFilter = 'all';
-            document.querySelectorAll('.filter-tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            document.querySelector('.filter-tab').classList.add('active');
-            displayTransactions();
-        }
-
-        // Update last refresh time
-        function updateLastRefresh() {
-            document.getElementById('lastUpdate').textContent = 
-                `Last updated: ${new Date().toLocaleTimeString()}`;
-        }
-    </script>
 </body>
 </html>
