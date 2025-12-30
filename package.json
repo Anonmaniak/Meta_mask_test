@@ -1,24 +1,7 @@
 {
   "name": "metamask-payment-system",
   "version": "1.0.0",
-  "description": "MetaMask payment system with 1% platform fee - Vercel Serverless",
-  "main": "api/transaction.js",
-  "scripts": {
-    "dev": "vercel dev",
-    "build": "echo 'No build needed for serverless'",
-    "deploy": "vercel --prod"
-  },
-  "keywords": [
-    "metamask",
-    "ethereum",
-    "payment",
-    "blockchain",
-    "web3",
-    "vercel",
-    "serverless"
-  ],
-  "author": "",
-  "license": "MIT",
+  "description": "MetaMask payment system - Vercel Serverless",
   "dependencies": {
     "ethers": "^6.9.0"
   }
