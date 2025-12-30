@@ -1,7 +1,7 @@
 // Vercel Serverless Function - Save Transaction
 const { ethers } = require('ethers');
 
-// In-memory storage (auto-clears on cold start)
+// In-memory storage (shared across verify.js)
 let transactions = [];
 
 module.exports = async (req, res) => {
@@ -20,11 +20,12 @@ module.exports = async (req, res) => {
     try {
       const transaction = req.body;
 
-      // Validate required fields
+      // Validate required fields (FIXED: using escrowTxHash instead of feeTxHash/mainTxHash)
       if (!transaction.senderAddress || !transaction.destinationAddress || 
-          !transaction.amount || !transaction.feeTxHash || !transaction.mainTxHash) {
+          !transaction.amount || !transaction.escrowTxHash) {
         return res.status(400).json({ 
-          error: 'Missing required transaction fields' 
+          error: 'Missing required transaction fields',
+          received: transaction
         });
       }
 
@@ -42,6 +43,10 @@ module.exports = async (req, res) => {
       }
 
       console.log('✅ Transaction saved temporarily:', transaction.id);
+      console.log('   Sender:', transaction.senderAddress);
+      console.log('   Destination:', transaction.destinationAddress);
+      console.log('   Amount:', transaction.amount, 'ETH');
+      console.log('   Escrow TX:', transaction.escrowTxHash);
 
       res.status(200).json({ 
         success: true, 
