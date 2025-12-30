@@ -669,21 +669,37 @@
                 if (response.ok) {
                     const result = await response.json();
                     console.log('Status:', result.transaction.status);
+                    
+                    // Log verification details
+                    if (result.verifications) {
+                        console.log('Escrow verification:', result.verifications.escrow);
+                        console.log('Forward verification:', result.verifications.forward);
+                    }
 
                     if (result.transaction.status === 'pending') {
+                        // Still waiting for escrow transaction confirmations
                         setTimeout(() => verifyAndForward(txId), 30000);
                     } else if (result.transaction.status === 'verified') {
+                        // Escrow verified, about to forward
                         updateStep(2, 'completed');
                         updateStep(3, 'active');
                         updateStatus('✅ Verified - Forwarding to destination...', 'processing');
                         setTimeout(() => verifyAndForward(txId), 10000);
                     } else if (result.transaction.status === 'forwarding') {
+                        // Currently sending forward transaction
                         updateStep(3, 'active');
+                        updateStatus('⏳ Sending to destination...', 'processing');
                         setTimeout(() => verifyAndForward(txId), 10000);
+                    } else if (result.transaction.status === 'forwarding_pending') {
+                        // Forward transaction sent, waiting for confirmations
+                        updateStep(3, 'active');
+                        updateStatus('⏳ Verifying forward transaction...', 'processing');
+                        setTimeout(() => verifyAndForward(txId), 20000);
                     } else if (result.transaction.status === 'completed') {
+                        // BOTH transactions verified!
                         updateStep(3, 'completed');
                         updateStep(4, 'active');
-                        updateStatus('✅ Payment delivered - Erasing records...', 'processing');
+                        updateStatus('✅ Both transactions verified - Erasing records...', 'processing');
                         setTimeout(() => {
                             updateStep(4, 'completed');
                             updateStep(5, 'completed');
