@@ -1,137 +1,78 @@
-# Secure Payment Gateway
+# Secure Payment Gateway - Frontend
 
-Privacy-first Ethereum payment system with automated backend processing.
+User interface for the secure payment system with MetaMask integration.
 
-## 🚀 Features
+## 🚀 Deploy to Render
 
-- ✅ MetaMask integration (frontend)
-- ✅ Automated transaction monitoring (backend)
-- ✅ Auto-forwarding with fee deduction
-- ✅ Full blockchain verification
-- ✅ Privacy protection
-- ✅ Auto-cleanup of transaction records
+### Quick Deploy
 
-## 📁 Project Structure
+1. Go to [dashboard.render.com](https://dashboard.render.com)
+2. Click **New +** → **Static Site**
+3. Connect your GitHub repository: **Meta_mask_test**
+4. Configure:
+   ```
+   Name: secure-payment-frontend
+   Branch: frontend
+   Root Directory: ./
+   Build Command: (leave empty)
+   Publish Directory: ./
+   ```
+5. Click **"Create Static Site"**
+6. Copy your frontend URL: `https://secure-payment-frontend.onrender.com`
 
-```
-├── frontend/ (branch: frontend)
-│   ├── index.html          # Main user interface
-│   └── admin.html          # Admin dashboard
-│
-└── backend/ (branch: backend)
-    ├── app.py              # Flask API server
-    ├── transaction_monitor.py  # Background worker
-    ├── requirements.txt    # Python dependencies
-    ├── .env.example        # Environment template
-    └── README.md          # Backend documentation
-```
+### Configuration
 
-## 🔧 Setup
-
-### Frontend (Vercel)
-
-1. Fork this repository
-2. Go to [Vercel](https://vercel.com)
-3. New Project → Import your fork
-4. Select `frontend` branch
-5. Deploy
-6. Update `BACKEND_URL` in `index.html` line 397 with your Render backend URL
-
-### Backend (Render)
-
-See [backend/README.md](backend/README.md) for complete setup instructions.
-
-**Quick start:**
-
-1. Go to [Render Dashboard](https://dashboard.render.com/)
-2. Create Web Service:
-   - Branch: `backend`
-   - Build: `pip install -r requirements.txt`
-   - Start: `python app.py`
-   - Root: `backend`
-3. Create Background Worker:
-   - Branch: `backend`
-   - Build: `pip install -r requirements.txt`
-   - Start: `python transaction_monitor.py`
-   - Root: `backend`
-4. Add environment variables to both:
-   - `RPC_URL`
-   - `ADMIN_PRIVATE_KEY`
-   - `FRONTEND_URL`
-
-## 🔐 Environment Variables
-
-### Backend (.env)
-
-```env
-RPC_URL=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
-ADMIN_PRIVATE_KEY=your_escrow_wallet_private_key
-FRONTEND_URL=https://your-frontend.vercel.app
-VERIFICATION_CONFIRMATIONS=3
-FEE_PERCENTAGE=1
-POLL_INTERVAL=30
-```
-
-### Frontend (index.html)
+Before deploying, update `index.html` (line ~397):
 
 ```javascript
 const CONFIG = {
-    ESCROW_WALLET: '0x...', // Your escrow wallet address
+    ESCROW_WALLET: '0xYourEscrowWalletAddress', // Your escrow wallet
     FEE_PERCENTAGE: 1,
-    BACKEND_URL: 'https://your-backend.onrender.com/api'
+    BACKEND_URL: 'https://your-backend.onrender.com/api' // Your backend URL
 };
 ```
 
-## 🔄 Transaction Flow
+### Update Backend CORS
 
-1. **User Action:** Connects MetaMask, enters destination & amount
-2. **User → Escrow:** MetaMask sends funds to escrow wallet
-3. **Backend Monitors:** Background worker detects new transaction
-4. **Backend Verifies:** Waits for 3+ blockchain confirmations
-5. **Backend Forwards:** Auto-sends to destination (minus 1% fee)
-6. **Backend Verifies:** Confirms forward transaction (3+ confirmations)
-7. **Auto-Cleanup:** Deletes transaction records after 60s
+After deploying frontend:
+1. Go to your **Backend Web Service** on Render
+2. Update environment variable:
+   ```
+   FRONTEND_URL=https://secure-payment-frontend.onrender.com
+   ```
+3. Save and redeploy
 
-## 🛡️ Security
+## 📚 Files
 
-- ⚠️ Never commit `.env` files
-- ⚠️ Never share private keys
-- ✅ Use dedicated escrow wallet (not main wallet)
-- ✅ Keep escrow wallet balance minimal (just enough for gas)
-- ✅ Monitor backend logs regularly
-- ✅ Use HTTPS only in production
+- `index.html` - Main payment interface
+- `admin.html` - Admin dashboard for monitoring
+- `render.yaml` - Render deployment config
 
-## 📊 Monitoring
+## 🔧 Local Development
 
-Check backend logs on Render:
-- Web Service logs → API requests
-- Background Worker logs → Transaction processing
+Simply open `index.html` in your browser:
+```bash
+open index.html
+# or
+python -m http.server 8000
+# then visit http://localhost:8000
+```
 
-Key log messages:
-- `✅ Escrow VERIFIED` - Deposit confirmed
-- `✅ Forward transaction sent` - Payment forwarded
-- `🎉 BOTH TRANSACTIONS VERIFIED` - Complete!
-- `🗑️ AUTO-DELETED` - Records cleaned
+## ✨ Features
 
-## 🐛 Troubleshooting
+- ✅ MetaMask integration
+- ✅ Real-time transaction status
+- ✅ Automatic backend communication
+- ✅ Progress tracking
+- ✅ Blockchain verification display
 
-**"Backend not configured" error:**
-- Update `BACKEND_URL` in frontend `index.html`
+## 🔒 Security
 
-**Transactions stuck in pending:**
-- Check blockchain confirmations manually
-- Verify backend worker is running
-- Check RPC_URL is accessible
+- All sensitive operations on backend
+- Frontend only handles UI and MetaMask
+- No private keys in frontend code
+- HTTPS enforced by Render
 
-**Forward fails:**
-- Ensure escrow wallet has ETH for gas
-- Check ADMIN_PRIVATE_KEY is correct
-- Verify destination address is valid
-
-## 📄 License
+## 📝 License
 
 MIT
-
-## 🤝 Contributing
-
-Feel free to open issues or submit PRs!

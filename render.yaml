@@ -1,0 +1,13 @@
+services:
+  # Static Site for Frontend
+  - type: web
+    name: secure-payment-frontend
+    env: static
+    region: oregon
+    branch: frontend
+    buildCommand: echo "No build needed"
+    staticPublishPath: ./
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
