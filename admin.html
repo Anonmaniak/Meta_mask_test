@@ -57,6 +57,7 @@
             padding: 20px;
             border-radius: 12px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
         }
 
         .info h2 {
@@ -101,97 +102,406 @@
             left: 0;
             font-weight: bold;
         }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            color: #e83e8c;
+        }
+
+        a {
+            color: #667eea;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .transactions-section {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .status {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status.pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status.verified {
+            background: #cfe2ff;
+            color: #084298;
+        }
+
+        .status.completed {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.failed {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .no-data {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(102, 126, 234, 0.3);
+            border-radius: 50%;
+            border-top-color: #667eea;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .config-input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        .config-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .save-btn {
+            background: #28a745;
+        }
+
+        .error-msg {
+            background: #f8d7da;
+            border: 2px solid #dc3545;
+            color: #721c24;
+            padding: 12px;
+            border-radius: 6px;
+            margin-top: 10px;
+        }
+
+        .success-msg {
+            background: #d4edda;
+            border: 2px solid #28a745;
+            color: #155724;
+            padding: 12px;
+            border-radius: 6px;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
             <h1>🔐 Admin Dashboard</h1>
-            <p>Secure Payment Gateway - Privacy-First System</p>
+            <p>Secure Payment Gateway - Python Backend System</p>
         </header>
 
         <div class="note">
-            <h3>📝 Important Note</h3>
-            <p><strong>No admin dashboard needed!</strong> This system uses temporary storage for maximum privacy. All transaction data is automatically deleted after completion (60 seconds) or failure (5 minutes). There is no persistent data to monitor.</p>
+            <h3>📝 System Overview</h3>
+            <p><strong>Automated Python Backend:</strong> This system uses a Python background worker that automatically monitors, verifies, and forwards transactions. All data is temporarily stored and auto-deleted after completion.</p>
+        </div>
+
+        <div class="transactions-section">
+            <h2>🔄 Live Transactions</h2>
+            <p style="color: #666; margin-bottom: 15px;">Active transactions being processed by the backend worker</p>
+            
+            <div>
+                <label for="backendUrl">Backend API URL:</label>
+                <input 
+                    type="text" 
+                    id="backendUrl" 
+                    class="config-input" 
+                    placeholder="https://your-backend.onrender.com/api"
+                    value=""
+                >
+                <button onclick="loadTransactions()" style="width: 100%;">Load Transactions</button>
+                <div id="loadError" style="display: none;" class="error-msg"></div>
+                <div id="loadSuccess" style="display: none;" class="success-msg"></div>
+            </div>
+
+            <div id="transactionsTable">
+                <div class="loading">
+                    <p>Enter your backend URL and click "Load Transactions"</p>
+                </div>
+            </div>
         </div>
 
         <div class="info">
             <h2>How This System Works</h2>
             
             <p><strong>Step 1: User Payment</strong><br>
-            User sends full amount to your escrow wallet (one transaction only)</p>
+            User sends full amount to your escrow wallet via MetaMask</p>
 
-            <p><strong>Step 2: Blockchain Verification</strong><br>
-            System waits for 3 confirmations (~45-90 seconds on Sepolia)</p>
+            <p><strong>Step 2: Backend Monitors</strong><br>
+            Python background worker detects the new transaction</p>
 
-            <p><strong>Step 3: Automatic Forwarding</strong><br>
-            System forwards amount to destination minus 1% fee</p>
+            <p><strong>Step 3: Blockchain Verification</strong><br>
+            Worker waits for 3 confirmations (~45-90 seconds)</p>
 
-            <p><strong>Step 4: Data Deletion</strong><br>
+            <p><strong>Step 4: Automatic Forwarding</strong><br>
+            Worker sends to destination minus 1% fee (using escrow wallet private key)</p>
+
+            <p><strong>Step 5: Verify Forward</strong><br>
+            Worker confirms forward transaction has 3+ confirmations</p>
+
+            <p><strong>Step 6: Data Deletion</strong><br>
             All transaction records automatically deleted after 60 seconds</p>
         </div>
 
         <div class="security-features">
             <h3>🛡️ Privacy & Security Features</h3>
             <ul>
-                <li><strong>Single Transaction:</strong> User only sends to your wallet</li>
+                <li><strong>Single User Transaction:</strong> User only approves one MetaMask transaction</li>
+                <li><strong>Backend Auto-Forward:</strong> Second transaction sent automatically by Python worker</li>
                 <li><strong>Hidden Identity:</strong> Destination never sees sender's address</li>
                 <li><strong>Automatic Fee:</strong> 1% deducted when forwarding to destination</li>
-                <li><strong>Temporary Storage:</strong> All data in memory, not saved to disk</li>
+                <li><strong>Temporary Storage:</strong> Data stored in files, not permanent database</li>
                 <li><strong>Auto-Deletion:</strong> Completed transactions deleted after 60 seconds</li>
                 <li><strong>Failed Cleanup:</strong> Failed transactions deleted after 5 minutes</li>
-                <li><strong>No Database:</strong> Nothing persists between deployments</li>
-                <li><strong>Serverless:</strong> Runs entirely on Vercel (free tier)</li>
+                <li><strong>24/7 Monitoring:</strong> Background worker runs continuously on Render</li>
+                <li><strong>Full Verification:</strong> Both escrow and forward transactions verified before deletion</li>
             </ul>
         </div>
 
         <div class="info">
             <h2>Monitoring Your System</h2>
             
+            <p><strong>Render Logs (Recommended):</strong><br>
+            1. Go to <a href="https://dashboard.render.com" target="_blank">Render Dashboard</a><br>
+            2. Click your Background Worker service<br>
+            3. View real-time logs showing:<br>
+            &nbsp;&nbsp;- 🔍 Processing transactions<br>
+            &nbsp;&nbsp;- ✅ Escrow verified<br>
+            &nbsp;&nbsp;- 🚀 Forwarding to destination<br>
+            &nbsp;&nbsp;- 🎉 Both transactions verified<br>
+            &nbsp;&nbsp;- 🗑️ Auto-deleted</p>
+
             <p><strong>Check Blockchain Directly:</strong><br>
             Monitor your escrow wallet on Etherscan:<br>
             - <a href="https://sepolia.etherscan.io/" target="_blank">Sepolia Testnet</a><br>
             - <a href="https://etherscan.io/" target="_blank">Ethereum Mainnet</a></p>
 
-            <p><strong>View Vercel Logs:</strong><br>
-            1. Go to Vercel dashboard<br>
-            2. Click your project<br>
-            3. Click "Functions" tab<br>
-            4. See real-time logs of verification and forwarding</p>
+            <p><strong>API Health Check:</strong><br>
+            Visit: <code>https://your-backend.onrender.com/api/health</code></p>
 
-            <p><strong>Check Your Wallet Balance:</strong><br>
-            Your escrow wallet accumulates 1% fees from each transaction. Monitor it directly in MetaMask or on blockchain explorers.</p>
+            <p><strong>View All Transactions (API):</strong><br>
+            Visit: <code>https://your-backend.onrender.com/api/transactions</code></p>
         </div>
 
         <div class="info">
             <h2>Configuration</h2>
             
-            <p><strong>Your Escrow Wallet:</strong><br>
-            Update in <code>index.html</code>:<br>
-            <code>ESCROW_WALLET: '0xYourWalletAddress'</code></p>
+            <p><strong>Frontend (index.html):</strong><br>
+            Update line ~397:<br>
+            <code>ESCROW_WALLET: '0xYourWalletAddress'</code><br>
+            <code>BACKEND_URL: 'https://your-backend.onrender.com/api'</code></p>
 
-            <p><strong>Environment Variables (Vercel):</strong><br>
-            - <code>RPC_URL</code>: Your Alchemy API URL<br>
-            - <code>ADMIN_PRIVATE_KEY</code>: Your escrow wallet private key</p>
+            <p><strong>Backend Environment Variables (Render):</strong><br>
+            Set in both Web Service and Background Worker:<br>
+            - <code>RPC_URL</code>: Your Alchemy/Infura API URL<br>
+            - <code>ADMIN_PRIVATE_KEY</code>: Your escrow wallet private key<br>
+            - <code>FRONTEND_URL</code>: Your Vercel frontend URL<br>
+            - <code>VERIFICATION_CONFIRMATIONS</code>: 3 (default)<br>
+            - <code>FEE_PERCENTAGE</code>: 1 (default)<br>
+            - <code>POLL_INTERVAL</code>: 30 (seconds)</p>
 
             <p><strong>Fee Percentage:</strong><br>
-            Default is 1%. To change, update in both:<br>
-            - <code>index.html</code>: <code>FEE_PERCENTAGE: 1</code><br>
-            - <code>api/verify.js</code>: <code>FEE_PERCENTAGE: 1</code></p>
+            Default is 1%. To change, update <code>FEE_PERCENTAGE</code> in Render environment variables.</p>
         </div>
 
         <div class="security-features">
             <h3>💡 Best Practices</h3>
             <ul>
                 <li>Always test on Sepolia testnet first</li>
-                <li>Keep your private key secure (only in Vercel env vars)</li>
-                <li>Monitor your escrow wallet balance regularly</li>
-                <li>Check Vercel function logs for any errors</li>
+                <li>Keep private key secure (only in Render env vars, never in code)</li>
+                <li>Monitor Render logs regularly for errors</li>
                 <li>Ensure escrow wallet has ETH for gas fees</li>
-                <li>Start with small amounts to test the flow</li>
-                <li>Never share your escrow wallet private key</li>
+                <li>Check background worker is running (not sleeping)</li>
+                <li>Start with small amounts to test the full flow</li>
+                <li>Verify both escrow and forward transactions on blockchain</li>
+                <li>Monitor escrow wallet balance - it accumulates 1% fees</li>
             </ul>
         </div>
+
+        <div class="info">
+            <h2>Troubleshooting</h2>
+            
+            <p><strong>Transactions stuck in "pending":</strong><br>
+            - Check Render background worker is running<br>
+            - Verify RPC_URL is accessible<br>
+            - Check blockchain confirmations manually</p>
+
+            <p><strong>Forward fails:</strong><br>
+            - Ensure escrow wallet has ETH for gas<br>
+            - Check ADMIN_PRIVATE_KEY is correct<br>
+            - Verify destination address is valid</p>
+
+            <p><strong>Backend not responding:</strong><br>
+            - Render free tier sleeps after 15 min inactivity<br>
+            - First request may take 30-60 seconds to wake up<br>
+            - Check Web Service logs for errors</p>
+        </div>
     </div>
+
+    <script>
+        let backendUrl = '';
+
+        // Load from localStorage if available
+        if (localStorage.getItem('backendUrl')) {
+            document.getElementById('backendUrl').value = localStorage.getItem('backendUrl');
+        }
+
+        async function loadTransactions() {
+            const urlInput = document.getElementById('backendUrl');
+            backendUrl = urlInput.value.trim();
+            
+            // Clear messages
+            document.getElementById('loadError').style.display = 'none';
+            document.getElementById('loadSuccess').style.display = 'none';
+
+            if (!backendUrl) {
+                showError('Please enter backend URL');
+                return;
+            }
+
+            // Save to localStorage
+            localStorage.setItem('backendUrl', backendUrl);
+
+            // Show loading
+            document.getElementById('transactionsTable').innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading transactions...</p></div>';
+
+            try {
+                const response = await fetch(`${backendUrl}/transactions`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                displayTransactions(data.transactions || []);
+                showSuccess(`Loaded ${data.count || 0} transaction(s)`);
+
+            } catch (error) {
+                console.error('Error loading transactions:', error);
+                showError(`Failed to load: ${error.message}`);
+                document.getElementById('transactionsTable').innerHTML = '<div class="no-data">Failed to load transactions</div>';
+            }
+        }
+
+        function displayTransactions(transactions) {
+            if (!transactions || transactions.length === 0) {
+                document.getElementById('transactionsTable').innerHTML = '<div class="no-data">No active transactions</div>';
+                return;
+            }
+
+            let html = '<table><thead><tr>';
+            html += '<th>ID</th>';
+            html += '<th>Status</th>';
+            html += '<th>Amount</th>';
+            html += '<th>Destination</th>';
+            html += '<th>Created</th>';
+            html += '</tr></thead><tbody>';
+
+            transactions.forEach(tx => {
+                const amount = tx.amount || 0;
+                const status = tx.status || 'unknown';
+                const created = new Date(tx.createdAt).toLocaleString();
+                const dest = tx.destinationAddress ? `${tx.destinationAddress.substring(0, 10)}...` : 'N/A';
+
+                html += '<tr>';
+                html += `<td>${tx.id.substring(0, 8)}...</td>`;
+                html += `<td><span class="status ${status}">${status}</span></td>`;
+                html += `<td>${amount.toFixed(6)} ETH</td>`;
+                html += `<td>${dest}</td>`;
+                html += `<td>${created}</td>`;
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            document.getElementById('transactionsTable').innerHTML = html;
+        }
+
+        function showError(message) {
+            const el = document.getElementById('loadError');
+            el.textContent = message;
+            el.style.display = 'block';
+        }
+
+        function showSuccess(message) {
+            const el = document.getElementById('loadSuccess');
+            el.textContent = message;
+            el.style.display = 'block';
+        }
+
+        // Auto-refresh every 10 seconds if URL is set
+        setInterval(() => {
+            if (backendUrl) {
+                loadTransactions();
+            }
+        }, 10000);
+    </script>
 </body>
 </html>
