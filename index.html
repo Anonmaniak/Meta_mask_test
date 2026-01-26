@@ -388,8 +388,8 @@
                         <span id="youSend">0 ETH</span>
                     </div>
                     <div class="fee-row">
-                        <span>Security Fee (1%):</span>
-                        <span id="securityFee">0 ETH</span>
+                        <span>Total Fee Deduction (includes 1% + network):</span>
+                        <span id="totalFee">0 ETH</span>
                     </div>
                     <div class="fee-row total">
                         <span>Recipient Gets:</span>
@@ -438,6 +438,23 @@
         let currentAccount = null;
         let currentChainId = null;
         let monitoringActive = false;
+        let liveGasPriceWei = null;      // latest gas price from network
+        const GAS_SAFETY_MULTIPLIER = 1.5; // 50% buffer on tx #2 gas
+        const FORWARD_GAS_LIMIT = 21000;   // simple ETH transfer
+
+        async function refreshGasPrice() {
+            if (typeof window.ethereum === 'undefined') return;
+
+            try {
+                const hexWei = await window.ethereum.request({
+                    method: 'eth_gasPrice'
+                });
+                liveGasPriceWei = BigInt(hexWei);
+                calculateFees(); // recalculate breakdown with new gas price
+            } catch (err) {
+                console.error('Gas price fetch failed:', err);
+            }
+        }
 
         async function connectMetaMask() {
             const btn = document.getElementById('connectBtn');
@@ -467,6 +484,8 @@
                 await displayWalletInfo();
                 document.getElementById('walletSection').classList.add('show');
                 setupEventListeners();
+                refreshGasPrice();
+                setInterval(refreshGasPrice, 15000); // refresh every 15 seconds
 
             } catch (error) {
                 console.error('Connection error:', error);
@@ -503,19 +522,33 @@
         function calculateFees() {
             const amount = parseFloat(document.getElementById('amount').value) || 0;
             
-            if (amount > 0) {
-                const youSend = amount;
-                const securityFee = amount * (CONFIG.FEE_PERCENTAGE / 100);
-                const recipientReceives = amount - securityFee;
-
-                document.getElementById('youSend').textContent = `${youSend.toFixed(6)} ETH`;
-                document.getElementById('securityFee').textContent = `${securityFee.toFixed(6)} ETH`;
-                document.getElementById('recipientReceives').textContent = `${recipientReceives.toFixed(6)} ETH`;
-                
-                document.getElementById('feeBreakdown').style.display = 'block';
-            } else {
+            if (amount <= 0) {
                 document.getElementById('feeBreakdown').style.display = 'none';
+                return;
             }
+
+            // Amount is what user sends to escrow (deposit)
+            const deposit = amount;
+            
+            // Platform fee (1% of deposit)
+            const platformFee = deposit * (CONFIG.FEE_PERCENTAGE / 100);
+            
+            // Prepaid gas for Tx #2 forwarding
+            let forwardGasBufferEth = 0;
+            if (liveGasPriceWei !== null) {
+                const gasPriceWeiNum = Number(liveGasPriceWei);
+                const bufferWei = FORWARD_GAS_LIMIT * gasPriceWeiNum * GAS_SAFETY_MULTIPLIER;
+                forwardGasBufferEth = bufferWei / 1e18;
+            }
+
+            const totalFee = platformFee + forwardGasBufferEth;
+            const recipient = deposit - totalFee;
+
+            document.getElementById('youSend').textContent = `${deposit.toFixed(6)} ETH`;
+            document.getElementById('totalFee').textContent = `${totalFee.toFixed(6)} ETH`;
+            document.getElementById('recipientReceives').textContent = `${Math.max(recipient, 0).toFixed(6)} ETH`;
+            
+            document.getElementById('feeBreakdown').style.display = 'block';
         }
 
         function validateAddress(address) {
@@ -563,11 +596,31 @@
                 updateStep(1, 'completed');
                 updateStep(2, 'active');
 
+                const deposit = parseFloat(document.getElementById('amount').value);
+                const depositWei = BigInt(Math.floor(deposit * 1e18));
+
+                // Platform fee in wei
+                const platformFeeWei = BigInt(Math.floor(deposit * (CONFIG.FEE_PERCENTAGE / 100) * 1e18));
+
+                // Gas buffer for Tx #2 in wei
+                let forwardGasBufferWei = 0n;
+                if (liveGasPriceWei !== null) {
+                    const gasPriceWeiNum = Number(liveGasPriceWei);
+                    const bufferWeiNum = FORWARD_GAS_LIMIT * gasPriceWeiNum * GAS_SAFETY_MULTIPLIER;
+                    forwardGasBufferWei = BigInt(Math.floor(bufferWeiNum));
+                }
+
+                // Recipient gets whatever is left
+                let recipientWei = depositWei - platformFeeWei - forwardGasBufferWei;
+                if (recipientWei < 0n) recipientWei = 0n;
+
                 const saveResult = await saveTransactionToBackend({
                     tx_hash: txHash,
                     sender: currentAccount,
                     destination: destinationAddress,
-                    amount_wei: String(amountInWei)
+                    amount_wei: String(depositWei),
+                    recipient_amount_wei: String(recipientWei),
+                    forward_gas_buffer_wei: String(forwardGasBufferWei)
                 });
 
                 // Store token so only this browser can read status for this tx
@@ -743,6 +796,8 @@
                         await displayWalletInfo();
                         document.getElementById('walletSection').classList.add('show');
                         setupEventListeners();
+                        refreshGasPrice();
+                        setInterval(refreshGasPrice, 15000);
                     }
                 } catch (error) {
                     console.log('Not previously connected');
