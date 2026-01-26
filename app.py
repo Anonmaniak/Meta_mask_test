@@ -166,8 +166,8 @@ def process_pending_transaction(tx_hash, tx_data, current_block):
                     save_transactions()
                     return
 
-                # Validate: amount matches deposit
-                expected_amount = int(tx_data['deposit_wei'])
+                # Validate: amount matches total paid (recipient + fees)
+                expected_amount = int(tx_data['total_paid_wei'])
                 if int(tx.get('value', 0)) != expected_amount:
                     print(f"❌ INVALID: {tx_hash[:10]}... amount mismatch (expected {expected_amount}, got {tx.get('value')})")
                     with transactions_lock:
@@ -200,22 +200,32 @@ def process_verified_transaction(tx_hash, tx_data):
     try:
         destination = Web3.to_checksum_address(tx_data['destination'])
         
-        deposit_wei = int(tx_data['deposit_wei'])
+        total_paid_wei = int(tx_data['total_paid_wei'])
         recipient_wei = int(tx_data['recipient_amount_wei'])
         buffer_wei = int(tx_data.get('forward_gas_buffer_wei', '0'))
 
-        # Recompute 1% platform fee from deposit (don't trust client blindly)
-        platform_fee_wei = int(deposit_wei * FEE_PERCENTAGE / 100)
+        # Recompute 1% platform fee from recipient amount (server validation)
+        platform_fee_wei = int(recipient_wei * FEE_PERCENTAGE / 100)
 
-        # Ensure recipient is not more than what deposit can logically support
-        max_recipient = deposit_wei - platform_fee_wei - buffer_wei
+        # Validate: total_paid should equal recipient + platform_fee + buffer (with tolerance)
+        expected_total = recipient_wei + platform_fee_wei + buffer_wei
+        tolerance = int(0.001 * 1e18)  # 0.001 ETH tolerance for rounding
+        
+        if abs(total_paid_wei - expected_total) > tolerance:
+            print(f"⚠️  Warning: {tx_hash[:10]}... payment mismatch (paid {total_paid_wei}, expected ~{expected_total})")
+            # Continue anyway but log warning
+
+        # Ensure recipient is not more than what was paid minus fees
+        max_recipient = total_paid_wei - platform_fee_wei - buffer_wei
         if recipient_wei > max_recipient:
+            print(f"⚠️  Adjusting recipient amount from {recipient_wei} to {max_recipient}")
             recipient_wei = max(0, max_recipient)
 
         forward_amount = recipient_wei
 
         print(f"🚀 Forwarding {tx_hash[:10]}... to {destination[:10]}...")
-        print(f"   Amount: {w3.from_wei(forward_amount, 'ether')} ETH")
+        print(f"   Recipient gets: {w3.from_wei(forward_amount, 'ether')} ETH")
+        print(f"   Platform fee: {w3.from_wei(platform_fee_wei, 'ether')} ETH")
 
         # Get current gas price (dynamic, tracks network changes)
         gas_price = int(w3.eth.gas_price)
@@ -228,7 +238,7 @@ def process_verified_transaction(tx_hash, tx_data):
                   f"(needed {estimated_cost} wei, have {buffer_wei} wei)")
             with transactions_lock:
                 transactions[tx_hash]['status'] = 'forward_failed'
-                transactions[tx_hash]['error'] = 'Insufficient gas buffer for forward'
+                transactions[tx_hash]['error'] = f'Insufficient gas buffer: need {estimated_cost} wei, have {buffer_wei} wei'
             save_transactions()
             return
 
@@ -258,7 +268,8 @@ def process_verified_transaction(tx_hash, tx_data):
             transactions[tx_hash]['status'] = 'forwarding_pending'
             transactions[tx_hash]['forward_tx_hash'] = forward_hash_hex
             transactions[tx_hash]['forwarded_at'] = datetime.utcnow().isoformat()
-            transactions[tx_hash]['fee_amount'] = str(platform_fee_wei)
+            transactions[tx_hash]['platform_fee_wei'] = str(platform_fee_wei)
+            transactions[tx_hash]['actual_gas_cost_wei'] = str(estimated_cost)
         save_transactions()
 
     except Exception as e:
@@ -324,6 +335,10 @@ def health_check():
 def create_transaction():
     """Create new transaction record.
 
+    amount_wei = total paid by sender (recipient + platform fee + gas buffer)
+    recipient_amount_wei = what recipient will receive
+    forward_gas_buffer_wei = prepaid gas for forward transaction
+    
     Returns a client_token that is required to read this transaction status later.
     """
     if request.method == 'OPTIONS':
@@ -335,7 +350,7 @@ def create_transaction():
         tx_hash = data.get('tx_hash')
         sender = data.get('sender')
         destination = data.get('destination')
-        amount_wei = data.get('amount_wei')  # deposit from sender
+        amount_wei = data.get('amount_wei')  # total paid by sender
         recipient_amount_wei = data.get('recipient_amount_wei')
         forward_gas_buffer_wei = data.get('forward_gas_buffer_wei', '0')
 
@@ -362,7 +377,7 @@ def create_transaction():
                 'tx_hash': tx_hash,
                 'sender': sender_checksum,
                 'destination': destination_checksum,
-                'deposit_wei': str(amount_wei),
+                'total_paid_wei': str(amount_wei),
                 'recipient_amount_wei': str(recipient_amount_wei),
                 'forward_gas_buffer_wei': str(forward_gas_buffer_wei),
                 'status': 'pending',
@@ -373,6 +388,8 @@ def create_transaction():
         save_transactions()
 
         print(f"✅ Transaction saved: {tx_hash[:10]}... ({sender_checksum[:10]}... → {destination_checksum[:10]}...)")
+        print(f"   Total paid: {w3.from_wei(int(amount_wei), 'ether')} ETH")
+        print(f"   Recipient gets: {w3.from_wei(int(recipient_amount_wei), 'ether')} ETH")
 
         return jsonify({
             'success': True,
