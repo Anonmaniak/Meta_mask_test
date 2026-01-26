@@ -1,5 +1,5 @@
 services:
-  # Flask API Web Service
+  # Flask API Web Service (includes monitor thread in app.py)
   - type: web
     name: secure-payment-api
     env: python
@@ -18,23 +18,6 @@ services:
       - key: ADMIN_PRIVATE_KEY
         sync: false
       - key: FRONTEND_URL
-        sync: false
-  
-  # Background Transaction Monitor
-  - type: worker
-    name: transaction-monitor
-    env: python
-    region: oregon
-    branch: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: python transaction_monitor.py
-    plan: free
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
-      - key: RPC_URL
-        sync: false
-      - key: ADMIN_PRIVATE_KEY
         sync: false
       - key: VERIFICATION_CONFIRMATIONS
         value: 3

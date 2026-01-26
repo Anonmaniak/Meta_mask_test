@@ -89,18 +89,18 @@ def monitor_transactions():
     """Background thread to monitor and process transactions"""
     print("\n🤖 Transaction Monitor Started (Background Thread)")
     print("⏳ Monitoring for transactions...\n")
-    
+
     while True:
         try:
             current_block = w3.eth.block_number
-            
+
             # Process each transaction (thread-safe)
             with transactions_lock:
                 tx_list = list(transactions.items())
-            
+
             for tx_hash, tx_data in tx_list:
                 status = tx_data.get('status')
-                
+
                 # Process based on status
                 if status == 'pending':
                     process_pending_transaction(tx_hash, tx_data, current_block)
@@ -110,10 +110,10 @@ def monitor_transactions():
                     process_forwarding_transaction(tx_hash, tx_data, current_block)
                 elif status == 'complete':
                     auto_delete_completed(tx_hash, tx_data)
-            
+
             # Sleep before next check
             time.sleep(POLL_INTERVAL)
-            
+
         except Exception as e:
             print(f"❌ Monitor error: {e}")
             time.sleep(POLL_INTERVAL)
@@ -122,85 +122,87 @@ def process_pending_transaction(tx_hash, tx_data, current_block):
     """Check if pending transaction is verified with STRICT validation"""
     try:
         receipt = w3.eth.get_transaction_receipt(tx_hash)
-        
+
         if receipt and receipt['status'] == 1:
             confirmations = current_block - receipt['blockNumber']
-            
+
             if confirmations >= VERIFICATION_CONFIRMATIONS:
                 # STRICT VERIFICATION: Fetch original transaction
                 tx = w3.eth.get_transaction(tx_hash)
-                
+
                 # Validate: to address matches escrow
-                if tx['to'].lower() != escrow_address.lower():
+                if (tx.get('to') or '').lower() != escrow_address.lower():
                     print(f"❌ INVALID: {tx_hash[:10]}... sent to wrong address")
                     with transactions_lock:
                         transactions[tx_hash]['status'] = 'failed'
                         transactions[tx_hash]['error'] = 'Transaction sent to wrong address'
                     save_transactions()
                     return
-                
+
                 # Validate: from address matches sender
-                if tx['from'].lower() != tx_data['sender'].lower():
+                if (tx.get('from') or '').lower() != tx_data['sender'].lower():
                     print(f"❌ INVALID: {tx_hash[:10]}... from address mismatch")
                     with transactions_lock:
                         transactions[tx_hash]['status'] = 'failed'
                         transactions[tx_hash]['error'] = 'Sender address mismatch'
                     save_transactions()
                     return
-                
+
                 # Validate: amount matches
                 expected_amount = int(tx_data['amount_wei'])
-                if tx['value'] != expected_amount:
-                    print(f"❌ INVALID: {tx_hash[:10]}... amount mismatch (expected {expected_amount}, got {tx['value']})")
+                if int(tx.get('value', 0)) != expected_amount:
+                    print(f"❌ INVALID: {tx_hash[:10]}... amount mismatch (expected {expected_amount}, got {tx.get('value')})")
                     with transactions_lock:
                         transactions[tx_hash]['status'] = 'failed'
-                        transactions[tx_hash]['error'] = f'Amount mismatch: expected {expected_amount} wei, got {tx["value"]} wei'
+                        transactions[tx_hash]['error'] = f'Amount mismatch: expected {expected_amount} wei, got {tx.get("value")} wei'
                     save_transactions()
                     return
-                
+
                 print(f"✅ Escrow VERIFIED: {tx_hash[:10]}... ({confirmations} confirmations) - All checks passed")
                 with transactions_lock:
                     transactions[tx_hash]['status'] = 'verified'
                     transactions[tx_hash]['escrow_block'] = receipt['blockNumber']
                     transactions[tx_hash]['verified_at'] = datetime.utcnow().isoformat()
                 save_transactions()
-                
+
     except Exception as e:
         print(f"⚠️  Error checking {tx_hash[:10]}...: {e}")
 
 def process_verified_transaction(tx_hash, tx_data):
     """Forward verified transaction to destination"""
     try:
-        destination = tx_data['destination']
+        # IMPORTANT: eth-account expects checksum addresses for signing
+        destination = Web3.to_checksum_address(tx_data['destination'])
         amount_wei = int(tx_data['amount_wei'])
-        
+
         # Calculate amount after fee
         fee_amount = int(amount_wei * FEE_PERCENTAGE / 100)
         forward_amount = amount_wei - fee_amount
-        
+
         print(f"🚀 Forwarding {tx_hash[:10]}... to {destination[:10]}...")
         print(f"   Amount: {w3.from_wei(forward_amount, 'ether')} ETH (fee: {w3.from_wei(fee_amount, 'ether')} ETH)")
-        
+
         # Get PENDING nonce (important for multiple transactions)
         nonce = w3.eth.get_transaction_count(escrow_address, 'pending')
-        
+
         # Build forward transaction
+        # NOTE: do NOT include 'from' field when signing with eth-account
         forward_tx = {
-            'from': escrow_address,
             'to': destination,
             'value': forward_amount,
             'nonce': nonce,
             'gas': 21000,
-            'gasPrice': w3.eth.gas_price
+            'gasPrice': int(w3.eth.gas_price),
+            'chainId': int(w3.eth.chain_id),
         }
-        
+
         # Sign and send
         signed_forward = w3.eth.account.sign_transaction(forward_tx, ADMIN_PRIVATE_KEY)
         forward_hash = w3.eth.send_raw_transaction(signed_forward.raw_transaction)
         forward_hash_hex = forward_hash.hex()
-        
+
         print(f"✅ Forward transaction sent: {forward_hash_hex}")
-        
+
         # Update transaction (thread-safe)
         with transactions_lock:
             transactions[tx_hash]['status'] = 'forwarding_pending'
@@ -208,7 +210,7 @@ def process_verified_transaction(tx_hash, tx_data):
             transactions[tx_hash]['forwarded_at'] = datetime.utcnow().isoformat()
             transactions[tx_hash]['fee_amount'] = str(fee_amount)
         save_transactions()
-        
+
     except Exception as e:
         print(f"❌ Forward error for {tx_hash[:10]}...: {e}")
         with transactions_lock:
@@ -222,12 +224,12 @@ def process_forwarding_transaction(tx_hash, tx_data, current_block):
         forward_hash = tx_data.get('forward_tx_hash')
         if not forward_hash:
             return
-        
+
         receipt = w3.eth.get_transaction_receipt(forward_hash)
-        
+
         if receipt and receipt['status'] == 1:
             confirmations = current_block - receipt['blockNumber']
-            
+
             if confirmations >= VERIFICATION_CONFIRMATIONS:
                 print(f"🎉 COMPLETE: {tx_hash[:10]}... (forward verified)")
                 with transactions_lock:
@@ -243,13 +245,13 @@ def auto_delete_completed(tx_hash, tx_data):
     try:
         completed_at = datetime.fromisoformat(tx_data.get('completed_at', ''))
         elapsed = (datetime.utcnow() - completed_at).total_seconds()
-        
+
         if elapsed > 60:
             print(f"🗑️  AUTO-DELETED: {tx_hash[:10]}... (completed {int(elapsed)}s ago)")
             with transactions_lock:
                 del transactions[tx_hash]
             save_transactions()
-    except Exception as e:
+    except Exception:
         pass
 
 # ===========================
@@ -273,46 +275,50 @@ def create_transaction():
     """Create new transaction record"""
     if request.method == 'OPTIONS':
         return '', 204
-    
+
     try:
         data = request.get_json()
-        
+
         tx_hash = data.get('tx_hash')
         sender = data.get('sender')
         destination = data.get('destination')
         amount_wei = data.get('amount_wei')
-        
+
         if not all([tx_hash, sender, destination, amount_wei]):
             return jsonify({'error': 'Missing required fields'}), 400
-        
+
         # Validate addresses
         if not Web3.is_address(sender):
             return jsonify({'error': 'Invalid sender address'}), 400
-        
+
         if not Web3.is_address(destination):
             return jsonify({'error': 'Invalid destination address'}), 400
-        
+
+        # Normalize to checksum to prevent downstream signing issues
+        sender_checksum = Web3.to_checksum_address(sender)
+        destination_checksum = Web3.to_checksum_address(destination)
+
         # Store transaction (thread-safe)
         with transactions_lock:
             transactions[tx_hash] = {
                 'tx_hash': tx_hash,
-                'sender': sender,
-                'destination': destination,
+                'sender': sender_checksum,
+                'destination': destination_checksum,
                 'amount_wei': str(amount_wei),
                 'status': 'pending',
                 'created_at': datetime.utcnow().isoformat()
             }
-        
+
         save_transactions()
-        
-        print(f"✅ Transaction saved: {tx_hash[:10]}... ({sender[:10]}... → {destination[:10]}...)")
-        
+
+        print(f"✅ Transaction saved: {tx_hash[:10]}... ({sender_checksum[:10]}... → {destination_checksum[:10]}...)")
+
         return jsonify({
             'success': True,
             'message': 'Transaction recorded',
             'tx_hash': tx_hash
         })
-        
+
     except Exception as e:
         print(f"❌ Error creating transaction: {e}")
         return jsonify({'error': str(e)}), 500
@@ -324,11 +330,11 @@ def get_transaction(tx_hash):
         with transactions_lock:
             if tx_hash not in transactions:
                 return jsonify({'error': 'Transaction not found'}), 404
-            
+
             tx_data = transactions[tx_hash].copy()
-        
+
         return jsonify(tx_data)
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -350,10 +356,10 @@ if __name__ == '__main__':
     # Start monitor in background thread
     monitor_thread = threading.Thread(target=monitor_transactions, daemon=True)
     monitor_thread.start()
-    
+
     # Start Flask app
     port = int(os.getenv('PORT', 10000))
     print(f"\n🚀 Starting Secure Payment Backend on port {port}")
     print(f"🌍 Frontend URL: {FRONTEND_URL}\n")
-    
+
     app.run(host='0.0.0.0', port=port, debug=False)
