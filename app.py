@@ -51,8 +51,9 @@ VERIFICATION_CONFIRMATIONS = int(os.getenv('VERIFICATION_CONFIRMATIONS', 3))
 FEE_PERCENTAGE = float(os.getenv('FEE_PERCENTAGE', 1))
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 30))
 
-# In-memory storage (use a database in production)
+# Thread-safe storage
 transactions = {}
+transactions_lock = threading.Lock()
 
 # Data directory for persistence
 DATA_DIR = os.path.join(os.getcwd(), 'data')
@@ -72,10 +73,11 @@ if os.path.exists(TRANSACTIONS_FILE):
         transactions = {}
 
 def save_transactions():
-    """Save transactions to disk"""
+    """Save transactions to disk (thread-safe)"""
     try:
-        with open(TRANSACTIONS_FILE, 'w') as f:
-            json.dump(transactions, f, indent=2)
+        with transactions_lock:
+            with open(TRANSACTIONS_FILE, 'w') as f:
+                json.dump(transactions, f, indent=2)
     except Exception as e:
         print(f"⚠️  Could not save transactions: {e}")
 
@@ -92,8 +94,11 @@ def monitor_transactions():
         try:
             current_block = w3.eth.block_number
             
-            # Process each transaction
-            for tx_hash, tx_data in list(transactions.items()):
+            # Process each transaction (thread-safe)
+            with transactions_lock:
+                tx_list = list(transactions.items())
+            
+            for tx_hash, tx_data in tx_list:
                 status = tx_data.get('status')
                 
                 # Process based on status
@@ -114,7 +119,7 @@ def monitor_transactions():
             time.sleep(POLL_INTERVAL)
 
 def process_pending_transaction(tx_hash, tx_data, current_block):
-    """Check if pending transaction is verified"""
+    """Check if pending transaction is verified with STRICT validation"""
     try:
         receipt = w3.eth.get_transaction_receipt(tx_hash)
         
@@ -122,11 +127,44 @@ def process_pending_transaction(tx_hash, tx_data, current_block):
             confirmations = current_block - receipt['blockNumber']
             
             if confirmations >= VERIFICATION_CONFIRMATIONS:
-                print(f"✅ Escrow VERIFIED: {tx_hash[:10]}... ({confirmations} confirmations)")
-                transactions[tx_hash]['status'] = 'verified'
-                transactions[tx_hash]['escrow_block'] = receipt['blockNumber']
-                transactions[tx_hash]['verified_at'] = datetime.utcnow().isoformat()
+                # STRICT VERIFICATION: Fetch original transaction
+                tx = w3.eth.get_transaction(tx_hash)
+                
+                # Validate: to address matches escrow
+                if tx['to'].lower() != escrow_address.lower():
+                    print(f"❌ INVALID: {tx_hash[:10]}... sent to wrong address")
+                    with transactions_lock:
+                        transactions[tx_hash]['status'] = 'failed'
+                        transactions[tx_hash]['error'] = 'Transaction sent to wrong address'
+                    save_transactions()
+                    return
+                
+                # Validate: from address matches sender
+                if tx['from'].lower() != tx_data['sender'].lower():
+                    print(f"❌ INVALID: {tx_hash[:10]}... from address mismatch")
+                    with transactions_lock:
+                        transactions[tx_hash]['status'] = 'failed'
+                        transactions[tx_hash]['error'] = 'Sender address mismatch'
+                    save_transactions()
+                    return
+                
+                # Validate: amount matches
+                expected_amount = int(tx_data['amount_wei'])
+                if tx['value'] != expected_amount:
+                    print(f"❌ INVALID: {tx_hash[:10]}... amount mismatch (expected {expected_amount}, got {tx['value']})")
+                    with transactions_lock:
+                        transactions[tx_hash]['status'] = 'failed'
+                        transactions[tx_hash]['error'] = f'Amount mismatch: expected {expected_amount} wei, got {tx["value"]} wei'
+                    save_transactions()
+                    return
+                
+                print(f"✅ Escrow VERIFIED: {tx_hash[:10]}... ({confirmations} confirmations) - All checks passed")
+                with transactions_lock:
+                    transactions[tx_hash]['status'] = 'verified'
+                    transactions[tx_hash]['escrow_block'] = receipt['blockNumber']
+                    transactions[tx_hash]['verified_at'] = datetime.utcnow().isoformat()
                 save_transactions()
+                
     except Exception as e:
         print(f"⚠️  Error checking {tx_hash[:10]}...: {e}")
 
@@ -143,8 +181,8 @@ def process_verified_transaction(tx_hash, tx_data):
         print(f"🚀 Forwarding {tx_hash[:10]}... to {destination[:10]}...")
         print(f"   Amount: {w3.from_wei(forward_amount, 'ether')} ETH (fee: {w3.from_wei(fee_amount, 'ether')} ETH)")
         
-        # Get current nonce
-        nonce = w3.eth.get_transaction_count(escrow_address)
+        # Get PENDING nonce (important for multiple transactions)
+        nonce = w3.eth.get_transaction_count(escrow_address, 'pending')
         
         # Build forward transaction
         forward_tx = {
@@ -163,17 +201,19 @@ def process_verified_transaction(tx_hash, tx_data):
         
         print(f"✅ Forward transaction sent: {forward_hash_hex}")
         
-        # Update transaction
-        transactions[tx_hash]['status'] = 'forwarding_pending'
-        transactions[tx_hash]['forward_tx_hash'] = forward_hash_hex
-        transactions[tx_hash]['forwarded_at'] = datetime.utcnow().isoformat()
-        transactions[tx_hash]['fee_amount'] = str(fee_amount)
+        # Update transaction (thread-safe)
+        with transactions_lock:
+            transactions[tx_hash]['status'] = 'forwarding_pending'
+            transactions[tx_hash]['forward_tx_hash'] = forward_hash_hex
+            transactions[tx_hash]['forwarded_at'] = datetime.utcnow().isoformat()
+            transactions[tx_hash]['fee_amount'] = str(fee_amount)
         save_transactions()
         
     except Exception as e:
         print(f"❌ Forward error for {tx_hash[:10]}...: {e}")
-        transactions[tx_hash]['status'] = 'forward_failed'
-        transactions[tx_hash]['error'] = str(e)
+        with transactions_lock:
+            transactions[tx_hash]['status'] = 'forward_failed'
+            transactions[tx_hash]['error'] = str(e)
         save_transactions()
 
 def process_forwarding_transaction(tx_hash, tx_data, current_block):
@@ -190,9 +230,10 @@ def process_forwarding_transaction(tx_hash, tx_data, current_block):
             
             if confirmations >= VERIFICATION_CONFIRMATIONS:
                 print(f"🎉 COMPLETE: {tx_hash[:10]}... (forward verified)")
-                transactions[tx_hash]['status'] = 'complete'
-                transactions[tx_hash]['forward_block'] = receipt['blockNumber']
-                transactions[tx_hash]['completed_at'] = datetime.utcnow().isoformat()
+                with transactions_lock:
+                    transactions[tx_hash]['status'] = 'complete'
+                    transactions[tx_hash]['forward_block'] = receipt['blockNumber']
+                    transactions[tx_hash]['completed_at'] = datetime.utcnow().isoformat()
                 save_transactions()
     except Exception as e:
         print(f"⚠️  Error checking forward {tx_hash[:10]}...: {e}")
@@ -205,7 +246,8 @@ def auto_delete_completed(tx_hash, tx_data):
         
         if elapsed > 60:
             print(f"🗑️  AUTO-DELETED: {tx_hash[:10]}... (completed {int(elapsed)}s ago)")
-            del transactions[tx_hash]
+            with transactions_lock:
+                del transactions[tx_hash]
             save_transactions()
     except Exception as e:
         pass
@@ -222,7 +264,8 @@ def health_check():
         'timestamp': datetime.utcnow().isoformat(),
         'service': 'secure-payment-backend',
         'blockchain_connected': w3.is_connected(),
-        'escrow_address': escrow_address
+        'escrow_address': escrow_address,
+        'current_block': w3.eth.block_number
     })
 
 @app.route('/api/transaction', methods=['POST', 'OPTIONS'])
@@ -242,15 +285,23 @@ def create_transaction():
         if not all([tx_hash, sender, destination, amount_wei]):
             return jsonify({'error': 'Missing required fields'}), 400
         
-        # Store transaction
-        transactions[tx_hash] = {
-            'tx_hash': tx_hash,
-            'sender': sender,
-            'destination': destination,
-            'amount_wei': str(amount_wei),
-            'status': 'pending',
-            'created_at': datetime.utcnow().isoformat()
-        }
+        # Validate addresses
+        if not Web3.is_address(sender):
+            return jsonify({'error': 'Invalid sender address'}), 400
+        
+        if not Web3.is_address(destination):
+            return jsonify({'error': 'Invalid destination address'}), 400
+        
+        # Store transaction (thread-safe)
+        with transactions_lock:
+            transactions[tx_hash] = {
+                'tx_hash': tx_hash,
+                'sender': sender,
+                'destination': destination,
+                'amount_wei': str(amount_wei),
+                'status': 'pending',
+                'created_at': datetime.utcnow().isoformat()
+            }
         
         save_transactions()
         
@@ -270,10 +321,13 @@ def create_transaction():
 def get_transaction(tx_hash):
     """Get transaction status"""
     try:
-        if tx_hash not in transactions:
-            return jsonify({'error': 'Transaction not found'}), 404
+        with transactions_lock:
+            if tx_hash not in transactions:
+                return jsonify({'error': 'Transaction not found'}), 404
+            
+            tx_data = transactions[tx_hash].copy()
         
-        return jsonify(transactions[tx_hash])
+        return jsonify(tx_data)
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -282,7 +336,9 @@ def get_transaction(tx_hash):
 def get_all_transactions():
     """Get all transactions"""
     try:
-        return jsonify(list(transactions.values()))
+        with transactions_lock:
+            tx_list = list(transactions.values())
+        return jsonify(tx_list)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
