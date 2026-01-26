@@ -460,14 +460,15 @@
     <script>
         // Configuration - UPDATE THESE!
         const CONFIG = {
-            ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33', // Your escrow wallet
-            FEE_PERCENTAGE: 1, // 1% security fee
-            BACKEND_URL: 'https://your-backend-url.onrender.com/api' // UPDATE: Your Python backend URL
+            ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
+            FEE_PERCENTAGE: 1,
+            BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api' // Your deployed backend
         };
 
         let currentAccount = null;
         let currentChainId = null;
-        let currentTransactionId = null;
+        let currentTransactionHash = null;
+        let monitoringActive = false;
 
         // Connect to MetaMask
         async function connectMetaMask() {
@@ -586,14 +587,15 @@
                 
                 // Step 1: Send to escrow
                 updateStep(1, 'active');
-                const amountInWei = '0x' + Math.floor(amount * Math.pow(10, 18)).toString(16);
+                const amountInWei = Math.floor(amount * Math.pow(10, 18));
+                const amountInHex = '0x' + amountInWei.toString(16);
 
                 const txHash = await window.ethereum.request({
                     method: 'eth_sendTransaction',
                     params: [{
                         from: currentAccount,
                         to: CONFIG.ESCROW_WALLET,
-                        value: amountInWei,
+                        value: amountInHex,
                         gas: '0x5208'
                     }]
                 });
@@ -603,23 +605,19 @@
                 updateStep(2, 'active');
 
                 // Save to backend
-                const transactionData = {
-                    senderAddress: currentAccount,
-                    destinationAddress: destinationAddress,
-                    amount: amount,
-                    securityFee: amount * (CONFIG.FEE_PERCENTAGE / 100),
-                    escrowTxHash: txHash,
-                    escrowWallet: CONFIG.ESCROW_WALLET,
-                    chainId: currentChainId
-                };
+                await saveTransactionToBackend({
+                    tx_hash: txHash,
+                    sender: currentAccount,
+                    destination: destinationAddress,
+                    amount_wei: String(amountInWei)
+                });
 
-                const result = await saveTransaction(transactionData);
-                currentTransactionId = result.transaction.id;
-
+                currentTransactionHash = txHash;
                 updateStatus('✅ Payment in escrow - Backend processing automatically...', 'processing');
 
                 // Start monitoring
-                setTimeout(() => monitorTransaction(currentTransactionId), 15000);
+                monitoringActive = true;
+                setTimeout(() => monitorTransaction(txHash), 15000);
 
                 // Clear form
                 document.getElementById('destinationAddress').value = '';
@@ -638,72 +636,98 @@
                 
                 updateStatus(errorMsg, 'error');
                 resetSteps();
+                monitoringActive = false;
             } finally {
                 document.getElementById('paymentBtn').disabled = false;
             }
         }
 
-        // Save transaction to backend
-        async function saveTransaction(data) {
+        // Save transaction to backend (FIXED)
+        async function saveTransactionToBackend(data) {
             const response = await fetch(`${CONFIG.BACKEND_URL}/transaction`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
             });
 
-            if (!response.ok) throw new Error('Failed to save transaction');
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Failed to save transaction');
+            }
+            
             return await response.json();
         }
 
-        // Monitor transaction status
-        async function monitorTransaction(txId) {
+        // Monitor transaction status (FIXED)
+        async function monitorTransaction(txHash) {
+            if (!monitoringActive) return;
+
             try {
-                const response = await fetch(`${CONFIG.BACKEND_URL}/verify`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ txId })
-                });
+                const response = await fetch(`${CONFIG.BACKEND_URL}/transaction/${txHash}`);
 
-                if (response.ok) {
-                    const result = await response.json();
-                    const status = result.transaction.status;
-                    
-                    console.log('Status:', status);
-
-                    if (status === 'pending') {
-                        updateStep(2, 'active');
-                        updateStatus('⏳ Backend verifying escrow transaction...', 'processing');
-                        setTimeout(() => monitorTransaction(txId), 20000);
-                    } 
-                    else if (status === 'verified') {
-                        updateStep(2, 'completed');
-                        updateStep(3, 'active');
-                        updateStatus('✅ Verified! Backend forwarding to destination...', 'processing');
-                        setTimeout(() => monitorTransaction(txId), 10000);
-                    }
-                    else if (status === 'forwarding_pending') {
-                        updateStep(3, 'completed');
-                        updateStep(4, 'active');
-                        updateStatus('⏳ Backend verifying forward transaction...', 'processing');
-                        setTimeout(() => monitorTransaction(txId), 20000);
-                    }
-                    else if (status === 'completed') {
-                        updateStep(4, 'completed');
-                        updateStep(5, 'completed');
-                        updateStatus('🎉 Complete! Backend deleting records...', 'connected');
-                        setTimeout(() => {
-                            resetSteps();
-                            document.getElementById('processingSteps').classList.remove('show');
-                            refreshBalance();
-                        }, 5000);
-                    }
-                    else if (status === 'failed') {
-                        updateStatus('❌ Transaction failed', 'error');
+                if (response.status === 404) {
+                    // Transaction completed and deleted
+                    console.log('Transaction completed and cleaned up');
+                    updateStep(5, 'completed');
+                    updateStatus('🎉 Complete! Records cleaned up.', 'connected');
+                    monitoringActive = false;
+                    setTimeout(() => {
                         resetSteps();
-                    }
+                        document.getElementById('processingSteps').classList.remove('show');
+                        refreshBalance();
+                    }, 3000);
+                    return;
+                }
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch transaction status');
+                }
+
+                const tx = await response.json();
+                const status = tx.status;
+                
+                console.log('Status:', status, tx);
+
+                if (status === 'pending') {
+                    updateStep(2, 'active');
+                    updateStatus('⏳ Backend verifying escrow transaction...', 'processing');
+                    setTimeout(() => monitorTransaction(txHash), 15000);
+                } 
+                else if (status === 'verified') {
+                    updateStep(2, 'completed');
+                    updateStep(3, 'active');
+                    updateStatus('✅ Verified! Backend forwarding to destination...', 'processing');
+                    setTimeout(() => monitorTransaction(txHash), 10000);
+                }
+                else if (status === 'forwarding_pending') {
+                    updateStep(3, 'completed');
+                    updateStep(4, 'active');
+                    updateStatus('⏳ Backend verifying forward transaction...', 'processing');
+                    setTimeout(() => monitorTransaction(txHash), 15000);
+                }
+                else if (status === 'complete') {
+                    updateStep(4, 'completed');
+                    updateStep(5, 'completed');
+                    updateStatus('🎉 Complete! Backend deleting records...', 'connected');
+                    monitoringActive = false;
+                    setTimeout(() => {
+                        resetSteps();
+                        document.getElementById('processingSteps').classList.remove('show');
+                        refreshBalance();
+                    }, 5000);
+                }
+                else if (status === 'failed' || status === 'forward_failed') {
+                    const errorMsg = tx.error || 'Transaction failed';
+                    updateStatus(`❌ ${errorMsg}`, 'error');
+                    resetSteps();
+                    monitoringActive = false;
                 }
             } catch (error) {
                 console.error('Monitor error:', error);
+                // Retry on network errors
+                if (monitoringActive) {
+                    setTimeout(() => monitorTransaction(txHash), 20000);
+                }
             }
         }
 
