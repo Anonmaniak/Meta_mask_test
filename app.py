@@ -168,6 +168,15 @@ def process_pending_transaction(tx_hash, tx_data, current_block):
     except Exception as e:
         print(f"⚠️  Error checking {tx_hash[:10]}...: {e}")
 
+def _get_signed_raw_tx(signed_tx):
+    """Compatibility across eth-account/web3.py versions."""
+    # Some versions expose rawTransaction (camelCase), others raw_transaction (snake_case)
+    if hasattr(signed_tx, 'rawTransaction'):
+        return signed_tx.rawTransaction
+    if hasattr(signed_tx, 'raw_transaction'):
+        return signed_tx.raw_transaction
+    raise AttributeError("SignedTransaction has no rawTransaction/raw_transaction attribute")
+
 def process_verified_transaction(tx_hash, tx_data):
     """Forward verified transaction to destination"""
     try:
@@ -198,7 +207,8 @@ def process_verified_transaction(tx_hash, tx_data):
 
         # Sign and send
         signed_forward = w3.eth.account.sign_transaction(forward_tx, ADMIN_PRIVATE_KEY)
-        forward_hash = w3.eth.send_raw_transaction(signed_forward.raw_transaction)
+        raw_tx = _get_signed_raw_tx(signed_forward)
+        forward_hash = w3.eth.send_raw_transaction(raw_tx)
         forward_hash_hex = forward_hash.hex()
 
         print(f"✅ Forward transaction sent: {forward_hash_hex}")
