@@ -369,11 +369,11 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="amount">Amount (ETH)</label>
+                    <label for="amount">Amount Recipient Gets (ETH)</label>
                     <input 
                         type="number" 
                         id="amount" 
-                        placeholder="Enter amount"
+                        placeholder="Enter amount recipient will receive"
                         step="0.0001"
                         min="0.0001"
                         oninput="calculateFees()"
@@ -520,20 +520,18 @@
         }
 
         function calculateFees() {
-            const amount = parseFloat(document.getElementById('amount').value) || 0;
+            const recipientAmount = parseFloat(document.getElementById('amount').value) || 0;
             
-            if (amount <= 0) {
+            if (recipientAmount <= 0) {
                 document.getElementById('feeBreakdown').style.display = 'none';
                 return;
             }
 
-            // Amount is what user sends to escrow (deposit)
-            const deposit = amount;
+            // User input = what recipient receives
+            // Calculate platform fee (1% of recipient amount)
+            const platformFee = recipientAmount * (CONFIG.FEE_PERCENTAGE / 100);
             
-            // Platform fee (1% of deposit)
-            const platformFee = deposit * (CONFIG.FEE_PERCENTAGE / 100);
-            
-            // Prepaid gas for Tx #2 forwarding
+            // Calculate prepaid gas for Tx #2 forwarding
             let forwardGasBufferEth = 0;
             if (liveGasPriceWei !== null) {
                 const gasPriceWeiNum = Number(liveGasPriceWei);
@@ -542,11 +540,11 @@
             }
 
             const totalFee = platformFee + forwardGasBufferEth;
-            const recipient = deposit - totalFee;
+            const totalToSend = recipientAmount + totalFee;
 
-            document.getElementById('youSend').textContent = `${deposit.toFixed(6)} ETH`;
+            document.getElementById('youSend').textContent = `${totalToSend.toFixed(6)} ETH`;
             document.getElementById('totalFee').textContent = `${totalFee.toFixed(6)} ETH`;
-            document.getElementById('recipientReceives').textContent = `${Math.max(recipient, 0).toFixed(6)} ETH`;
+            document.getElementById('recipientReceives').textContent = `${recipientAmount.toFixed(6)} ETH`;
             
             document.getElementById('feeBreakdown').style.display = 'block';
         }
@@ -557,7 +555,7 @@
 
         async function initiatePayment() {
             const destinationAddress = document.getElementById('destinationAddress').value.trim();
-            const amount = parseFloat(document.getElementById('amount').value);
+            const recipientAmount = parseFloat(document.getElementById('amount').value);
 
             document.getElementById('addressError').style.display = 'none';
             document.getElementById('amountError').style.display = 'none';
@@ -568,7 +566,7 @@
                 return;
             }
 
-            if (!amount || amount <= 0) {
+            if (!recipientAmount || recipientAmount <= 0) {
                 document.getElementById('amountError').textContent = 'Please enter a valid amount';
                 document.getElementById('amountError').style.display = 'block';
                 return;
@@ -580,27 +578,12 @@
                 document.getElementById('processingSteps').classList.add('show');
                 
                 updateStep(1, 'active');
-                const amountInWei = Math.floor(amount * Math.pow(10, 18));
-                const amountInHex = '0x' + amountInWei.toString(16);
 
-                const txHash = await window.ethereum.request({
-                    method: 'eth_sendTransaction',
-                    params: [{
-                        from: currentAccount,
-                        to: CONFIG.ESCROW_WALLET,
-                        value: amountInHex,
-                        gas: '0x5208'
-                    }]
-                });
-
-                updateStep(1, 'completed');
-                updateStep(2, 'active');
-
-                const deposit = parseFloat(document.getElementById('amount').value);
-                const depositWei = BigInt(Math.floor(deposit * 1e18));
-
-                // Platform fee in wei
-                const platformFeeWei = BigInt(Math.floor(deposit * (CONFIG.FEE_PERCENTAGE / 100) * 1e18));
+                // Calculate what to send from wallet
+                const recipientWei = BigInt(Math.floor(recipientAmount * 1e18));
+                
+                // Platform fee in wei (1% of recipient amount)
+                const platformFeeWei = BigInt(Math.floor(recipientAmount * (CONFIG.FEE_PERCENTAGE / 100) * 1e18));
 
                 // Gas buffer for Tx #2 in wei
                 let forwardGasBufferWei = 0n;
@@ -610,15 +593,28 @@
                     forwardGasBufferWei = BigInt(Math.floor(bufferWeiNum));
                 }
 
-                // Recipient gets whatever is left
-                let recipientWei = depositWei - platformFeeWei - forwardGasBufferWei;
-                if (recipientWei < 0n) recipientWei = 0n;
+                // Total to deduct from wallet = recipient + fees
+                const totalToSendWei = recipientWei + platformFeeWei + forwardGasBufferWei;
+                const totalToSendHex = '0x' + totalToSendWei.toString(16);
+
+                const txHash = await window.ethereum.request({
+                    method: 'eth_sendTransaction',
+                    params: [{
+                        from: currentAccount,
+                        to: CONFIG.ESCROW_WALLET,
+                        value: totalToSendHex,
+                        gas: '0x5208'
+                    }]
+                });
+
+                updateStep(1, 'completed');
+                updateStep(2, 'active');
 
                 const saveResult = await saveTransactionToBackend({
                     tx_hash: txHash,
                     sender: currentAccount,
                     destination: destinationAddress,
-                    amount_wei: String(depositWei),
+                    amount_wei: String(totalToSendWei),
                     recipient_amount_wei: String(recipientWei),
                     forward_gas_buffer_wei: String(forwardGasBufferWei)
                 });
