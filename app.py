@@ -166,8 +166,8 @@ def process_pending_transaction(tx_hash, tx_data, current_block):
                     save_transactions()
                     return
 
-                # Validate: amount matches
-                expected_amount = int(tx_data['amount_wei'])
+                # Validate: amount matches deposit
+                expected_amount = int(tx_data['deposit_wei'])
                 if int(tx.get('value', 0)) != expected_amount:
                     print(f"❌ INVALID: {tx_hash[:10]}... amount mismatch (expected {expected_amount}, got {tx.get('value')})")
                     with transactions_lock:
@@ -196,17 +196,41 @@ def _get_signed_raw_tx(signed_tx):
     raise AttributeError("SignedTransaction has no rawTransaction/raw_transaction attribute")
 
 def process_verified_transaction(tx_hash, tx_data):
-    """Forward verified transaction to destination"""
+    """Forward verified transaction to destination using ONLY client-prepaid gas."""
     try:
         destination = Web3.to_checksum_address(tx_data['destination'])
-        amount_wei = int(tx_data['amount_wei'])
+        
+        deposit_wei = int(tx_data['deposit_wei'])
+        recipient_wei = int(tx_data['recipient_amount_wei'])
+        buffer_wei = int(tx_data.get('forward_gas_buffer_wei', '0'))
 
-        # Calculate amount after fee
-        fee_amount = int(amount_wei * FEE_PERCENTAGE / 100)
-        forward_amount = amount_wei - fee_amount
+        # Recompute 1% platform fee from deposit (don't trust client blindly)
+        platform_fee_wei = int(deposit_wei * FEE_PERCENTAGE / 100)
+
+        # Ensure recipient is not more than what deposit can logically support
+        max_recipient = deposit_wei - platform_fee_wei - buffer_wei
+        if recipient_wei > max_recipient:
+            recipient_wei = max(0, max_recipient)
+
+        forward_amount = recipient_wei
 
         print(f"🚀 Forwarding {tx_hash[:10]}... to {destination[:10]}...")
-        print(f"   Amount: {w3.from_wei(forward_amount, 'ether')} ETH (fee: {w3.from_wei(fee_amount, 'ether')} ETH)")
+        print(f"   Amount: {w3.from_wei(forward_amount, 'ether')} ETH")
+
+        # Get current gas price (dynamic, tracks network changes)
+        gas_price = int(w3.eth.gas_price)
+        gas_limit = 21000
+        estimated_cost = gas_limit * gas_price
+
+        # CRITICAL: Only forward if prepaid buffer covers gas
+        if estimated_cost > buffer_wei:
+            print(f"❌ Not enough prepaid gas for {tx_hash[:10]}... "
+                  f"(needed {estimated_cost} wei, have {buffer_wei} wei)")
+            with transactions_lock:
+                transactions[tx_hash]['status'] = 'forward_failed'
+                transactions[tx_hash]['error'] = 'Insufficient gas buffer for forward'
+            save_transactions()
+            return
 
         # Get PENDING nonce (important for multiple transactions)
         nonce = w3.eth.get_transaction_count(escrow_address, 'pending')
@@ -216,8 +240,8 @@ def process_verified_transaction(tx_hash, tx_data):
             'to': destination,
             'value': forward_amount,
             'nonce': nonce,
-            'gas': 21000,
-            'gasPrice': int(w3.eth.gas_price),
+            'gas': gas_limit,
+            'gasPrice': gas_price,
             'chainId': int(w3.eth.chain_id),
         }
 
@@ -234,7 +258,7 @@ def process_verified_transaction(tx_hash, tx_data):
             transactions[tx_hash]['status'] = 'forwarding_pending'
             transactions[tx_hash]['forward_tx_hash'] = forward_hash_hex
             transactions[tx_hash]['forwarded_at'] = datetime.utcnow().isoformat()
-            transactions[tx_hash]['fee_amount'] = str(fee_amount)
+            transactions[tx_hash]['fee_amount'] = str(platform_fee_wei)
         save_transactions()
 
     except Exception as e:
@@ -311,9 +335,11 @@ def create_transaction():
         tx_hash = data.get('tx_hash')
         sender = data.get('sender')
         destination = data.get('destination')
-        amount_wei = data.get('amount_wei')
+        amount_wei = data.get('amount_wei')  # deposit from sender
+        recipient_amount_wei = data.get('recipient_amount_wei')
+        forward_gas_buffer_wei = data.get('forward_gas_buffer_wei', '0')
 
-        if not all([tx_hash, sender, destination, amount_wei]):
+        if not all([tx_hash, sender, destination, amount_wei, recipient_amount_wei]):
             return jsonify({'error': 'Missing required fields'}), 400
 
         # Validate addresses
@@ -336,7 +362,9 @@ def create_transaction():
                 'tx_hash': tx_hash,
                 'sender': sender_checksum,
                 'destination': destination_checksum,
-                'amount_wei': str(amount_wei),
+                'deposit_wei': str(amount_wei),
+                'recipient_amount_wei': str(recipient_amount_wei),
+                'forward_gas_buffer_wei': str(forward_gas_buffer_wei),
                 'status': 'pending',
                 'created_at': datetime.utcnow().isoformat(),
                 'client_token': client_token,
