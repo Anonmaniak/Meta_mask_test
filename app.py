@@ -5,6 +5,7 @@ import os
 import json
 import threading
 import time
+import secrets
 from datetime import datetime
 
 app = Flask(__name__)
@@ -13,13 +14,14 @@ app = Flask(__name__)
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 RPC_URL = os.getenv('RPC_URL')
 ADMIN_PRIVATE_KEY = os.getenv('ADMIN_PRIVATE_KEY')
+ADMIN_TOKEN = os.getenv('ADMIN_TOKEN')  # set this in Render to protect admin endpoints
 
 # Enable CORS
 CORS(app, resources={
     r"/api/*": {
         "origins": [FRONTEND_URL, "http://localhost:*"],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type", "X-Client-Token", "X-Admin-Token"]
     }
 })
 
@@ -80,6 +82,22 @@ def save_transactions():
                 json.dump(transactions, f, indent=2)
     except Exception as e:
         print(f"⚠️  Could not save transactions: {e}")
+
+# ===========================
+# AUTH HELPERS
+# ===========================
+
+def _admin_token_from_request():
+    return request.headers.get('X-Admin-Token') or request.args.get('admin_token')
+
+def _client_token_from_request():
+    return request.headers.get('X-Client-Token') or request.args.get('token')
+
+def is_admin_request():
+    # If ADMIN_TOKEN isn't set, we treat admin endpoints as locked (fail-closed)
+    if not ADMIN_TOKEN:
+        return False
+    return secrets.compare_digest(str(_admin_token_from_request() or ''), str(ADMIN_TOKEN))
 
 # ===========================
 # TRANSACTION MONITOR (Background)
@@ -180,7 +198,6 @@ def _get_signed_raw_tx(signed_tx):
 def process_verified_transaction(tx_hash, tx_data):
     """Forward verified transaction to destination"""
     try:
-        # IMPORTANT: eth-account expects checksum addresses for signing
         destination = Web3.to_checksum_address(tx_data['destination'])
         amount_wei = int(tx_data['amount_wei'])
 
@@ -195,7 +212,6 @@ def process_verified_transaction(tx_hash, tx_data):
         nonce = w3.eth.get_transaction_count(escrow_address, 'pending')
 
         # Build forward transaction
-        # NOTE: do NOT include 'from' field when signing with eth-account
         forward_tx = {
             'to': destination,
             'value': forward_amount,
@@ -282,12 +298,15 @@ def health_check():
 
 @app.route('/api/transaction', methods=['POST', 'OPTIONS'])
 def create_transaction():
-    """Create new transaction record"""
+    """Create new transaction record.
+
+    Returns a client_token that is required to read this transaction status later.
+    """
     if request.method == 'OPTIONS':
         return '', 204
 
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
 
         tx_hash = data.get('tx_hash')
         sender = data.get('sender')
@@ -308,6 +327,9 @@ def create_transaction():
         sender_checksum = Web3.to_checksum_address(sender)
         destination_checksum = Web3.to_checksum_address(destination)
 
+        # Generate per-transaction read token (prevents public status scraping by tx_hash)
+        client_token = secrets.token_urlsafe(24)
+
         # Store transaction (thread-safe)
         with transactions_lock:
             transactions[tx_hash] = {
@@ -316,7 +338,8 @@ def create_transaction():
                 'destination': destination_checksum,
                 'amount_wei': str(amount_wei),
                 'status': 'pending',
-                'created_at': datetime.utcnow().isoformat()
+                'created_at': datetime.utcnow().isoformat(),
+                'client_token': client_token,
             }
 
         save_transactions()
@@ -326,7 +349,8 @@ def create_transaction():
         return jsonify({
             'success': True,
             'message': 'Transaction recorded',
-            'tx_hash': tx_hash
+            'tx_hash': tx_hash,
+            'client_token': client_token,
         })
 
     except Exception as e:
@@ -335,13 +359,20 @@ def create_transaction():
 
 @app.route('/api/transaction/<tx_hash>', methods=['GET'])
 def get_transaction(tx_hash):
-    """Get transaction status"""
+    """Get transaction status (requires client token or admin token)."""
     try:
         with transactions_lock:
             if tx_hash not in transactions:
                 return jsonify({'error': 'Transaction not found'}), 404
-
             tx_data = transactions[tx_hash].copy()
+
+        # auth: admin OR correct client_token
+        if is_admin_request():
+            return jsonify(tx_data)
+
+        client_token = _client_token_from_request()
+        if not client_token or not secrets.compare_digest(str(client_token), str(tx_data.get('client_token') or '')):
+            return jsonify({'error': 'Forbidden'}), 403
 
         return jsonify(tx_data)
 
@@ -350,11 +381,16 @@ def get_transaction(tx_hash):
 
 @app.route('/api/transactions', methods=['GET'])
 def get_all_transactions():
-    """Get all transactions"""
+    """Admin-only: list all transactions."""
     try:
+        if not is_admin_request():
+            # fail closed even if ADMIN_TOKEN missing
+            return jsonify({'error': 'Forbidden'}), 403
+
         with transactions_lock:
             tx_list = list(transactions.values())
         return jsonify(tx_list)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
