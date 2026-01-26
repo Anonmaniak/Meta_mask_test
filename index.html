@@ -306,26 +306,6 @@
             margin-top: 5px;
         }
 
-        .privacy-note {
-            background: #e8f4f8;
-            border-left: 4px solid #17a2b8;
-            padding: 15px;
-            margin: 20px 0;
-            border-radius: 5px;
-        }
-
-        .privacy-note h4 {
-            color: #0c5460;
-            margin-bottom: 8px;
-            font-size: 14px;
-        }
-
-        .privacy-note p {
-            color: #0c5460;
-            font-size: 13px;
-            line-height: 1.5;
-        }
-
         .network-badge {
             display: inline-block;
             padding: 4px 10px;
@@ -373,15 +353,6 @@
             <div class="info-card">
                 <div class="info-label">Available Balance</div>
                 <div class="info-value" id="balance">-</div>
-            </div>
-
-            <div class="privacy-note">
-                <h4>🔐 How Automated System Works:</h4>
-                <p>1. You send funds to secure escrow wallet<br>
-                2. Backend automatically verifies (3 confirmations)<br>
-                3. Backend auto-forwards to destination (minus 1% fee)<br>
-                4. Backend verifies forward transaction<br>
-                5. All records auto-delete after both verifications complete</p>
             </div>
 
             <div class="payment-form">
@@ -451,26 +422,23 @@
                 </div>
                 <div class="step" id="step5">
                     <div class="step-number">5</div>
-                    <div class="step-text">✅ Complete! Backend deleting records...</div>
+                    <div class="step-text">✅ Complete!</div>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        // Configuration - UPDATE THESE!
         const CONFIG = {
             ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
             FEE_PERCENTAGE: 1,
-            BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api' // Your deployed backend
+            BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api'
         };
 
         let currentAccount = null;
         let currentChainId = null;
-        let currentTransactionHash = null;
         let monitoringActive = false;
 
-        // Connect to MetaMask
         async function connectMetaMask() {
             const btn = document.getElementById('connectBtn');
             const btnText = document.getElementById('btnText');
@@ -491,7 +459,7 @@
                 currentAccount = accounts[0];
                 currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
 
-                updateStatus('✅ Connected - Automated system ready', 'connected');
+                updateStatus('✅ Connected', 'connected');
                 btnText.textContent = '✓ Connected';
                 btn.classList.add('connected');
                 btn.disabled = true;
@@ -508,7 +476,6 @@
             }
         }
 
-        // Display wallet info
         async function displayWalletInfo() {
             document.getElementById('walletAddress').textContent = currentAccount;
             
@@ -519,7 +486,6 @@
             await refreshBalance();
         }
 
-        // Refresh balance
         async function refreshBalance() {
             try {
                 const balance = await window.ethereum.request({
@@ -534,7 +500,6 @@
             }
         }
 
-        // Calculate fees
         function calculateFees() {
             const amount = parseFloat(document.getElementById('amount').value) || 0;
             
@@ -553,21 +518,17 @@
             }
         }
 
-        // Validate address
         function validateAddress(address) {
             return address && address.startsWith('0x') && address.length === 42;
         }
 
-        // Initiate payment
         async function initiatePayment() {
             const destinationAddress = document.getElementById('destinationAddress').value.trim();
             const amount = parseFloat(document.getElementById('amount').value);
 
-            // Clear errors
             document.getElementById('addressError').style.display = 'none';
             document.getElementById('amountError').style.display = 'none';
 
-            // Validate
             if (!validateAddress(destinationAddress)) {
                 document.getElementById('addressError').textContent = 'Invalid Ethereum address';
                 document.getElementById('addressError').style.display = 'block';
@@ -581,11 +542,10 @@
             }
 
             try {
-                updateStatus('Processing payment...', 'processing');
+                updateStatus('Processing...', 'processing');
                 document.getElementById('paymentBtn').disabled = true;
                 document.getElementById('processingSteps').classList.add('show');
                 
-                // Step 1: Send to escrow
                 updateStep(1, 'active');
                 const amountInWei = Math.floor(amount * Math.pow(10, 18));
                 const amountInHex = '0x' + amountInWei.toString(16);
@@ -600,41 +560,34 @@
                     }]
                 });
 
-                console.log('✅ Sent to escrow:', txHash);
                 updateStep(1, 'completed');
                 updateStep(2, 'active');
 
-                // Save to backend
-                await saveTransactionToBackend({
+                const saveResult = await saveTransactionToBackend({
                     tx_hash: txHash,
                     sender: currentAccount,
                     destination: destinationAddress,
                     amount_wei: String(amountInWei)
                 });
 
-                currentTransactionHash = txHash;
-                updateStatus('✅ Payment in escrow - Backend processing automatically...', 'processing');
+                // Store token so only this browser can read status for this tx
+                const clientToken = saveResult.client_token;
+                if (clientToken) {
+                    localStorage.setItem(`txToken:${txHash}`, clientToken);
+                }
 
-                // Start monitoring
+                updateStatus('✅ In escrow - backend processing...', 'processing');
+
                 monitoringActive = true;
                 setTimeout(() => monitorTransaction(txHash), 15000);
 
-                // Clear form
                 document.getElementById('destinationAddress').value = '';
                 document.getElementById('amount').value = '';
                 document.getElementById('feeBreakdown').style.display = 'none';
 
             } catch (error) {
                 console.error('Payment error:', error);
-                
-                let errorMsg = 'Payment failed!';
-                if (error.code === 4001) {
-                    errorMsg = 'Transaction rejected';
-                } else if (error.message) {
-                    errorMsg = error.message;
-                }
-                
-                updateStatus(errorMsg, 'error');
+                updateStatus(error.message || 'Payment failed', 'error');
                 resetSteps();
                 monitoringActive = false;
             } finally {
@@ -642,7 +595,6 @@
             }
         }
 
-        // Save transaction to backend (FIXED)
         async function saveTransactionToBackend(data) {
             const response = await fetch(`${CONFIG.BACKEND_URL}/transaction`, {
                 method: 'POST',
@@ -658,18 +610,26 @@
             return await response.json();
         }
 
-        // Monitor transaction status (FIXED)
         async function monitorTransaction(txHash) {
             if (!monitoringActive) return;
 
+            const token = localStorage.getItem(`txToken:${txHash}`);
+            if (!token) {
+                updateStatus('❌ Missing token for status check', 'error');
+                monitoringActive = false;
+                return;
+            }
+
             try {
-                const response = await fetch(`${CONFIG.BACKEND_URL}/transaction/${txHash}`);
+                const response = await fetch(`${CONFIG.BACKEND_URL}/transaction/${txHash}`, {
+                    headers: {
+                        'X-Client-Token': token
+                    }
+                });
 
                 if (response.status === 404) {
-                    // Transaction completed and deleted
-                    console.log('Transaction completed and cleaned up');
                     updateStep(5, 'completed');
-                    updateStatus('🎉 Complete! Records cleaned up.', 'connected');
+                    updateStatus('🎉 Complete!', 'connected');
                     monitoringActive = false;
                     setTimeout(() => {
                         resetSteps();
@@ -680,72 +640,65 @@
                 }
 
                 if (!response.ok) {
-                    throw new Error('Failed to fetch transaction status');
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.error || 'Failed to fetch transaction status');
                 }
 
                 const tx = await response.json();
                 const status = tx.status;
-                
-                console.log('Status:', status, tx);
 
                 if (status === 'pending') {
                     updateStep(2, 'active');
-                    updateStatus('⏳ Backend verifying escrow transaction...', 'processing');
+                    updateStatus('⏳ Verifying escrow...', 'processing');
                     setTimeout(() => monitorTransaction(txHash), 15000);
-                } 
-                else if (status === 'verified') {
+                } else if (status === 'verified') {
                     updateStep(2, 'completed');
                     updateStep(3, 'active');
-                    updateStatus('✅ Verified! Backend forwarding to destination...', 'processing');
+                    updateStatus('✅ Forwarding...', 'processing');
                     setTimeout(() => monitorTransaction(txHash), 10000);
-                }
-                else if (status === 'forwarding_pending') {
+                } else if (status === 'forwarding_pending') {
                     updateStep(3, 'completed');
                     updateStep(4, 'active');
-                    updateStatus('⏳ Backend verifying forward transaction...', 'processing');
+                    updateStatus('⏳ Verifying forward...', 'processing');
                     setTimeout(() => monitorTransaction(txHash), 15000);
-                }
-                else if (status === 'complete') {
+                } else if (status === 'complete') {
                     updateStep(4, 'completed');
                     updateStep(5, 'completed');
-                    updateStatus('🎉 Complete! Backend deleting records...', 'connected');
+                    updateStatus('🎉 Complete!', 'connected');
                     monitoringActive = false;
                     setTimeout(() => {
                         resetSteps();
                         document.getElementById('processingSteps').classList.remove('show');
                         refreshBalance();
                     }, 5000);
-                }
-                else if (status === 'failed' || status === 'forward_failed') {
-                    const errorMsg = tx.error || 'Transaction failed';
-                    updateStatus(`❌ ${errorMsg}`, 'error');
+                } else if (status === 'failed' || status === 'forward_failed') {
+                    updateStatus(`❌ ${tx.error || 'Transaction failed'}`, 'error');
                     resetSteps();
                     monitoringActive = false;
+                } else {
+                    setTimeout(() => monitorTransaction(txHash), 15000);
                 }
+
             } catch (error) {
                 console.error('Monitor error:', error);
-                // Retry on network errors
                 if (monitoringActive) {
                     setTimeout(() => monitorTransaction(txHash), 20000);
                 }
             }
         }
 
-        // Update step UI
         function updateStep(stepNum, status) {
             const step = document.getElementById(`step${stepNum}`);
             step.classList.remove('active', 'completed');
             if (status) step.classList.add(status);
         }
 
-        // Reset steps
         function resetSteps() {
             for (let i = 1; i <= 5; i++) {
                 updateStep(i, '');
             }
         }
 
-        // Setup event listeners
         function setupEventListeners() {
             window.ethereum.on('accountsChanged', (accounts) => {
                 if (accounts.length === 0) {
@@ -759,7 +712,6 @@
             window.ethereum.on('chainChanged', () => location.reload());
         }
 
-        // Get network name
         function getNetworkName(chainId) {
             const networks = {
                 '0x1': 'Ethereum Mainnet',
@@ -770,13 +722,11 @@
             return networks[chainId] || 'Unknown Network';
         }
 
-        // Update status
         function updateStatus(message, type) {
             document.getElementById('statusText').textContent = message;
             document.getElementById('statusBox').className = `status-box ${type}`;
         }
 
-        // Auto-connect if previously connected
         window.addEventListener('load', async () => {
             if (typeof window.ethereum !== 'undefined') {
                 try {
@@ -788,7 +738,7 @@
                         document.getElementById('connectBtn').classList.add('connected');
                         document.getElementById('btnText').textContent = '✓ Connected';
                         document.getElementById('connectBtn').disabled = true;
-                        updateStatus('✅ Connected - Automated system ready', 'connected');
+                        updateStatus('✅ Connected', 'connected');
                         
                         await displayWalletInfo();
                         document.getElementById('walletSection').classList.add('show');
