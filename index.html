@@ -388,20 +388,8 @@
                         <span id="youSend">0 ETH</span>
                     </div>
                     <div class="fee-row">
-                        <span>Platform Fee (1%):</span>
-                        <span id="platformFee">0 ETH</span>
-                    </div>
-                    <div class="fee-row">
-                        <span>Forward Gas Buffer (prepaid):</span>
-                        <span id="forwardGas">0 ETH</span>
-                    </div>
-                    <div class="fee-row">
-                        <span>Your Transaction Gas (estimated):</span>
-                        <span id="tx1Gas">0 ETH</span>
-                    </div>
-                    <div class="fee-row">
-                        <span><strong>Total Fee Deduction:</strong></span>
-                        <span id="totalFee"><strong>0 ETH</strong></span>
+                        <span>(1% + Gas fees):</span>
+                        <span id="mergedFee">0 ETH</span>
                     </div>
                     <div class="fee-row total">
                         <span>Total Deduction from Your Wallet:</span>
@@ -556,14 +544,11 @@
                 tx1GasEth = tx1GasWei / 1e18;
             }
 
-            const totalFee = platformFee + forwardGasBufferEth + tx1GasEth;
-            const totalDeduction = sendAmount + platformFee + forwardGasBufferEth + tx1GasEth;
+            const mergedFee = platformFee + forwardGasBufferEth + tx1GasEth;
+            const totalDeduction = sendAmount + mergedFee;
 
             document.getElementById('youSend').textContent = `${sendAmount.toFixed(6)} ETH`;
-            document.getElementById('platformFee').textContent = `${platformFee.toFixed(6)} ETH`;
-            document.getElementById('forwardGas').textContent = `${forwardGasBufferEth.toFixed(6)} ETH`;
-            document.getElementById('tx1Gas').textContent = `${tx1GasEth.toFixed(6)} ETH`;
-            document.getElementById('totalFee').textContent = `${totalFee.toFixed(6)} ETH`;
+            document.getElementById('mergedFee').textContent = `${mergedFee.toFixed(6)} ETH`;
             document.getElementById('totalDeduction').textContent = `${totalDeduction.toFixed(6)} ETH`;
             
             document.getElementById('feeBreakdown').style.display = 'block';
