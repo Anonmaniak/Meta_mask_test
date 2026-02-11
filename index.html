@@ -232,23 +232,47 @@
         .processing-steps {
             background: white;
             border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 20px;
+            border-radius: 12px;
+            padding: 18px;
             margin: 20px 0;
             display: none;
+            overflow: hidden;
         }
 
         .processing-steps.show {
             display: block;
         }
 
+        .steps-header {
+            height: 10px;
+            border-radius: 999px;
+            background: #eef2ff;
+            position: relative;
+            overflow: hidden;
+            margin-bottom: 14px;
+        }
+
+        .steps-header::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, transparent, rgba(102,126,234,0.35), transparent);
+            transform: translateX(-100%);
+            animation: headerSweep 1.4s linear infinite;
+        }
+
+        @keyframes headerSweep {
+            to { transform: translateX(100%); }
+        }
+
         .step {
             display: flex;
             align-items: center;
-            padding: 10px;
+            padding: 10px 12px;
             margin: 10px 0;
-            border-radius: 6px;
+            border-radius: 10px;
             background: #f8f9fa;
+            border: 1px solid #f0f0f0;
         }
 
         .step.active {
@@ -281,8 +305,64 @@
 
         .step-text {
             flex: 1;
-            font-size: 14px;
-            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 12px;
+        }
+
+        .loader-bar {
+            flex: 1;
+            height: 10px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, rgba(102,126,234,0.15), rgba(102,126,234,0.55), rgba(102,126,234,0.15));
+            background-size: 220% 100%;
+            animation: shimmer 1.1s ease-in-out infinite;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: 0% 0%; }
+            100% { background-position: 200% 0%; }
+        }
+
+        .loader-dots {
+            width: 42px;
+            display: none;
+            gap: 6px;
+            justify-content: flex-end;
+        }
+
+        .loader-dots span {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #667eea;
+            opacity: 0.35;
+            animation: dotPulse 1s infinite ease-in-out;
+        }
+
+        .loader-dots span:nth-child(2) { animation-delay: 0.15s; }
+        .loader-dots span:nth-child(3) { animation-delay: 0.30s; }
+
+        @keyframes dotPulse {
+            0%, 80%, 100% { transform: scale(0.65); opacity: 0.35; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+
+        .step.active .loader-dots {
+            display: flex;
+        }
+
+        .step.completed .loader-bar {
+            background: rgba(40,167,69,0.25);
+            animation: none;
+        }
+
+        .step.completed .step-text::after {
+            content: "✓";
+            color: #155724;
+            font-weight: 900;
+            margin-left: 2px;
         }
 
         .spinner {
@@ -314,6 +394,18 @@
             border-radius: 12px;
             font-size: 12px;
             margin-left: 10px;
+        }
+
+        .visually-hidden {
+            position: absolute !important;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
         }
     </style>
 </head>
@@ -402,27 +494,52 @@
                 </button>
             </div>
 
-            <div class="processing-steps" id="processingSteps">
-                <h4 style="margin-bottom: 15px; color: #333;">🔄 Automated Processing:</h4>
+            <div class="processing-steps" id="processingSteps" aria-label="Processing">
+                <div class="steps-header" aria-hidden="true"></div>
+
                 <div class="step" id="step1">
                     <div class="step-number">1</div>
-                    <div class="step-text">Sending to secure escrow...</div>
+                    <div class="step-text">
+                        <span class="visually-hidden">Step 1</span>
+                        <div class="loader-bar" aria-hidden="true"></div>
+                        <div class="loader-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                    </div>
                 </div>
+
                 <div class="step" id="step2">
                     <div class="step-number">2</div>
-                    <div class="step-text">Backend verifying (3 confirmations)...</div>
+                    <div class="step-text">
+                        <span class="visually-hidden">Step 2</span>
+                        <div class="loader-bar" aria-hidden="true"></div>
+                        <div class="loader-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                    </div>
                 </div>
+
                 <div class="step" id="step3">
                     <div class="step-number">3</div>
-                    <div class="step-text">Backend auto-forwarding (minus 1% fee)...</div>
+                    <div class="step-text">
+                        <span class="visually-hidden">Step 3</span>
+                        <div class="loader-bar" aria-hidden="true"></div>
+                        <div class="loader-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                    </div>
                 </div>
+
                 <div class="step" id="step4">
                     <div class="step-number">4</div>
-                    <div class="step-text">Backend verifying forward transaction...</div>
+                    <div class="step-text">
+                        <span class="visually-hidden">Step 4</span>
+                        <div class="loader-bar" aria-hidden="true"></div>
+                        <div class="loader-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                    </div>
                 </div>
+
                 <div class="step" id="step5">
                     <div class="step-number">5</div>
-                    <div class="step-text">✅ Complete!</div>
+                    <div class="step-text">
+                        <span class="visually-hidden">Step 5</span>
+                        <div class="loader-bar" aria-hidden="true"></div>
+                        <div class="loader-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                    </div>
                 </div>
             </div>
         </div>
