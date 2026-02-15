@@ -650,15 +650,21 @@ recipient_amount_wei: String(recipientWei),
 forward_gas_buffer_wei: String(forwardGasBufferWei)
 });
 
+const transactionId = saveResult.transaction_id;
 const clientToken = saveResult.client_token;
+
 if (clientToken) {
 localStorage.setItem(`txToken:${txHash}`, clientToken);
+}
+if (transactionId) {
+localStorage.setItem(`txId:${txHash}`, transactionId);
 }
 
 updateStatus('✅ In escrow - backend processing...', 'processing');
 
 monitoringActive = true;
-setTimeout(() => monitorTransaction(txHash), 15000);
+// Start monitoring immediately and trigger verification
+monitorAndVerifyTransaction(txHash, transactionId);
 
 document.getElementById('destinationAddress').value = '';
 document.getElementById('amount').value = '';
@@ -689,7 +695,33 @@ throw new Error(error.error || 'Failed to save transaction');
 return await response.json();
 }
 
-async function monitorTransaction(txHash) {
+// NEW: Trigger verification/forwarding process
+async function triggerVerification(txId) {
+try {
+const response = await fetch(`${CONFIG.BACKEND_URL}/verify`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ txId })
+});
+
+if (!response.ok) {
+const error = await response.json();
+console.warn('Verification trigger failed:', error.error);
+return null;
+}
+
+const result = await response.json();
+console.log('✅ Verification triggered:', result);
+return result;
+
+} catch (error) {
+console.error('Error triggering verification:', error);
+return null;
+}
+}
+
+// NEW: Combined monitoring and verification triggering
+async function monitorAndVerifyTransaction(txHash, txId) {
 if (!monitoringActive) return;
 
 const token = localStorage.getItem(`txToken:${txHash}`);
@@ -700,6 +732,12 @@ return;
 }
 
 try {
+// Trigger verification process
+if (txId) {
+await triggerVerification(txId);
+}
+
+// Check transaction status
 const response = await fetch(`${CONFIG.BACKEND_URL}/transaction/${txHash}`, {
 headers: {
 'X-Client-Token': token
@@ -729,17 +767,17 @@ const status = tx.status;
 if (status === 'pending') {
 updateStep(2, 'active');
 updateStatus('⏳ Verifying escrow...', 'processing');
-setTimeout(() => monitorTransaction(txHash), 15000);
+setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 15000);
 } else if (status === 'verified') {
 updateStep(2, 'completed');
 updateStep(3, 'active');
 updateStatus('✅ Forwarding...', 'processing');
-setTimeout(() => monitorTransaction(txHash), 10000);
-} else if (status === 'forwarding_pending') {
+setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 10000);
+} else if (status === 'forwarding' || status === 'forwarding_pending') {
 updateStep(3, 'completed');
 updateStep(4, 'active');
 updateStatus('⏳ Verifying forward...', 'processing');
-setTimeout(() => monitorTransaction(txHash), 15000);
+setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 15000);
 } else if (status === 'complete') {
 updateStep(4, 'completed');
 updateStep(5, 'completed');
@@ -755,13 +793,13 @@ updateStatus(`❌ ${tx.error || 'Transaction failed'}`, 'error');
 resetSteps();
 monitoringActive = false;
 } else {
-setTimeout(() => monitorTransaction(txHash), 15000);
+setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 15000);
 }
 
 } catch (error) {
 console.error('Monitor error:', error);
 if (monitoringActive) {
-setTimeout(() => monitorTransaction(txHash), 20000);
+setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 20000);
 }
 }
 }
