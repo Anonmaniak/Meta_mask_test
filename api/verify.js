@@ -1,15 +1,12 @@
 // Vercel Serverless Function - Verify Escrow & Forward with Fee Deduction
 const { ethers } = require('ethers');
-
-// Shared in-memory storage
-let transactions = [];
+const store = require('./_store');
 
 // Configuration
 const CONFIG = {
   ADMIN_PRIVATE_KEY: process.env.ADMIN_PRIVATE_KEY,
   RPC_URL: process.env.RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/demo',
-  VERIFICATION_CONFIRMATIONS: 3,
-  FEE_PERCENTAGE: 1
+  VERIFICATION_CONFIRMATIONS: 3
 };
 
 let provider = null;
@@ -69,17 +66,21 @@ async function forwardToDestination(transaction) {
       throw new Error('Escrow wallet not configured');
     }
 
-    // Calculate amount to forward (original amount minus fee)
-    const feeAmount = transaction.amount * (CONFIG.FEE_PERCENTAGE / 100);
-    const forwardAmount = transaction.amount - feeAmount;
+    // Use recipientAmountWei directly (already calculated by frontend)
+    const recipientWei = BigInt(transaction.recipientAmountWei);
     
-    const amountInWei = ethers.parseEther(forwardAmount.toString());
+    // Convert to ETH for logging
+    const recipientEth = Number(recipientWei) / 1e18;
+    const totalReceivedEth = Number(BigInt(transaction.amountWei)) / 1e18;
+    const feeEth = totalReceivedEth - recipientEth;
 
-    console.log(`💸 Forwarding ${forwardAmount} ETH to ${transaction.destinationAddress} (fee: ${feeAmount} ETH)`);
+    console.log(`💸 Forwarding ${recipientEth.toFixed(6)} ETH to ${transaction.destinationAddress}`);
+    console.log(`   Total received: ${totalReceivedEth.toFixed(6)} ETH`);
+    console.log(`   Fee kept: ${feeEth.toFixed(6)} ETH`);
 
     const tx = await senderWallet.sendTransaction({
       to: transaction.destinationAddress,
-      value: amountInWei,
+      value: recipientWei,
       gasLimit: 21000
     });
 
@@ -91,8 +92,8 @@ async function forwardToDestination(transaction) {
     return {
       success: true,
       txHash: tx.hash,
-      forwardedAmount: forwardAmount,
-      feeKept: feeAmount,
+      forwardedAmountWei: transaction.recipientAmountWei,
+      feeKeptWei: (BigInt(transaction.amountWei) - recipientWei).toString(),
       receipt
     };
 
@@ -125,8 +126,8 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Transaction ID required' });
       }
 
-      // Find transaction
-      const transaction = transactions.find(tx => tx.id === txId);
+      // Find transaction from shared storage
+      const transaction = store.findTransaction({ id: txId });
 
       if (!transaction) {
         return res.status(404).json({ error: 'Transaction not found' });
@@ -143,65 +144,82 @@ module.exports = async (req, res) => {
 
       // If escrow transaction verified and we haven't marked it yet
       if (escrowVerification.verified && transaction.status === 'pending') {
-        transaction.status = 'verified';
-        transaction.verifiedAt = new Date().toISOString();
-        transaction.escrowVerification = escrowVerification;
+        store.updateTransaction(transaction.id, {
+          status: 'verified',
+          verifiedAt: new Date().toISOString(),
+          escrowVerification: escrowVerification
+        });
         console.log(`   ✅ Escrow transaction VERIFIED (${escrowVerification.confirmations} confirmations)`);
       }
 
       // If escrow transaction failed
       if (escrowVerification.status === 'failed') {
-        transaction.status = 'failed';
-        transaction.error = 'Escrow transaction failed on blockchain';
-        transaction.failedAt = new Date().toISOString();
+        store.updateTransaction(transaction.id, {
+          status: 'failed',
+          error: 'Escrow transaction failed on blockchain',
+          failedAt: new Date().toISOString()
+        });
         console.log(`   ❌ Escrow transaction FAILED`);
         
         // Delete failed transactions after 5 minutes
         setTimeout(() => {
-          const index = transactions.findIndex(tx => tx.id === txId);
-          if (index > -1) {
-            transactions.splice(index, 1);
-            console.log(`🗑️ Deleted failed transaction: ${txId}`);
-          }
+          store.removeTransaction(txId);
+          console.log(`🗑️ Deleted failed transaction: ${txId}`);
         }, 300000);
+      }
+
+      // Re-fetch transaction to get updated status
+      const updatedTx = store.findTransaction({ id: txId });
+      if (!updatedTx) {
+        return res.status(404).json({ error: 'Transaction was removed' });
       }
 
       // =====================================================
       // STEP 2: FORWARD TO DESTINATION (Escrow → Destination)
       // =====================================================
-      if (transaction.status === 'verified' && !transaction.forwardTxHash) {
-        transaction.status = 'forwarding';
+      if (updatedTx.status === 'verified' && !updatedTx.forwardTxHash) {
+        store.updateTransaction(updatedTx.id, { status: 'forwarding' });
         console.log(`   🚀 Initiating forward to destination...`);
         
-        const result = await forwardToDestination(transaction);
+        const result = await forwardToDestination(updatedTx);
 
         if (result.success) {
-          transaction.status = 'forwarding_pending';
-          transaction.forwardTxHash = result.txHash;
-          transaction.forwardedAmount = result.forwardedAmount;
-          transaction.feeKept = result.feeKept;
-          transaction.forwardInitiatedAt = new Date().toISOString();
+          store.updateTransaction(updatedTx.id, {
+            status: 'forwarding_pending',
+            forwardTxHash: result.txHash,
+            forwardedAmountWei: result.forwardedAmountWei,
+            feeKeptWei: result.feeKeptWei,
+            forwardInitiatedAt: new Date().toISOString()
+          });
+          
+          const feeEth = Number(BigInt(result.feeKeptWei)) / 1e18;
+          const forwardedEth = Number(BigInt(result.forwardedAmountWei)) / 1e18;
           
           console.log(`   ✅ Forward transaction sent: ${result.txHash}`);
-          console.log(`   💰 Forwarded: ${result.forwardedAmount} ETH`);
-          console.log(`   💵 Fee kept: ${result.feeKept} ETH`);
+          console.log(`   💰 Forwarded: ${forwardedEth.toFixed(6)} ETH`);
+          console.log(`   💵 Fee kept: ${feeEth.toFixed(6)} ETH`);
           console.log(`   ⏳ Waiting for forward transaction confirmation...`);
           
         } else {
-          transaction.status = 'failed';
-          transaction.error = result.error;
-          transaction.failedAt = new Date().toISOString();
+          store.updateTransaction(updatedTx.id, {
+            status: 'failed',
+            error: result.error,
+            failedAt: new Date().toISOString()
+          });
           console.log(`   ❌ Forward transaction FAILED: ${result.error}`);
           
           // Delete failed after 5 minutes
           setTimeout(() => {
-            const index = transactions.findIndex(tx => tx.id === txId);
-            if (index > -1) {
-              transactions.splice(index, 1);
-              console.log(`🗑️ Deleted failed transaction: ${txId}`);
-            }
+            store.removeTransaction(txId);
+            console.log(`🗑️ Deleted failed transaction: ${txId}`);
           }, 300000);
         }
+      }
+
+      // Re-fetch again for forward verification
+      const finalTx = store.findTransaction({ id: txId });
+      if (!finalTx) {
+        return res.status(404).json({ error: 'Transaction was removed' });
       }
 
       // =====================================================
@@ -209,31 +227,30 @@ module.exports = async (req, res) => {
       // =====================================================
       let forwardVerification = null;
       
-      if (transaction.forwardTxHash && transaction.status === 'forwarding_pending') {
-        forwardVerification = await verifyTransaction(transaction.forwardTxHash);
+      if (finalTx.forwardTxHash && finalTx.status === 'forwarding_pending') {
+        forwardVerification = await verifyTransaction(finalTx.forwardTxHash);
         console.log(`   📋 Forward TX status: ${forwardVerification.status}`);
 
         // BOTH TRANSACTIONS MUST BE VERIFIED BEFORE MARKING AS COMPLETE
         if (forwardVerification.verified) {
-          transaction.status = 'completed';
-          transaction.forwardVerification = forwardVerification;
-          transaction.completedAt = new Date().toISOString();
+          store.updateTransaction(finalTx.id, {
+            status: 'complete',
+            forwardVerification: forwardVerification,
+            completedAt: new Date().toISOString()
+          });
           
           console.log(`   ✅ Forward transaction VERIFIED (${forwardVerification.confirmations} confirmations)`);
           console.log(`   🎉 BOTH TRANSACTIONS CONFIRMED - Transaction COMPLETE!`);
           console.log(`   📊 Summary:`);
           console.log(`      - Escrow TX: ${escrowVerification.confirmations} confirmations`);
           console.log(`      - Forward TX: ${forwardVerification.confirmations} confirmations`);
-          console.log(`      - Amount forwarded: ${transaction.forwardedAmount} ETH`);
-          console.log(`      - Fee collected: ${transaction.feeKept} ETH`);
           
           // ===================================================
           // ONLY DELETE AFTER BOTH TRANSACTIONS ARE VERIFIED!
           // ===================================================
           setTimeout(() => {
-            const index = transactions.findIndex(tx => tx.id === txId);
-            if (index > -1) {
-              transactions.splice(index, 1);
+            const removed = store.removeTransaction(txId);
+            if (removed) {
               console.log(`🗑️ AUTO-DELETED completed transaction: ${txId}`);
               console.log(`   ✅ Both escrow and forward transactions were verified before deletion`);
             }
@@ -244,17 +261,22 @@ module.exports = async (req, res) => {
 
         // If forward transaction failed
         if (forwardVerification.status === 'failed') {
-          transaction.status = 'failed';
-          transaction.error = 'Forward transaction failed on blockchain';
-          transaction.failedAt = new Date().toISOString();
+          store.updateTransaction(finalTx.id, {
+            status: 'failed',
+            error: 'Forward transaction failed on blockchain',
+            failedAt: new Date().toISOString()
+          });
           console.log(`   ❌ Forward transaction FAILED on blockchain`);
         }
       }
 
+      // Get final state for response
+      const responseTx = store.findTransaction({ id: txId });
+
       // Return response with both verification statuses
       res.status(200).json({
         success: true,
-        transaction,
+        transaction: responseTx,
         verifications: {
           escrow: escrowVerification,
           forward: forwardVerification
