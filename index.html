@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; connect-src *; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
 <title>Secure Payment Gateway</title>
 <style>
 * {
@@ -456,82 +457,82 @@ const GAS_SAFETY_MULTIPLIER = 1.5;
 const FORWARD_GAS_LIMIT = 21000;
 const TX1_GAS_LIMIT = 21000;
 
-async function refreshGasPrice() {
+function refreshGasPrice() {
 if (typeof window.ethereum === 'undefined') return;
 
-try {
-const hexWei = await window.ethereum.request({
+window.ethereum.request({
 method: 'eth_gasPrice'
-});
+}).then(function(hexWei) {
 liveGasPriceWei = BigInt(hexWei);
 calculateFees();
-} catch (err) {
+}).catch(function(err) {
 console.error('Gas price fetch failed:', err);
-}
+});
 }
 
-async function connectMetaMask() {
+function connectMetaMask() {
 const btn = document.getElementById('connectBtn');
 const btnText = document.getElementById('btnText');
 
 if (typeof window.ethereum === 'undefined') {
 updateStatus('MetaMask not installed!', 'error');
-setTimeout(() => window.open('https://metamask.io/download/', '_blank'), 2000);
+setTimeout(function() { window.open('https://metamask.io/download/', '_blank'); }, 2000);
 return;
 }
 
-try {
 btnText.innerHTML = 'Connecting<span class="spinner"></span>';
 btn.disabled = true;
 
-const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+window.ethereum.request({ method: 'eth_requestAccounts' })
+.then(function(accounts) {
 if (accounts.length === 0) throw new Error('No accounts found');
 
 currentAccount = accounts[0];
-currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+return window.ethereum.request({ method: 'eth_chainId' });
+})
+.then(function(chainId) {
+currentChainId = chainId;
 
 updateStatus('✅ Connected', 'connected');
 btnText.textContent = '✓ Connected';
 btn.classList.add('connected');
 btn.disabled = true;
 
-await displayWalletInfo();
+displayWalletInfo();
 document.getElementById('walletSection').classList.add('show');
 setupEventListeners();
 refreshGasPrice();
 setInterval(refreshGasPrice, 15000);
-
-} catch (error) {
+})
+.catch(function(error) {
 console.error('Connection error:', error);
 updateStatus(error.message || 'Connection failed', 'error');
 btnText.textContent = 'Connect MetaMask';
 btn.disabled = false;
-}
+});
 }
 
-async function displayWalletInfo() {
+function displayWalletInfo() {
 document.getElementById('walletAddress').textContent = currentAccount;
 
 const networkName = getNetworkName(currentChainId);
 document.getElementById('networkName').textContent = networkName;
-document.getElementById('chainBadge').textContent = `Chain ${parseInt(currentChainId, 16)}`;
+document.getElementById('chainBadge').textContent = 'Chain ' + parseInt(currentChainId, 16);
 
-await refreshBalance();
+refreshBalance();
 }
 
-async function refreshBalance() {
-try {
-const balance = await window.ethereum.request({
+function refreshBalance() {
+window.ethereum.request({
 method: 'eth_getBalance',
 params: [currentAccount, 'latest']
-});
-
+}).then(function(balance) {
 currentBalanceWei = BigInt(balance);
 const balanceInEth = Number(currentBalanceWei) / 1e18;
-document.getElementById('balance').textContent = `${balanceInEth.toFixed(6)} ETH`;
-} catch (error) {
+document.getElementById('balance').textContent = balanceInEth.toFixed(6) + ' ETH';
+}).catch(function(error) {
 console.error('Error getting balance:', error);
-}
+});
 }
 
 function calculateFees() {
@@ -559,12 +560,12 @@ tx1GasEth = tx1GasWei / 1e18;
 const totalFee = platformFee + forwardGasBufferEth + tx1GasEth;
 const totalDeduction = sendAmount + totalFee;
 
-document.getElementById('youSend').textContent = `${sendAmount.toFixed(6)} ETH`;
-document.getElementById('platformFee').textContent = `${platformFee.toFixed(6)} ETH`;
-document.getElementById('forwardGas').textContent = `${forwardGasBufferEth.toFixed(6)} ETH`;
-document.getElementById('tx1Gas').textContent = `${tx1GasEth.toFixed(6)} ETH`;
-document.getElementById('totalFee').textContent = `${totalFee.toFixed(6)} ETH`;
-document.getElementById('totalDeduction').textContent = `${totalDeduction.toFixed(6)} ETH`;
+document.getElementById('youSend').textContent = sendAmount.toFixed(6) + ' ETH';
+document.getElementById('platformFee').textContent = platformFee.toFixed(6) + ' ETH';
+document.getElementById('forwardGas').textContent = forwardGasBufferEth.toFixed(6) + ' ETH';
+document.getElementById('tx1Gas').textContent = tx1GasEth.toFixed(6) + ' ETH';
+document.getElementById('totalFee').textContent = totalFee.toFixed(6) + ' ETH';
+document.getElementById('totalDeduction').textContent = totalDeduction.toFixed(6) + ' ETH';
 
 document.getElementById('feeBreakdown').style.display = 'block';
 }
@@ -573,7 +574,7 @@ function validateAddress(address) {
 return address && address.startsWith('0x') && address.length === 42;
 }
 
-async function initiatePayment() {
+function initiatePayment() {
 const destinationAddress = document.getElementById('destinationAddress').value.trim();
 const sendAmount = parseFloat(document.getElementById('amount').value);
 
@@ -592,7 +593,6 @@ document.getElementById('amountError').style.display = 'block';
 return;
 }
 
-try {
 const recipientWei = BigInt(Math.floor(sendAmount * 1e18));
 const platformFeeWei = BigInt(Math.floor(sendAmount * (CONFIG.FEE_PERCENTAGE / 100) * 1e18));
 
@@ -610,12 +610,13 @@ tx1GasWei = BigInt(TX1_GAS_LIMIT * gasPriceWeiNum);
 const totalToSendWei = recipientWei + platformFeeWei + forwardGasBufferWei;
 const totalRequired = totalToSendWei + tx1GasWei;
 
-await refreshBalance();
+refreshBalance();
 
+setTimeout(function() {
 if (currentBalanceWei < totalRequired) {
 const shortfall = Number(totalRequired - currentBalanceWei) / 1e18;
 document.getElementById('amountError').textContent = 
-`Insufficient balance! You need ${shortfall.toFixed(6)} ETH more to complete this transaction.`;
+'Insufficient balance! You need ' + shortfall.toFixed(6) + ' ETH more to complete this transaction.';
 document.getElementById('amountError').style.display = 'block';
 return;
 }
@@ -628,7 +629,7 @@ updateStep(1, 'active');
 
 const totalToSendHex = '0x' + totalToSendWei.toString(16);
 
-const txHash = await window.ethereum.request({
+window.ethereum.request({
 method: 'eth_sendTransaction',
 params: [{
 from: currentAccount,
@@ -636,176 +637,163 @@ to: CONFIG.ESCROW_WALLET,
 value: totalToSendHex,
 gas: '0x5208'
 }]
-});
-
+})
+.then(function(txHash) {
 updateStep(1, 'completed');
 updateStep(2, 'active');
 
-const saveResult = await saveTransactionToBackend({
+const saveData = {
 tx_hash: txHash,
 sender: currentAccount,
 destination: destinationAddress,
 amount_wei: String(totalToSendWei),
 recipient_amount_wei: String(recipientWei),
 forward_gas_buffer_wei: String(forwardGasBufferWei)
-});
+};
 
+return fetch(CONFIG.BACKEND_URL + '/transaction', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify(saveData)
+}).then(function(response) {
+if (!response.ok) {
+return response.json().then(function(error) {
+throw new Error(error.error || 'Failed to save transaction');
+});
+}
+return response.json();
+}).then(function(saveResult) {
 const transactionId = saveResult.transaction_id;
 const clientToken = saveResult.client_token;
 
 if (clientToken) {
-localStorage.setItem(`txToken:${txHash}`, clientToken);
+localStorage.setItem('txToken:' + txHash, clientToken);
 }
 if (transactionId) {
-localStorage.setItem(`txId:${txHash}`, transactionId);
+localStorage.setItem('txId:' + txHash, transactionId);
 }
 
 updateStatus('✅ In escrow - backend processing...', 'processing');
 
 monitoringActive = true;
-// Start monitoring immediately and trigger verification
-monitorAndVerifyTransaction(txHash, transactionId);
+
+// Try to trigger verification if backend supports it
+if (transactionId) {
+fetch(CONFIG.BACKEND_URL + '/verify', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ txId: transactionId })
+}).then(function(resp) {
+if (resp.ok) {
+console.log('✅ Verification triggered');
+}
+}).catch(function(err) {
+console.log('Backend does not support /verify endpoint, using polling mode');
+});
+}
+
+// Start monitoring (works with or without /verify)
+setTimeout(function() { monitorTransaction(txHash); }, 15000);
 
 document.getElementById('destinationAddress').value = '';
 document.getElementById('amount').value = '';
 document.getElementById('feeBreakdown').style.display = 'none';
 
-} catch (error) {
+return txHash;
+});
+})
+.catch(function(error) {
 console.error('Payment error:', error);
 updateStatus(error.message || 'Payment failed', 'error');
 resetSteps();
 monitoringActive = false;
-} finally {
+})
+.finally(function() {
 document.getElementById('paymentBtn').disabled = false;
-}
-}
-
-async function saveTransactionToBackend(data) {
-const response = await fetch(`${CONFIG.BACKEND_URL}/transaction`, {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify(data)
 });
 
-if (!response.ok) {
-const error = await response.json();
-throw new Error(error.error || 'Failed to save transaction');
+}, 500);
 }
 
-return await response.json();
-}
-
-// NEW: Trigger verification/forwarding process
-async function triggerVerification(txId) {
-try {
-const response = await fetch(`${CONFIG.BACKEND_URL}/verify`, {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ txId })
-});
-
-if (!response.ok) {
-const error = await response.json();
-console.warn('Verification trigger failed:', error.error);
-return null;
-}
-
-const result = await response.json();
-console.log('✅ Verification triggered:', result);
-return result;
-
-} catch (error) {
-console.error('Error triggering verification:', error);
-return null;
-}
-}
-
-// NEW: Combined monitoring and verification triggering
-async function monitorAndVerifyTransaction(txHash, txId) {
+function monitorTransaction(txHash) {
 if (!monitoringActive) return;
 
-const token = localStorage.getItem(`txToken:${txHash}`);
-if (!token) {
-updateStatus('❌ Missing token for status check', 'error');
-monitoringActive = false;
-return;
-}
+const token = localStorage.getItem('txToken:' + txHash);
 
-try {
-// Trigger verification process
-if (txId) {
-await triggerVerification(txId);
-}
-
-// Check transaction status
-const response = await fetch(`${CONFIG.BACKEND_URL}/transaction/${txHash}`, {
-headers: {
-'X-Client-Token': token
-}
-});
+fetch(CONFIG.BACKEND_URL + '/transaction/' + txHash, {
+headers: token ? { 'X-Client-Token': token } : {}
+})
+.then(function(response) {
 
 if (response.status === 404) {
 updateStep(5, 'completed');
 updateStatus('🎉 Complete!', 'connected');
 monitoringActive = false;
-setTimeout(() => {
+setTimeout(function() {
 resetSteps();
 document.getElementById('processingSteps').classList.remove('show');
 refreshBalance();
 }, 3000);
-return;
+return null;
 }
 
 if (!response.ok) {
-const err = await response.json().catch(() => ({}));
+return response.json().then(function(err) {
 throw new Error(err.error || 'Failed to fetch transaction status');
+}).catch(function() {
+throw new Error('Failed to fetch transaction status');
+});
 }
 
-const tx = await response.json();
+return response.json();
+})
+.then(function(tx) {
+if (!tx) return;
+
 const status = tx.status;
 
 if (status === 'pending') {
 updateStep(2, 'active');
 updateStatus('⏳ Verifying escrow...', 'processing');
-setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 15000);
+setTimeout(function() { monitorTransaction(txHash); }, 15000);
 } else if (status === 'verified') {
 updateStep(2, 'completed');
 updateStep(3, 'active');
 updateStatus('✅ Forwarding...', 'processing');
-setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 10000);
+setTimeout(function() { monitorTransaction(txHash); }, 10000);
 } else if (status === 'forwarding' || status === 'forwarding_pending') {
 updateStep(3, 'completed');
 updateStep(4, 'active');
 updateStatus('⏳ Verifying forward...', 'processing');
-setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 15000);
-} else if (status === 'complete') {
+setTimeout(function() { monitorTransaction(txHash); }, 15000);
+} else if (status === 'complete' || status === 'completed') {
 updateStep(4, 'completed');
 updateStep(5, 'completed');
 updateStatus('🎉 Complete!', 'connected');
 monitoringActive = false;
-setTimeout(() => {
+setTimeout(function() {
 resetSteps();
 document.getElementById('processingSteps').classList.remove('show');
 refreshBalance();
 }, 5000);
 } else if (status === 'failed' || status === 'forward_failed') {
-updateStatus(`❌ ${tx.error || 'Transaction failed'}`, 'error');
+updateStatus('❌ ' + (tx.error || 'Transaction failed'), 'error');
 resetSteps();
 monitoringActive = false;
 } else {
-setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 15000);
+setTimeout(function() { monitorTransaction(txHash); }, 15000);
 }
-
-} catch (error) {
+})
+.catch(function(error) {
 console.error('Monitor error:', error);
 if (monitoringActive) {
-setTimeout(() => monitorAndVerifyTransaction(txHash, txId), 20000);
+setTimeout(function() { monitorTransaction(txHash); }, 20000);
 }
-}
+});
 }
 
 function updateStep(stepNum, status) {
-const step = document.getElementById(`step${stepNum}`);
+const step = document.getElementById('step' + stepNum);
 step.classList.remove('active', 'completed');
 if (status) step.classList.add(status);
 }
@@ -817,7 +805,7 @@ updateStep(i, '');
 }
 
 function setupEventListeners() {
-window.ethereum.on('accountsChanged', (accounts) => {
+window.ethereum.on('accountsChanged', function(accounts) {
 if (accounts.length === 0) {
 location.reload();
 } else {
@@ -826,7 +814,7 @@ displayWalletInfo();
 }
 });
 
-window.ethereum.on('chainChanged', () => location.reload());
+window.ethereum.on('chainChanged', function() { location.reload(); });
 }
 
 function getNetworkName(chainId) {
@@ -834,43 +822,48 @@ const networks = {
 '0x1': 'Ethereum Mainnet',
 '0xaa36a7': 'Sepolia Testnet',
 '0x89': 'Polygon Mainnet',
-'0x13881': 'Mumbai Testnet',
+'0x13881': 'Mumbai Testnet'
 };
 return networks[chainId] || 'Unknown Network';
 }
 
 function updateStatus(message, type) {
 document.getElementById('statusText').textContent = message;
-document.getElementById('statusBox').className = `status-box ${type}`;
+document.getElementById('statusBox').className = 'status-box ' + type;
 }
 
-// Expose functions to window for inline event handlers
 window.connectMetaMask = connectMetaMask;
 window.calculateFees = calculateFees;
 window.initiatePayment = initiatePayment;
 
-window.addEventListener('load', async () => {
+window.addEventListener('load', function() {
 if (typeof window.ethereum !== 'undefined') {
-try {
-const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+window.ethereum.request({ method: 'eth_accounts' })
+.then(function(accounts) {
 if (accounts.length > 0) {
 currentAccount = accounts[0];
-currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+return window.ethereum.request({ method: 'eth_chainId' });
+}
+})
+.then(function(chainId) {
+if (chainId) {
+currentChainId = chainId;
 
 document.getElementById('connectBtn').classList.add('connected');
 document.getElementById('btnText').textContent = '✓ Connected';
 document.getElementById('connectBtn').disabled = true;
 updateStatus('✅ Connected', 'connected');
 
-await displayWalletInfo();
+displayWalletInfo();
 document.getElementById('walletSection').classList.add('show');
 setupEventListeners();
 refreshGasPrice();
 setInterval(refreshGasPrice, 15000);
 }
-} catch (error) {
+})
+.catch(function(error) {
 console.log('Not previously connected');
-}
+});
 }
 });
 </script>
