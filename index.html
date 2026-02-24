@@ -28,9 +28,7 @@ body {
 }
 
 .logo { text-align: center; font-size: 60px; margin-bottom: 20px; }
-
 h1 { color: #333; text-align: center; margin-bottom: 10px; }
-
 .subtitle { text-align: center; color: #666; margin-bottom: 30px; font-size: 14px; }
 
 .security-badge {
@@ -42,7 +40,7 @@ h1 { color: #333; text-align: center; margin-bottom: 10px; }
   text-align: center;
 }
 .security-badge h3 { color: #155724; font-size: 14px; margin-bottom: 5px; }
-.security-badge p { color: #155724; font-size: 12px; }
+.security-badge p  { color: #155724; font-size: 12px; }
 
 .status-box {
   background: #f8f9fa;
@@ -91,7 +89,6 @@ button.connected { background: linear-gradient(135deg, #28a745 0%, #218838 100%)
 .payment-form { background: #f8f9fa; padding: 25px; border-radius: 12px; margin-top: 20px; }
 .payment-form h3 { margin-bottom: 20px; color: #333; }
 .form-group { margin-bottom: 20px; }
-
 label { display: block; font-size: 14px; font-weight: 600; color: #555; margin-bottom: 8px; }
 
 input {
@@ -138,7 +135,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   margin-left: 10px;
 }
 
-/* Chain warning banner */
 .chain-warning {
   display: none;
   background: #fff3cd;
@@ -154,7 +150,7 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 .chain-warning.show { display: block; }
 
 /* ============================================================
-   TRANSACTION MODAL
+   PAYMENT MODAL  — user sees NOTHING about escrow / forwarding
    ============================================================ */
 .tx-modal {
   position: fixed;
@@ -170,170 +166,154 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 .tx-modal__backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0,0,0,0.55);
-  backdrop-filter: blur(4px);
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(5px);
 }
 
 .tx-modal__card {
   position: relative;
   background: #fff;
-  border-radius: 22px;
-  padding: 32px 28px 26px;
+  border-radius: 24px;
+  padding: 36px 30px 28px;
   width: 100%;
-  max-width: 490px;
-  box-shadow: 0 28px 90px rgba(0,0,0,0.45);
-  animation: modalPop 0.32s cubic-bezier(.34,1.56,.64,1);
+  max-width: 460px;
+  box-shadow: 0 30px 100px rgba(0,0,0,0.45);
+  animation: popIn 0.3s cubic-bezier(.34,1.56,.64,1);
+  text-align: center;
 }
-@keyframes modalPop {
-  from { opacity:0; transform: scale(0.86) translateY(24px); }
-  to   { opacity:1; transform: scale(1)   translateY(0); }
+@keyframes popIn {
+  from { opacity:0; transform: scale(0.85) translateY(28px); }
+  to   { opacity:1; transform: scale(1)    translateY(0); }
 }
 
-.tx-modal__icon { font-size: 46px; text-align: center; margin-bottom: 8px; }
-.tx-modal__title {
-  font-size: 21px;
+/* Big animated icon area */
+.modal-icon-wrap {
+  position: relative;
+  width: 88px; height: 88px;
+  margin: 0 auto 20px;
+}
+
+/* Spinning ring shown while loading */
+.spin-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 4px solid #e8e8ef;
+  border-top-color: #667eea;
+  border-right-color: #f6851b;
+  animation: ringRotate 1s linear infinite;
+}
+@keyframes ringRotate { to { transform: rotate(360deg); } }
+
+.spin-ring.hidden { display: none; }
+
+.modal-icon-inner {
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea22, #f6851b22);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 32px;
+}
+
+.modal-title {
+  font-size: 22px;
   font-weight: 800;
   color: #1a1a1a;
-  text-align: center;
-  margin-bottom: 22px;
-  letter-spacing: -0.3px;
+  margin-bottom: 6px;
+  letter-spacing: -0.4px;
 }
 
-/* Animated coin-travel tunnel */
-.tx-tunnel {
-  position: relative;
-  height: 58px;
-  border-radius: 16px;
-  background: linear-gradient(90deg, #f0f2ff 0%, #fdf0e6 100%);
-  border: 1.5px solid #e0e0e0;
+.modal-subtitle {
+  font-size: 14px;
+  color: #888;
+  margin-bottom: 24px;
+  min-height: 20px;
+}
+
+/* Slim progress bar shown while loading */
+.progress-bar-wrap {
+  width: 100%;
+  height: 4px;
+  background: #f0f0f5;
+  border-radius: 4px;
+  margin-bottom: 24px;
   overflow: hidden;
-  margin-bottom: 22px;
 }
-.tx-tunnel.success { background: linear-gradient(90deg, #d4edda, #b8dfc4); border-color: #28a745; }
-.tx-tunnel.error   { background: linear-gradient(90deg, #f8d7da, #f1b3b7); border-color: #dc3545; }
-
-.tunnel-label-left {
-  position: absolute; left: 10px; top: 50%;
-  transform: translateY(-50%);
-  font-size: 10px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.5px;
+.progress-bar-wrap.hidden { display: none; }
+.progress-bar-inner {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #667eea, #f6851b);
+  animation: progressPulse 1.8s ease-in-out infinite;
+  width: 60%;
 }
-.tunnel-label-right {
-  position: absolute; right: 10px; top: 50%;
-  transform: translateY(-50%);
-  font-size: 10px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.5px;
-  text-align: right;
+@keyframes progressPulse {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
 }
 
-.tunnel-coin {
-  position: absolute;
-  top: 50%; transform: translateY(-50%);
-  width: 34px; height: 34px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #f6851b, #e2761b);
-  box-shadow: 0 3px 10px rgba(246,133,27,0.5);
-  display: flex; align-items: center; justify-content: center;
-  color: white; font-size: 15px; font-weight: 800;
-  animation: coinTravel 1.4s ease-in-out infinite;
+/* Details rows (To / Amount / Network) */
+.modal-details {
+  background: #f8f9fb;
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  text-align: left;
 }
-.tunnel-coin.stopped { animation: none; left: calc(100% - 44px); opacity: 0.5; }
-.tunnel-coin.gone    { display: none; }
-
-.tunnel-result {
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 28px;
-  opacity: 0;
-  transition: opacity 0.4s ease;
-}
-.tunnel-result.show { opacity: 1; }
-
-.tunnel-track {
-  position: absolute;
-  top: 50%; left: 44px; right: 44px; height: 2px;
-  background: repeating-linear-gradient(90deg, #e0e0e0 0, #e0e0e0 6px, transparent 6px, transparent 12px);
-  transform: translateY(-50%);
-}
-
-@keyframes coinTravel {
-  0%   { left: 10px;               opacity: 0.5; transform: translateY(-50%) scale(0.85); }
-  40%  { opacity: 1;               transform: translateY(-50%) scale(1.05); }
-  100% { left: calc(100% - 44px); opacity: 0.5; transform: translateY(-50%) scale(0.85); }
-}
-
-/* Info rows */
-.tx-info-rows { margin-bottom: 16px; }
-.tx-info-row {
+.detail-row {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  padding: 9px 0;
-  border-bottom: 1px solid #f2f2f2;
+  padding: 7px 0;
+  border-bottom: 1px solid #eeeff3;
 }
-.tx-info-row:last-child { border-bottom: none; }
-.tx-info-row .lbl { color: #888; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0; padding-top: 1px; }
-.tx-info-row .val { color: #1a1a1a; font-size: 13px; word-break: break-all; text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.detail-row:last-child { border-bottom: none; }
+.detail-row .dl { color: #999; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0; padding-top: 2px; }
+.detail-row .dv { color: #1a1a1a; font-size: 13px; word-break: break-all; text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
-/* Status pill */
-.tx-status-pill {
-  padding: 11px 14px;
-  border-radius: 12px;
-  font-weight: 700;
-  font-size: 14px;
-  text-align: center;
-  margin-bottom: 16px;
-  transition: background 0.3s, border-color 0.3s, color 0.3s;
-  border: 1.5px solid #e8e8ef;
-  background: #f6f7fb;
-  color: #555;
-}
-.tx-status-pill.processing { background: #fff9e6; border-color: #ffc107; color: #856404; }
-.tx-status-pill.success    { background: #d4edda; border-color: #28a745; color: #155724; }
-.tx-status-pill.error      { background: #f8d7da; border-color: #dc3545; color: #721c24; }
+/* Reference row — hidden during loading, shown after */
+.ref-row { display: none; }
+.ref-row.show { display: flex; }
 
-/* Dot loader */
-.dot-loader { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
-.dot-loader span {
-  width: 5px; height: 5px; border-radius: 50%;
-  background: currentColor;
-  animation: dotBounce 1.2s infinite ease-in-out;
-}
-.dot-loader span:nth-child(2) { animation-delay: 0.2s; }
-.dot-loader span:nth-child(3) { animation-delay: 0.4s; }
-@keyframes dotBounce {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40%            { transform: scale(1.1); opacity: 1;   }
-}
-
-/* Action button inside modal */
-.tx-action-btn {
-  width: 100%; padding: 14px;
-  border-radius: 13px;
+/* Bottom action button */
+.modal-btn {
+  width: 100%; padding: 15px;
+  border-radius: 14px;
   font-size: 16px; font-weight: 700;
   border: none; cursor: pointer; margin: 0;
   transition: all 0.2s;
-  box-shadow: none;
+  display: none;
 }
-.tx-action-btn.hidden { display: none; }
-.tx-action-btn.success-btn { background: linear-gradient(135deg, #28a745, #218838); color: white; box-shadow: 0 4px 14px rgba(40,167,69,0.35); }
-.tx-action-btn.error-btn   { background: linear-gradient(135deg, #dc3545, #c82333); color: white; box-shadow: 0 4px 14px rgba(220,53,69,0.35); }
-.tx-action-btn:hover:not(:disabled) { transform: translateY(-1px); }
+.modal-btn.show { display: block; }
+.modal-btn.success { background: linear-gradient(135deg, #28a745, #218838); color: white; box-shadow: 0 4px 16px rgba(40,167,69,0.35); }
+.modal-btn.fail    { background: linear-gradient(135deg, #dc3545, #c82333); color: white; box-shadow: 0 4px 16px rgba(220,53,69,0.35); }
+.modal-btn:hover   { transform: translateY(-1px); }
 
-/* Etherscan link */
-.etherscan-link {
-  display: block;
+.explorer-link {
+  display: none;
   text-align: center;
-  margin-top: 10px;
-  margin-bottom: 4px;
+  margin-top: 12px;
   font-size: 12px;
   color: #667eea;
   text-decoration: none;
+  cursor: pointer;
 }
-.etherscan-link:hover { text-decoration: underline; }
-.etherscan-link.hidden { display: none; }
+.explorer-link.show { display: block; }
+.explorer-link:hover { text-decoration: underline; }
+
+/* Success / fail pulse on icon */
+@keyframes successPop {
+  0%   { transform: scale(0.5); opacity: 0; }
+  70%  { transform: scale(1.15); }
+  100% { transform: scale(1);    opacity: 1; }
+}
+.modal-icon-inner.animate { animation: successPop 0.45s cubic-bezier(.34,1.56,.64,1); }
 </style>
 </head>
 <body>
+
 <div class="container">
   <div class="logo">🔒</div>
   <h1>Secure Payment Gateway</h1>
@@ -341,7 +321,7 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 
   <div class="security-badge">
     <h3>🛡️ ETH Transfers Only</h3>
-    <p>Ethereum Mainnet &amp; Sepolia Testnet · Automated escrow · Identity stays hidden</p>
+    <p>Ethereum Mainnet &amp; Sepolia Testnet · Instant · Secure · Private</p>
   </div>
 
   <div id="statusBox" class="status-box">
@@ -357,7 +337,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
       <div class="info-label">Your Wallet (Hidden from Recipient)</div>
       <div class="info-value" id="walletAddress">-</div>
     </div>
-
     <div class="info-card">
       <div class="info-label">Network</div>
       <div class="info-value">
@@ -365,41 +344,27 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
         <span id="chainBadge" class="network-badge">-</span>
       </div>
     </div>
-
     <div class="info-card">
       <div class="info-label">Available Balance</div>
       <div class="info-value" id="balance">-</div>
     </div>
 
-    <!-- Chain enforcement warning -->
     <div id="chainWarning" class="chain-warning">
-      ⛔ Wrong network detected. Please switch MetaMask to
-      <strong>Ethereum Mainnet</strong> or <strong>Sepolia Testnet</strong> to use this app.
+      ⛔ Wrong network. Switch to <strong>Ethereum Mainnet</strong> or <strong>Sepolia Testnet</strong>.
     </div>
 
     <div class="payment-form">
-      <h3>💸 Send Secure ETH Payment</h3>
+      <h3>💸 Send ETH Payment</h3>
 
       <div class="form-group">
         <label for="destinationAddress">Recipient Address</label>
-        <input
-          type="text"
-          id="destinationAddress"
-          placeholder="0x... recipient wallet address"
-        >
+        <input type="text" id="destinationAddress" placeholder="0x... recipient wallet address">
         <div id="addressError" class="error-text" style="display:none;"></div>
       </div>
 
       <div class="form-group">
         <label for="amount">Amount to Send (ETH)</label>
-        <input
-          type="number"
-          id="amount"
-          placeholder="e.g. 0.01"
-          step="0.0001"
-          min="0.0001"
-          oninput="calculateFees()"
-        >
+        <input type="number" id="amount" placeholder="e.g. 0.01" step="0.0001" min="0.0001" oninput="calculateFees()">
         <div id="amountError" class="error-text" style="display:none;"></div>
       </div>
 
@@ -407,181 +372,147 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
         <h4>💰 Payment Breakdown</h4>
         <div class="fee-row"><span>You Send:</span><span id="youSend">0 ETH</span></div>
         <div class="fee-row"><span>Platform Fee (1%):</span><span id="platformFee">0 ETH</span></div>
-        <div class="fee-row"><span>Forward Gas Buffer (prepaid):</span><span id="forwardGas">0 ETH</span></div>
-        <div class="fee-row"><span>Your Transaction Gas (est.):</span><span id="tx1Gas">0 ETH</span></div>
+        <div class="fee-row"><span>Network Gas (est.):</span><span id="forwardGas">0 ETH</span></div>
+        <div class="fee-row"><span>Your Tx Gas (est.):</span><span id="tx1Gas">0 ETH</span></div>
         <div class="fee-row total"><span>Total from Your Wallet:</span><span id="totalDeduction">0 ETH</span></div>
       </div>
 
-      <button onclick="initiatePayment()" id="paymentBtn">
-        Send Secure Payment
-      </button>
+      <button onclick="initiatePayment()" id="paymentBtn">Send Secure Payment</button>
     </div>
   </div>
 </div>
 
 <!-- ============================================================
-     ANIMATED TRANSACTION MODAL
+     PAYMENT PROCESSING MODAL
+     User sees ONLY: loading → success / fail
+     All escrow / forwarding / backend steps are hidden
      ============================================================ -->
 <div id="txModal" class="tx-modal hidden">
   <div class="tx-modal__backdrop"></div>
   <div class="tx-modal__card">
 
-    <div class="tx-modal__icon" id="modalIcon">⏳</div>
-    <div class="tx-modal__title" id="modalTitle">Processing Payment</div>
-
-    <!-- Coin-travel animation bar -->
-    <div class="tx-tunnel" id="txTunnel">
-      <div class="tunnel-track"></div>
-      <span class="tunnel-label-left" id="tunnelFrom">You</span>
-      <div class="tunnel-coin" id="tunnelCoin">Ξ</div>
-      <div class="tunnel-result" id="tunnelResult"></div>
-      <span class="tunnel-label-right" id="tunnelTo">Escrow</span>
+    <!-- Animated icon -->
+    <div class="modal-icon-wrap">
+      <div class="spin-ring" id="spinRing"></div>
+      <div class="modal-icon-inner" id="modalIconInner">💸</div>
     </div>
 
-    <!-- Transaction details -->
-    <div class="tx-info-rows">
-      <div class="tx-info-row">
-        <span class="lbl">Sending to</span>
-        <span class="val" id="modalTo">-</span>
+    <div class="modal-title" id="modalTitle">Sending Payment</div>
+    <div class="modal-subtitle" id="modalSubtitle">Please wait, do not close this window</div>
+
+    <!-- Indeterminate progress bar (hidden on done) -->
+    <div class="progress-bar-wrap" id="progressBarWrap">
+      <div class="progress-bar-inner"></div>
+    </div>
+
+    <!-- Payment details -->
+    <div class="modal-details">
+      <div class="detail-row">
+        <span class="dl">To</span>
+        <span class="dv" id="modalTo">-</span>
       </div>
-      <div class="tx-info-row">
-        <span class="lbl">Amount</span>
-        <span class="val" id="modalAmount">-</span>
+      <div class="detail-row">
+        <span class="dl">Amount</span>
+        <span class="dv" id="modalAmount">-</span>
       </div>
-      <div class="tx-info-row">
-        <span class="lbl">Network</span>
-        <span class="val" id="modalNetwork">-</span>
+      <div class="detail-row">
+        <span class="dl">Network</span>
+        <span class="dv" id="modalNetwork">-</span>
       </div>
-      <div class="tx-info-row" id="modalTxHashRow">
-        <span class="lbl">Tx Hash</span>
-        <span class="val" id="modalTxHash">Waiting for signature...</span>
+      <!-- Reference (tx hash) shown ONLY after success or failure -->
+      <div class="detail-row ref-row" id="refRow">
+        <span class="dl">Reference</span>
+        <span class="dv" id="modalRef">-</span>
       </div>
     </div>
 
-    <!-- Status pill -->
-    <div class="tx-status-pill processing" id="modalStatus">
-      Sending to secure escrow
-      <span class="dot-loader"><span></span><span></span><span></span></span>
-    </div>
+    <!-- Close button (shown only on success / fail) -->
+    <button id="modalBtn" class="modal-btn" onclick="closeTxModal()">Done</button>
 
-    <!-- Etherscan link (shown after tx hash known) -->
-    <a id="etherscanLink" class="etherscan-link hidden" href="#" target="_blank" rel="noopener">
-      View on Etherscan ↗
-    </a>
-
-    <!-- Close button (shown only when done/failed) -->
-    <button id="modalCloseBtn" class="tx-action-btn hidden" onclick="closeTxModal()">Done</button>
+    <!-- Etherscan link (shown only on success / fail) -->
+    <a id="explorerLink" class="explorer-link" href="#" target="_blank" rel="noopener">View on Etherscan ↗</a>
 
   </div>
 </div>
 
 <script>
-// ============================================================
-// CONFIG — update ESCROW_WALLET and BACKEND_URL as needed
-// ============================================================
 const CONFIG = {
   ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
   FEE_PERCENTAGE: 1,
   BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api'
 };
 
-// ============================================================
-// STRICT CHAIN ENFORCEMENT — ONLY ETH MAINNET + SEPOLIA
-// ============================================================
 const ALLOWED_CHAINS = new Set(['0x1', '0xaa36a7']);
-const CHAIN_NAMES = {
-  '0x1':      'Ethereum Mainnet',
-  '0xaa36a7': 'Sepolia Testnet'
-};
-const ETHERSCAN_BASE = {
-  '0x1':      'https://etherscan.io/tx/',
-  '0xaa36a7': 'https://sepolia.etherscan.io/tx/'
-};
+const CHAIN_NAMES    = { '0x1': 'Ethereum Mainnet', '0xaa36a7': 'Sepolia Testnet' };
+const EXPLORER_BASE  = { '0x1': 'https://etherscan.io/tx/', '0xaa36a7': 'https://sepolia.etherscan.io/tx/' };
 
-let currentAccount   = null;
-let currentChainId   = null;
-let monitoringActive = false;
-let liveGasPriceWei  = null;
+let currentAccount    = null;
+let currentChainId    = null;
+let monitoringActive  = false;
+let liveGasPriceWei   = null;
 let currentBalanceWei = 0n;
 
 const GAS_SAFETY_MULTIPLIER = 1.5;
-const FORWARD_GAS_LIMIT = 21000;
-const TX1_GAS_LIMIT     = 21000;
+const FORWARD_GAS_LIMIT     = 21000;
+const TX1_GAS_LIMIT         = 21000;
 
-// ============================================================
-// CHAIN ENFORCEMENT
-// ============================================================
+// ── Chain guard ──────────────────────────────────────────────
 function enforceAllowedChain() {
   const ok = ALLOWED_CHAINS.has(currentChainId);
-  const warning = document.getElementById('chainWarning');
-  const payBtn  = document.getElementById('paymentBtn');
-  if (!ok) {
-    warning.classList.add('show');
-    if (payBtn) payBtn.disabled = true;
-    updateStatus('⛔ Wrong network — Ethereum or Sepolia only', 'error');
-  } else {
-    warning.classList.remove('show');
-    if (payBtn) payBtn.disabled = false;
-  }
+  document.getElementById('chainWarning').classList.toggle('show', !ok);
+  const btn = document.getElementById('paymentBtn');
+  if (btn) btn.disabled = !ok;
+  if (!ok) updateStatus('⛔ Switch to Ethereum or Sepolia to proceed', 'error');
   return ok;
 }
 
-// ============================================================
-// GAS PRICE REFRESH
-// ============================================================
+// ── Gas price ─────────────────────────────────────────────────
 function refreshGasPrice() {
-  if (typeof window.ethereum === 'undefined') return;
+  if (!window.ethereum) return;
   window.ethereum.request({ method: 'eth_gasPrice' })
-    .then(function(hexWei) { liveGasPriceWei = BigInt(hexWei); calculateFees(); })
-    .catch(function(err) { console.error('Gas price fetch failed:', err); });
+    .then(h => { liveGasPriceWei = BigInt(h); calculateFees(); })
+    .catch(() => {});
 }
 
-// ============================================================
-// METAMASK CONNECT
-// ============================================================
+// ── MetaMask connect ──────────────────────────────────────────
 function connectMetaMask() {
-  const btn     = document.getElementById('connectBtn');
-  const btnText = document.getElementById('btnText');
-
-  if (typeof window.ethereum === 'undefined') {
+  const btn  = document.getElementById('connectBtn');
+  const text = document.getElementById('btnText');
+  if (!window.ethereum) {
     updateStatus('MetaMask not installed!', 'error');
-    setTimeout(function() { window.open('https://metamask.io/download/', '_blank'); }, 2000);
+    setTimeout(() => window.open('https://metamask.io/download/', '_blank'), 2000);
     return;
   }
-
-  btnText.innerHTML = 'Connecting<span class="spinner"></span>';
+  text.innerHTML = 'Connecting<span class="spinner"></span>';
   btn.disabled = true;
-
   window.ethereum.request({ method: 'eth_requestAccounts' })
-    .then(function(accounts) {
-      if (accounts.length === 0) throw new Error('No accounts found');
+    .then(accounts => {
+      if (!accounts.length) throw new Error('No accounts found');
       currentAccount = accounts[0];
       return window.ethereum.request({ method: 'eth_chainId' });
     })
-    .then(function(chainId) {
+    .then(chainId => {
       currentChainId = chainId;
-      const allowed = enforceAllowedChain();
-      if (allowed) updateStatus('✅ Connected', 'connected');
-      btnText.textContent = '✓ Connected';
+      if (enforceAllowedChain()) updateStatus('✅ Connected', 'connected');
+      text.textContent = '✓ Connected';
       btn.classList.add('connected');
       btn.disabled = true;
       displayWalletInfo();
       document.getElementById('walletSection').classList.add('show');
-      setupEventListeners();
+      setupListeners();
       refreshGasPrice();
       setInterval(refreshGasPrice, 15000);
     })
-    .catch(function(error) {
-      console.error('Connection error:', error);
-      updateStatus(error.message || 'Connection failed', 'error');
-      btnText.textContent = 'Connect MetaMask';
+    .catch(err => {
+      updateStatus(err.message || 'Connection failed', 'error');
+      text.textContent = 'Connect MetaMask';
       btn.disabled = false;
     });
 }
 
 function displayWalletInfo() {
   document.getElementById('walletAddress').textContent = currentAccount;
-  const name = CHAIN_NAMES[currentChainId] || ('Unknown Network (Chain ' + parseInt(currentChainId, 16) + ')');
+  const name = CHAIN_NAMES[currentChainId] || ('Unknown (Chain ' + parseInt(currentChainId, 16) + ')');
   document.getElementById('networkName').textContent = name;
   document.getElementById('chainBadge').textContent  = 'Chain ' + parseInt(currentChainId, 16);
   refreshBalance();
@@ -589,129 +520,100 @@ function displayWalletInfo() {
 
 function refreshBalance() {
   window.ethereum.request({ method: 'eth_getBalance', params: [currentAccount, 'latest'] })
-    .then(function(balance) {
-      currentBalanceWei = BigInt(balance);
+    .then(b => {
+      currentBalanceWei = BigInt(b);
       document.getElementById('balance').textContent = (Number(currentBalanceWei) / 1e18).toFixed(6) + ' ETH';
-    })
-    .catch(function(error) { console.error('Error getting balance:', error); });
+    }).catch(() => {});
 }
 
-// ============================================================
-// FEE CALCULATOR
-// ============================================================
+// ── Fee calculator ────────────────────────────────────────────
 function calculateFees() {
-  const sendAmount = parseFloat(document.getElementById('amount').value) || 0;
-  if (sendAmount <= 0) { document.getElementById('feeBreakdown').style.display = 'none'; return; }
-
-  const platformFee = sendAmount * (CONFIG.FEE_PERCENTAGE / 100);
-  let forwardGasBufferEth = 0, tx1GasEth = 0;
-
-  if (liveGasPriceWei !== null) {
+  const amt = parseFloat(document.getElementById('amount').value) || 0;
+  if (amt <= 0) { document.getElementById('feeBreakdown').style.display = 'none'; return; }
+  const fee = amt * CONFIG.FEE_PERCENTAGE / 100;
+  let fwdGas = 0, tx1Gas = 0;
+  if (liveGasPriceWei) {
     const gp = Number(liveGasPriceWei);
-    forwardGasBufferEth = (FORWARD_GAS_LIMIT * gp * GAS_SAFETY_MULTIPLIER) / 1e18;
-    tx1GasEth           = (TX1_GAS_LIMIT * gp) / 1e18;
+    fwdGas = FORWARD_GAS_LIMIT * gp * GAS_SAFETY_MULTIPLIER / 1e18;
+    tx1Gas = TX1_GAS_LIMIT * gp / 1e18;
   }
-
-  const totalDeduction = sendAmount + platformFee + forwardGasBufferEth + tx1GasEth;
-
-  document.getElementById('youSend').textContent      = sendAmount.toFixed(6)             + ' ETH';
-  document.getElementById('platformFee').textContent  = platformFee.toFixed(6)            + ' ETH';
-  document.getElementById('forwardGas').textContent   = forwardGasBufferEth.toFixed(6)    + ' ETH';
-  document.getElementById('tx1Gas').textContent       = tx1GasEth.toFixed(6)              + ' ETH';
-  document.getElementById('totalDeduction').textContent = totalDeduction.toFixed(6)       + ' ETH';
+  document.getElementById('youSend').textContent      = amt.toFixed(6) + ' ETH';
+  document.getElementById('platformFee').textContent  = fee.toFixed(6) + ' ETH';
+  document.getElementById('forwardGas').textContent   = fwdGas.toFixed(6) + ' ETH';
+  document.getElementById('tx1Gas').textContent       = tx1Gas.toFixed(6) + ' ETH';
+  document.getElementById('totalDeduction').textContent = (amt + fee + fwdGas + tx1Gas).toFixed(6) + ' ETH';
   document.getElementById('feeBreakdown').style.display = 'block';
 }
 
-function validateAddress(address) {
-  return address && /^0x[0-9a-fA-F]{40}$/.test(address);
-}
+function validateAddress(a) { return /^0x[0-9a-fA-F]{40}$/.test(a); }
 
-// ============================================================
-// MODAL HELPERS
-// ============================================================
-function openTxModal(to, amountEth, networkName) {
-  document.getElementById('modalTo').textContent      = to          || '-';
-  document.getElementById('modalAmount').textContent  = amountEth != null ? amountEth + ' ETH' : '-';
-  document.getElementById('modalNetwork').textContent = networkName || '-';
-  document.getElementById('modalTxHash').textContent  = 'Waiting for signature...';
-  document.getElementById('modalIcon').textContent    = '⏳';
-  document.getElementById('modalTitle').textContent   = 'Processing Payment';
+// ── MODAL HELPERS (user sees nothing internal) ────────────────
+function openModal(to, amountEth, network) {
+  document.getElementById('modalTo').textContent      = to         || '-';
+  document.getElementById('modalAmount').textContent  = amountEth ? amountEth + ' ETH' : '-';
+  document.getElementById('modalNetwork').textContent = network    || '-';
+  document.getElementById('modalRef').textContent     = '-';
 
-  // Reset tunnel
-  const tunnel = document.getElementById('txTunnel');
-  tunnel.className = 'tx-tunnel';
-  const coin   = document.getElementById('tunnelCoin');
-  coin.className = 'tunnel-coin';
-  document.getElementById('tunnelResult').textContent = '';
-  document.getElementById('tunnelResult').className   = 'tunnel-result';
-  document.getElementById('tunnelTo').textContent     = 'Escrow';
-
-  setModalStatus('Sending to secure escrow', 'processing', true);
-
-  // Etherscan link
-  document.getElementById('etherscanLink').classList.add('hidden');
-  // Close button
-  document.getElementById('modalCloseBtn').classList.add('hidden');
-  document.getElementById('modalCloseBtn').className = 'tx-action-btn hidden';
+  // Reset to loading state
+  document.getElementById('spinRing').classList.remove('hidden');
+  document.getElementById('modalIconInner').textContent = '💸';
+  document.getElementById('modalIconInner').classList.remove('animate');
+  document.getElementById('modalIconInner').style.background = 'linear-gradient(135deg,#667eea22,#f6851b22)';
+  document.getElementById('modalTitle').textContent    = 'Sending Payment';
+  document.getElementById('modalSubtitle').textContent = 'Please wait, do not close this window';
+  document.getElementById('progressBarWrap').classList.remove('hidden');
+  document.getElementById('refRow').classList.remove('show');
+  document.getElementById('modalBtn').classList.remove('show', 'success', 'fail');
+  document.getElementById('explorerLink').classList.remove('show');
 
   document.getElementById('txModal').classList.remove('hidden');
 }
 
-function setModalStatus(text, type, withDots) {
-  const el = document.getElementById('modalStatus');
-  el.className = 'tx-status-pill ' + (type || '');
-  if (withDots) {
-    el.innerHTML = text + '<span class="dot-loader"><span></span><span></span><span></span></span>';
-  } else {
-    el.textContent = text;
-  }
-}
-
-function setModalTxHash(txHash) {
-  if (!txHash) return;
-  const short = txHash.substring(0, 10) + '...' + txHash.substring(txHash.length - 6);
-  document.getElementById('modalTxHash').textContent = short;
-
-  // Etherscan link
-  const base = ETHERSCAN_BASE[currentChainId];
-  if (base) {
-    const link = document.getElementById('etherscanLink');
-    link.href = base + txHash;
-    link.classList.remove('hidden');
-  }
+function setLoadingText(subtitle) {
+  // Update subtitle only — title stays "Sending Payment" throughout
+  document.getElementById('modalSubtitle').textContent = subtitle || 'Please wait, do not close this window';
 }
 
 function finalizeModal(success, txHash) {
-  const tunnel = document.getElementById('txTunnel');
-  const coin   = document.getElementById('tunnelCoin');
-  const result = document.getElementById('tunnelResult');
-  const btn    = document.getElementById('modalCloseBtn');
+  // Stop spinner + progress bar
+  document.getElementById('spinRing').classList.add('hidden');
+  document.getElementById('progressBarWrap').classList.add('hidden');
+
+  // Trigger icon animation
+  const iconInner = document.getElementById('modalIconInner');
+  void iconInner.offsetWidth; // force reflow for animation restart
+  iconInner.classList.add('animate');
+
+  const btn = document.getElementById('modalBtn');
 
   if (success) {
-    document.getElementById('modalIcon').textContent  = '✅';
-    document.getElementById('modalTitle').textContent = 'Payment Successful!';
-    tunnel.className      = 'tx-tunnel success';
-    coin.className        = 'tunnel-coin gone';
-    result.textContent    = '✅';
-    result.className      = 'tunnel-result show';
-    document.getElementById('tunnelTo').textContent = 'Delivered ✓';
-    setModalStatus('ETH successfully delivered to recipient', 'success', false);
-    btn.textContent = '✅ Done';
-    btn.className   = 'tx-action-btn success-btn';
+    iconInner.textContent   = '✅';
+    iconInner.style.background = 'linear-gradient(135deg,#d4edda,#b8dfc4)';
+    document.getElementById('modalTitle').textContent    = 'Payment Sent!';
+    document.getElementById('modalSubtitle').textContent = 'The ETH has been delivered to the recipient.';
+    btn.textContent = 'Done';
+    btn.classList.add('show', 'success');
   } else {
-    document.getElementById('modalIcon').textContent  = '❌';
-    document.getElementById('modalTitle').textContent = 'Transaction Failed';
-    tunnel.className      = 'tx-tunnel error';
-    coin.className        = 'tunnel-coin stopped';
-    result.textContent    = '❌';
-    result.className      = 'tunnel-result show';
-    setModalStatus('Transaction could not be completed', 'error', false);
-    btn.textContent = '❌ Close';
-    btn.className   = 'tx-action-btn error-btn';
+    iconInner.textContent   = '❌';
+    iconInner.style.background = 'linear-gradient(135deg,#f8d7da,#f1b3b7)';
+    document.getElementById('modalTitle').textContent    = 'Payment Failed';
+    document.getElementById('modalSubtitle').textContent = 'The transaction could not be completed. Please try again.';
+    btn.textContent = 'Close';
+    btn.classList.add('show', 'fail');
   }
 
-  if (txHash) setModalTxHash(txHash);
-  btn.classList.remove('hidden');
+  // Show reference hash
+  if (txHash) {
+    const short = txHash.slice(0,10) + '...' + txHash.slice(-6);
+    document.getElementById('modalRef').textContent = short;
+    document.getElementById('refRow').classList.add('show');
+    const base = EXPLORER_BASE[currentChainId];
+    if (base) {
+      const link = document.getElementById('explorerLink');
+      link.href = base + txHash;
+      link.classList.add('show');
+    }
+  }
 }
 
 function closeTxModal() {
@@ -721,89 +623,69 @@ function closeTxModal() {
 }
 window.closeTxModal = closeTxModal;
 
-// ============================================================
-// INITIATE PAYMENT
-// ============================================================
+// ── Payment ───────────────────────────────────────────────────
 function initiatePayment() {
-  // STRICT chain guard
-  if (!enforceAllowedChain()) {
-    updateStatus('⛔ Switch to Ethereum Mainnet or Sepolia first', 'error');
-    return;
-  }
+  if (!enforceAllowedChain()) return;
 
-  const destinationAddress = document.getElementById('destinationAddress').value.trim();
-  const sendAmount         = parseFloat(document.getElementById('amount').value);
+  const dest   = document.getElementById('destinationAddress').value.trim();
+  const amount = parseFloat(document.getElementById('amount').value);
 
   document.getElementById('addressError').style.display = 'none';
   document.getElementById('amountError').style.display  = 'none';
 
-  if (!validateAddress(destinationAddress)) {
-    document.getElementById('addressError').textContent = 'Invalid Ethereum address (must be 0x + 40 hex chars)';
+  if (!validateAddress(dest)) {
+    document.getElementById('addressError').textContent = 'Invalid Ethereum address';
     document.getElementById('addressError').style.display = 'block';
     return;
   }
-
-  if (!sendAmount || sendAmount <= 0) {
-    document.getElementById('amountError').textContent = 'Please enter a valid ETH amount';
+  if (!amount || amount <= 0) {
+    document.getElementById('amountError').textContent = 'Enter a valid ETH amount';
     document.getElementById('amountError').style.display = 'block';
     return;
   }
 
-  const recipientWei      = BigInt(Math.floor(sendAmount * 1e18));
-  const platformFeeWei    = BigInt(Math.floor(sendAmount * (CONFIG.FEE_PERCENTAGE / 100) * 1e18));
-  let forwardGasBufferWei = 0n;
-  let tx1GasWei           = 0n;
-
-  if (liveGasPriceWei !== null) {
+  const recipientWei   = BigInt(Math.floor(amount * 1e18));
+  const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
+  let fwdGasWei = 0n, tx1GasWei = 0n;
+  if (liveGasPriceWei) {
     const gp = Number(liveGasPriceWei);
-    forwardGasBufferWei = BigInt(Math.floor(FORWARD_GAS_LIMIT * gp * GAS_SAFETY_MULTIPLIER));
-    tx1GasWei           = BigInt(Math.floor(TX1_GAS_LIMIT * gp));
+    fwdGasWei = BigInt(Math.floor(FORWARD_GAS_LIMIT * gp * GAS_SAFETY_MULTIPLIER));
+    tx1GasWei = BigInt(Math.floor(TX1_GAS_LIMIT * gp));
   }
-
-  const totalToSendWei = recipientWei + platformFeeWei + forwardGasBufferWei;
+  const totalToSendWei = recipientWei + platformFeeWei + fwdGasWei;
   const totalRequired  = totalToSendWei + tx1GasWei;
 
   refreshBalance();
 
-  setTimeout(function() {
+  setTimeout(() => {
     if (currentBalanceWei < totalRequired) {
       const shortfall = Number(totalRequired - currentBalanceWei) / 1e18;
-      document.getElementById('amountError').textContent =
-        'Insufficient balance — you need ' + shortfall.toFixed(6) + ' more ETH.';
+      document.getElementById('amountError').textContent = 'Insufficient balance — need ' + shortfall.toFixed(6) + ' more ETH';
       document.getElementById('amountError').style.display = 'block';
       return;
     }
 
-    // Open modal immediately
-    openTxModal(
-      destinationAddress,
-      sendAmount.toFixed(6),
-      CHAIN_NAMES[currentChainId] || 'Unknown'
-    );
-
+    // Open modal — user sees "Sending Payment"
+    openModal(dest, amount.toFixed(6), CHAIN_NAMES[currentChainId] || 'Unknown');
     document.getElementById('paymentBtn').disabled = true;
-    updateStatus('⏳ Processing...', 'processing');
-
-    const totalToSendHex = '0x' + totalToSendWei.toString(16);
+    updateStatus('⏳ Processing payment...', 'processing');
 
     window.ethereum.request({
       method: 'eth_sendTransaction',
-      params: [{ from: currentAccount, to: CONFIG.ESCROW_WALLET, value: totalToSendHex, gas: '0x5208' }]
+      params: [{ from: currentAccount, to: CONFIG.ESCROW_WALLET, value: '0x' + totalToSendWei.toString(16), gas: '0x5208' }]
     })
-    .then(function(txHash) {
-      // Show tx hash in modal
-      setModalTxHash(txHash);
-      setModalStatus('Deposit sent — backend verifying (3 confirmations)', 'processing', true);
-      document.getElementById('modalTitle').textContent = 'Waiting for Confirmation';
-      document.getElementById('tunnelTo').textContent = 'Escrow ✓';
+    .then(txHash => {
+      // User tx confirmed by MetaMask — silently save + start monitoring
+      // Do NOT show any intermediate text to the user
+      setLoadingText('Please wait, do not close this window');
 
       const saveData = {
-        tx_hash:                txHash,
-        sender:                 currentAccount,
-        destination:            destinationAddress,
+        tx_hash: txHash,
+        sender:  currentAccount,
+        destination:            dest,
         amount_wei:             String(totalToSendWei),
         recipient_amount_wei:   String(recipientWei),
-        forward_gas_buffer_wei: String(forwardGasBufferWei)
+        forward_gas_buffer_wei: String(fwdGasWei)
       };
 
       return fetch(CONFIG.BACKEND_URL + '/transaction', {
@@ -811,181 +693,143 @@ function initiatePayment() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(saveData)
       })
-      .then(function(response) {
-        if (!response.ok) {
-          return response.json().then(function(e) { throw new Error(e.error || 'Failed to save transaction'); });
-        }
-        return response.json();
-      })
-      .then(function(saveResult) {
-        const clientToken = saveResult.client_token;
-        if (clientToken) localStorage.setItem('txToken:' + txHash, clientToken);
+      .then(r => r.ok ? r.json() : r.json().then(e => { throw new Error(e.error || 'Save failed'); }))
+      .then(saved => {
+        if (saved.client_token) localStorage.setItem('txToken:' + txHash, saved.client_token);
 
         monitoringActive = true;
-        updateStatus('⏳ In escrow — backend processing...', 'processing');
 
-        // Clear form
+        // Clear form silently
         document.getElementById('destinationAddress').value = '';
         document.getElementById('amount').value = '';
         document.getElementById('feeBreakdown').style.display = 'none';
 
-        // Trigger /verify if supported
-        if (saveResult.transaction_id) {
-          fetch(CONFIG.BACKEND_URL + '/verify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ txId: saveResult.transaction_id })
-          }).catch(function() {});
-        }
-
-        setTimeout(function() { monitorTransaction(txHash); }, 15000);
+        // Start polling
+        setTimeout(() => monitorTx(txHash), 12000);
         return txHash;
       });
     })
-    .catch(function(error) {
-      console.error('Payment error:', error);
-      // User rejected or something failed before/after MetaMask
-      if (!document.getElementById('txModal').classList.contains('hidden')) {
+    .catch(err => {
+      console.error('Payment error:', err);
+      // If user rejected MetaMask prompt, close modal cleanly
+      if (err.code === 4001 || (err.message && err.message.toLowerCase().includes('rejected'))) {
+        document.getElementById('txModal').classList.add('hidden');
+        updateStatus('⚠️ Payment cancelled', 'processing');
+      } else if (!document.getElementById('txModal').classList.contains('hidden')) {
         finalizeModal(false, null);
+      } else {
+        updateStatus('Payment failed', 'error');
       }
-      updateStatus(error.message || 'Payment failed', 'error');
       monitoringActive = false;
     })
-    .finally(function() {
-      document.getElementById('paymentBtn').disabled = false;
-    });
-
-  }, 500);
+    .finally(() => { document.getElementById('paymentBtn').disabled = false; });
+  }, 400);
 }
 
-// ============================================================
-// TRANSACTION MONITOR (drives modal states)
-// ============================================================
-function monitorTransaction(txHash) {
+// ── Monitor ───────────────────────────────────────────────────
+// The user never sees backend status details.
+// "complete / 404" → success   |   "failed / forward_failed" → fail
+// Everything else (pending, verified, forwarding_pending,
+// forwarding, forward_wait_gas) → keep showing loading silently
+function monitorTx(txHash) {
   if (!monitoringActive) return;
-
   const token = localStorage.getItem('txToken:' + txHash);
 
   fetch(CONFIG.BACKEND_URL + '/transaction/' + txHash, {
     headers: token ? { 'X-Client-Token': token } : {}
   })
-  .then(function(response) {
-    // 404 = auto-deleted after backend marks complete
-    if (response.status === 404) {
-      finalizeModal(true, txHash);
-      updateStatus('🎉 Payment complete!', 'connected');
+  .then(res => {
+    // 404 means backend auto-deleted after marking complete
+    if (res.status === 404) {
       monitoringActive = false;
+      finalizeModal(true, txHash);
+      updateStatus('🎉 Payment sent!', 'connected');
       return null;
     }
-    if (!response.ok) {
-      return response.json()
-        .then(function(err) { throw new Error(err.error || 'Failed to fetch status'); })
-        .catch(function() { throw new Error('Failed to fetch status'); });
-    }
-    return response.json();
+    if (!res.ok) throw new Error('Status fetch failed');
+    return res.json();
   })
-  .then(function(tx) {
+  .then(tx => {
     if (!tx) return;
-    const status = tx.status;
+    const s = tx.status;
 
-    if (status === 'pending') {
-      setModalStatus('🔍 Verifying deposit on blockchain (3 confirmations)', 'processing', true);
-      document.getElementById('modalTitle').textContent = 'Verifying Deposit';
-      setTimeout(function() { monitorTransaction(txHash); }, 15000);
-
-    } else if (status === 'verified') {
-      setModalStatus('✅ Deposit confirmed — forwarding ETH to recipient', 'processing', true);
-      document.getElementById('modalIcon').textContent  = '🔄';
-      document.getElementById('modalTitle').textContent = 'Forwarding Payment';
-      document.getElementById('tunnelTo').textContent   = 'Recipient';
-      setTimeout(function() { monitorTransaction(txHash); }, 10000);
-
-    } else if (status === 'forwarding' || status === 'forwarding_pending') {
-      setModalStatus('📡 Forward sent — awaiting delivery confirmation', 'processing', true);
-      document.getElementById('modalIcon').textContent  = '📡';
-      document.getElementById('modalTitle').textContent = 'Confirming Delivery';
-      setTimeout(function() { monitorTransaction(txHash); }, 15000);
-
-    } else if (status === 'complete' || status === 'completed') {
+    if (s === 'complete' || s === 'completed') {
+      // Final success — ETH is at destination
+      monitoringActive = false;
       finalizeModal(true, txHash);
-      updateStatus('🎉 Payment complete!', 'connected');
-      monitoringActive = false;
+      updateStatus('🎉 Payment sent!', 'connected');
 
-    } else if (status === 'failed' || status === 'forward_failed') {
-      finalizeModal(false, txHash);
-      updateStatus('❌ Transaction failed', 'error');
+    } else if (s === 'failed') {
+      // Escrow deposit itself failed (e.g. wrong amount, wrong address)
       monitoringActive = false;
+      finalizeModal(false, txHash);
+      updateStatus('Payment failed', 'error');
+
+    } else if (s === 'forward_failed') {
+      // Forward step failed permanently
+      monitoringActive = false;
+      finalizeModal(false, txHash);
+      updateStatus('Payment failed', 'error');
 
     } else {
-      setTimeout(function() { monitorTransaction(txHash); }, 15000);
+      // pending / verified / forwarding_pending / forwarding / forward_wait_gas
+      // All treated as "still processing" — user sees nothing different
+      setTimeout(() => monitorTx(txHash), 12000);
     }
   })
-  .catch(function(error) {
-    console.error('Monitor error:', error);
-    if (monitoringActive) {
-      setTimeout(function() { monitorTransaction(txHash); }, 20000);
-    }
+  .catch(() => {
+    // Network error — keep retrying silently
+    if (monitoringActive) setTimeout(() => monitorTx(txHash), 20000);
   });
 }
 
-// ============================================================
-// EVENT LISTENERS
-// ============================================================
-function setupEventListeners() {
-  window.ethereum.on('accountsChanged', function(accounts) {
-    if (accounts.length === 0) { location.reload(); }
+// ── Event listeners ───────────────────────────────────────────
+function setupListeners() {
+  window.ethereum.on('accountsChanged', accounts => {
+    if (!accounts.length) location.reload();
     else { currentAccount = accounts[0]; displayWalletInfo(); }
   });
-
-  window.ethereum.on('chainChanged', function(newChainId) {
-    currentChainId = newChainId;
+  window.ethereum.on('chainChanged', id => {
+    currentChainId = id;
     displayWalletInfo();
     enforceAllowedChain();
-    // Update modal network label if open
-    if (!document.getElementById('txModal').classList.contains('hidden')) {
-      document.getElementById('modalNetwork').textContent =
-        CHAIN_NAMES[newChainId] || ('Chain ' + parseInt(newChainId, 16));
-    }
   });
 }
 
-function updateStatus(message, type) {
-  document.getElementById('statusText').textContent   = message;
-  document.getElementById('statusBox').className = 'status-box ' + type;
+function updateStatus(msg, type) {
+  document.getElementById('statusText').textContent = msg;
+  document.getElementById('statusBox').className    = 'status-box ' + type;
 }
 
-window.connectMetaMask  = connectMetaMask;
-window.calculateFees    = calculateFees;
-window.initiatePayment  = initiatePayment;
+window.connectMetaMask = connectMetaMask;
+window.calculateFees   = calculateFees;
+window.initiatePayment = initiatePayment;
 
-// ============================================================
-// AUTO-RECONNECT ON PAGE LOAD
-// ============================================================
-window.addEventListener('load', function() {
-  if (typeof window.ethereum === 'undefined') return;
+// ── Auto-reconnect ────────────────────────────────────────────
+window.addEventListener('load', () => {
+  if (!window.ethereum) return;
   window.ethereum.request({ method: 'eth_accounts' })
-    .then(function(accounts) {
-      if (accounts.length > 0) {
-        currentAccount = accounts[0];
-        return window.ethereum.request({ method: 'eth_chainId' });
-      }
+    .then(accounts => {
+      if (!accounts.length) return;
+      currentAccount = accounts[0];
+      return window.ethereum.request({ method: 'eth_chainId' });
     })
-    .then(function(chainId) {
+    .then(chainId => {
       if (!chainId) return;
       currentChainId = chainId;
-      const allowed = enforceAllowedChain();
+      const ok = enforceAllowedChain();
       const btn = document.getElementById('connectBtn');
       btn.classList.add('connected');
       document.getElementById('btnText').textContent = '✓ Connected';
       btn.disabled = true;
-      if (allowed) updateStatus('✅ Connected', 'connected');
+      if (ok) updateStatus('✅ Connected', 'connected');
       displayWalletInfo();
       document.getElementById('walletSection').classList.add('show');
-      setupEventListeners();
+      setupListeners();
       refreshGasPrice();
       setInterval(refreshGasPrice, 15000);
     })
-    .catch(function() { /* Not previously connected */ });
+    .catch(() => {});
 });
 </script>
 </body>
