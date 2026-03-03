@@ -11,7 +11,15 @@ from datetime import datetime
 app = Flask(__name__)
 
 # Get environment variables
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+# FRONTEND_URL supports a comma-separated list of allowed origins.
+# Default is https://zyphra.in (production). Override on Render if needed.
+_raw_origins = os.getenv('FRONTEND_URL', 'https://zyphra.in')
+FRONTEND_URL = _raw_origins.split(',')[0].strip()  # first entry kept for backward compat
+_ALLOWED_ORIGINS = (
+    [u.strip() for u in _raw_origins.split(',') if u.strip()]
+    + ["http://localhost:3000", "http://localhost:5500", "http://127.0.0.1:5500", "http://localhost:8080"]
+)
+
 RPC_URL = os.getenv('RPC_URL')
 ADMIN_PRIVATE_KEY = os.getenv('ADMIN_PRIVATE_KEY')
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN')  # set this in Render to protect admin endpoints
@@ -21,7 +29,7 @@ RUN_MONITOR = os.getenv('RUN_MONITOR', '0')  # recommended: run monitor in a ded
 # Enable CORS
 CORS(app, resources={
     r"/api/*": {
-        "origins": [FRONTEND_URL, "http://localhost:*"],
+        "origins": _ALLOWED_ORIGINS,
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-Client-Token", "X-Admin-Token"]
     }
@@ -456,6 +464,6 @@ if __name__ == '__main__':
         print("ℹ️  RUN_MONITOR!=1 → monitor thread NOT started (recommended when using a separate worker)")
 
     print(f"\n🚀 Starting Secure Payment Backend on port {port}")
-    print(f"🌍 Frontend URL: {FRONTEND_URL}\n")
+    print(f"🌍 Allowed Origins: {_ALLOWED_ORIGINS}\n")
 
     app.run(host='0.0.0.0', port=port, debug=False)
