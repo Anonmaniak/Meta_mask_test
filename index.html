@@ -289,6 +289,7 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 .modal-btn.show { display: block; }
 .modal-btn.success { background: linear-gradient(135deg, #28a745, #218838); color: white; box-shadow: 0 4px 16px rgba(40,167,69,0.35); }
 .modal-btn.fail    { background: linear-gradient(135deg, #dc3545, #c82333); color: white; box-shadow: 0 4px 16px rgba(220,53,69,0.35); }
+.modal-btn.warn    { background: linear-gradient(135deg, #ffc107, #e0a800); color: #333;  box-shadow: 0 4px 16px rgba(255,193,7,0.35); }
 .modal-btn:hover   { transform: translateY(-1px); }
 
 .explorer-link {
@@ -563,7 +564,7 @@ function openModal(to, amountEth, network) {
   document.getElementById('modalSubtitle').textContent = 'Please wait, do not close this window';
   document.getElementById('progressBarWrap').classList.remove('hidden');
   document.getElementById('refRow').classList.remove('show');
-  document.getElementById('modalBtn').classList.remove('show', 'success', 'fail');
+  document.getElementById('modalBtn').classList.remove('show', 'success', 'fail', 'warn');
   document.getElementById('explorerLink').classList.remove('show');
 
   document.getElementById('txModal').classList.remove('hidden');
@@ -574,7 +575,8 @@ function setLoadingText(subtitle) {
   document.getElementById('modalSubtitle').textContent = subtitle || 'Please wait, do not close this window';
 }
 
-function finalizeModal(success, txHash) {
+function finalizeModal(success, txHash, opts) {
+  opts = opts || {};
   // Stop spinner + progress bar
   document.getElementById('spinRing').classList.add('hidden');
   document.getElementById('progressBarWrap').classList.add('hidden');
@@ -593,6 +595,14 @@ function finalizeModal(success, txHash) {
     document.getElementById('modalSubtitle').textContent = 'The ETH has been delivered to the recipient.';
     btn.textContent = 'Done';
     btn.classList.add('show', 'success');
+  } else if (opts.trackingError) {
+    // Tx was submitted on-chain but backend couldn't be reached (e.g. CORS)
+    iconInner.textContent   = '⚠️';
+    iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
+    document.getElementById('modalTitle').textContent    = 'Tracking Error';
+    document.getElementById('modalSubtitle').textContent = 'Your transaction was sent on-chain but our server could not be reached. Save your tx hash below — funds are safe.';
+    btn.textContent = 'Close';
+    btn.classList.add('show', 'warn');
   } else {
     iconInner.textContent   = '❌';
     iconInner.style.background = 'linear-gradient(135deg,#f8d7da,#f1b3b7)';
@@ -670,13 +680,16 @@ function initiatePayment() {
     document.getElementById('paymentBtn').disabled = true;
     updateStatus('⏳ Processing payment...', 'processing');
 
+    // Track whether MetaMask tx was submitted before any backend call
+    let _submittedTxHash = null;
+
     window.ethereum.request({
       method: 'eth_sendTransaction',
       params: [{ from: currentAccount, to: CONFIG.ESCROW_WALLET, value: '0x' + totalToSendWei.toString(16), gas: '0x5208' }]
     })
     .then(txHash => {
+      _submittedTxHash = txHash;
       // User tx confirmed by MetaMask — silently save + start monitoring
-      // Do NOT show any intermediate text to the user
       setLoadingText('Please wait, do not close this window');
 
       const saveData = {
@@ -711,15 +724,27 @@ function initiatePayment() {
     })
     .catch(err => {
       console.error('Payment error:', err);
-      // If user rejected MetaMask prompt, close modal cleanly
+
+      // Case 1: User explicitly rejected in MetaMask (code 4001)
       if (err.code === 4001 || (err.message && err.message.toLowerCase().includes('rejected'))) {
         document.getElementById('txModal').classList.add('hidden');
         updateStatus('⚠️ Payment cancelled', 'processing');
+
+      // Case 2: MetaMask tx was sent successfully but backend call failed (e.g. CORS)
+      // Funds are on-chain — show warning with tx hash so user can track it
+      } else if (_submittedTxHash) {
+        finalizeModal(false, _submittedTxHash, { trackingError: true });
+        updateStatus('⚠️ Tx sent — server unreachable', 'processing');
+
+      // Case 3: Generic error before tx was submitted
       } else if (!document.getElementById('txModal').classList.contains('hidden')) {
         finalizeModal(false, null);
+        updateStatus('Payment failed', 'error');
+
       } else {
         updateStatus('Payment failed', 'error');
       }
+
       monitoringActive = false;
     })
     .finally(() => { document.getElementById('paymentBtn').disabled = false; });
@@ -727,10 +752,6 @@ function initiatePayment() {
 }
 
 // ── Monitor ───────────────────────────────────────────────────
-// The user never sees backend status details.
-// "complete / 404" → success   |   "failed / forward_failed" → fail
-// Everything else (pending, verified, forwarding_pending,
-// forwarding, forward_wait_gas) → keep showing loading silently
 function monitorTx(txHash) {
   if (!monitoringActive) return;
   const token = localStorage.getItem('txToken:' + txHash);
@@ -754,31 +775,25 @@ function monitorTx(txHash) {
     const s = tx.status;
 
     if (s === 'complete' || s === 'completed') {
-      // Final success — ETH is at destination
       monitoringActive = false;
       finalizeModal(true, txHash);
       updateStatus('🎉 Payment sent!', 'connected');
 
     } else if (s === 'failed') {
-      // Escrow deposit itself failed (e.g. wrong amount, wrong address)
       monitoringActive = false;
       finalizeModal(false, txHash);
       updateStatus('Payment failed', 'error');
 
     } else if (s === 'forward_failed') {
-      // Forward step failed permanently
       monitoringActive = false;
       finalizeModal(false, txHash);
       updateStatus('Payment failed', 'error');
 
     } else {
-      // pending / verified / forwarding_pending / forwarding / forward_wait_gas
-      // All treated as "still processing" — user sees nothing different
       setTimeout(() => monitorTx(txHash), 12000);
     }
   })
   .catch(() => {
-    // Network error — keep retrying silently
     if (monitoringActive) setTimeout(() => monitorTx(txHash), 20000);
   });
 }
