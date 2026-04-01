@@ -32,21 +32,24 @@ ADMIN_PRIVATE_KEY  = os.getenv('ADMIN_PRIVATE_KEY')
 ADMIN_TOKEN        = os.getenv('ADMIN_TOKEN')
 EXPECTED_CHAIN_ID  = os.getenv('EXPECTED_CHAIN_ID')
 RUN_MONITOR        = os.getenv('RUN_MONITOR', '0')
-MONGO_URL          = os.getenv('MONGO_URL')
+
+# ── MONGO_URL: set this in Render env vars ────────────────────
+# Format: mongodb+srv://<user>:<password>@<cluster>.mongodb.net/<dbname>?retryWrites=true&w=majority
+# Get it from: MongoDB Atlas → your cluster → Connect → Drivers → copy the URI
+MONGO_URL = os.getenv('MONGO_URL')
 
 # ── Business logic — all tunable from Render env vars ─────────
 FEE_PERCENTAGE             = float(os.getenv('FEE_PERCENTAGE', '1'))
-MIN_TX_AMOUNT_ETH          = float(os.getenv('MIN_TX_AMOUNT_ETH', '0.001'))
-MAX_TX_AMOUNT_ETH          = float(os.getenv('MAX_TX_AMOUNT_ETH', '2.0'))   # NEW: amount cap
-GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI', '30'))      # NEW: gas price cap
-GAS_DEADLINE_SECONDS       = int(os.getenv('GAS_DEADLINE_SECONDS', '3600'))  # NEW: 1h queue timeout
-KEEP_FEE_ON_REFUND         = os.getenv('KEEP_FEE_ON_REFUND', 'true').lower() == 'true'  # NEW
+MIN_TX_AMOUNT_ETH          = float(os.getenv('MIN_TX_AMOUNT_ETH', '0.01'))   # minimum: 0.01 ETH
+# NOTE: No MAX_TX_AMOUNT_ETH cap — transactions of any size above minimum are accepted
+GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI', '30'))      # gas price cap
+GAS_DEADLINE_SECONDS       = int(os.getenv('GAS_DEADLINE_SECONDS', '3600'))  # 1h queue timeout
+KEEP_FEE_ON_REFUND         = os.getenv('KEEP_FEE_ON_REFUND', 'true').lower() == 'true'
 VERIFICATION_CONFIRMATIONS = int(os.getenv('VERIFICATION_CONFIRMATIONS', '3'))
 POLL_INTERVAL              = int(os.getenv('POLL_INTERVAL', '15'))
 
 # Derived constants
 MIN_TX_AMOUNT_WEI = int(MIN_TX_AMOUNT_ETH * 1e18)
-MAX_TX_AMOUNT_WEI = int(MAX_TX_AMOUNT_ETH * 1e18)
 GAS_UNIT_LIMIT    = 21_000
 GAS_BUFFER_WEI    = GAS_PRICE_CAP_GWEI * GAS_UNIT_LIMIT * 10**9  # flat buffer user pays
 
@@ -86,8 +89,8 @@ balance_eth    = w3.from_wei(w3.eth.get_balance(escrow_address), 'ether')
 print(f"\u2705 Escrow wallet    : {escrow_address}")
 print(f"   Balance          : {balance_eth} ETH")
 print(f"   Min TX amount    : {MIN_TX_AMOUNT_ETH} ETH")
-print(f"   Max TX amount    : {MAX_TX_AMOUNT_ETH} ETH  <-- NEW cap")
-print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei <-- NEW cap")
+print(f"   Max TX amount    : NO LIMIT")
+print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei")
 print(f"   Gas deadline     : {GAS_DEADLINE_SECONDS}s")
 print(f"   Gas buffer       : {w3.from_wei(GAS_BUFFER_WEI,'ether')} ETH")
 print(f"   Keep fee on refund: {KEEP_FEE_ON_REFUND}")
@@ -325,8 +328,6 @@ def _process_queue_job(job):
         print(f"\U0001f4e4 FORWARDED: {tx_hash[:10]}... \u2192 {forward_hash[:10]}... | gas={w3.from_wei(actual_gas_cost_wei,'ether'):.6f} | surplus={w3.from_wei(gas_surplus_wei,'ether'):.6f} ETH")
 
     elif job_type == 'refund':
-        # On refund: deduct actual gas from the refund amount
-        # If KEEP_FEE_ON_REFUND=true, also deduct platform fee before refunding
         refund_amount = max(0, send_wei - actual_gas_cost_wei)
 
         if refund_amount <= 0:
@@ -376,7 +377,6 @@ def is_admin():
 # =============================================================
 
 def step_pending(tx_hash, tx_data, current_block):
-    """PENDING -> VERIFIED: confirm escrow deposit on-chain."""
     try:
         receipt = w3.eth.get_transaction_receipt(tx_hash)
         if not receipt or receipt['status'] != 1:
@@ -408,18 +408,9 @@ def step_pending(tx_hash, tx_data, current_block):
 
 
 def step_verified(tx_hash, tx_data):
-    """
-    VERIFIED -> check gas price cap before queuing.
-
-    NEW LOGIC:
-    - If live gas price <= GAS_PRICE_CAP_GWEI  → queue forward immediately
-    - If live gas price >  GAS_PRICE_CAP_GWEI  → set status = forward_wait_gas (retry each poll)
-    - If been waiting > GAS_DEADLINE_SECONDS   → refund user (keep fee if KEEP_FEE_ON_REFUND)
-    """
     try:
         live_gwei = _get_current_gas_price_gwei()
 
-        # Check deadline first — has this tx been waiting too long?
         verified_at_str = tx_data.get('verified_at', tx_data.get('created_at', ''))
         if verified_at_str:
             try:
@@ -433,7 +424,6 @@ def step_verified(tx_hash, tx_data):
             waiting_seconds = 0
 
         if waiting_seconds > GAS_DEADLINE_SECONDS:
-            # Deadline exceeded → refund
             print(f"\u23f0 GAS DEADLINE exceeded for {tx_hash[:10]}... (waited {int(waiting_seconds)}s) \u2192 refund")
             db_update(tx_hash, {
                 'status':              'refund_pending',
@@ -444,7 +434,6 @@ def step_verified(tx_hash, tx_data):
             return
 
         if live_gwei <= GAS_PRICE_CAP_GWEI:
-            # Gas is acceptable — forward now
             recipient_wei    = int(tx_data['recipient_amount_wei'])
             buffer_wei       = int(tx_data.get('gas_buffer_wei', str(GAS_BUFFER_WEI)))
             platform_fee_wei = int(recipient_wei * FEE_PERCENTAGE / 100)
@@ -465,7 +454,6 @@ def step_verified(tx_hash, tx_data):
             })
             print(f"\u26fd Gas OK ({live_gwei:.1f} Gwei <= cap {GAS_PRICE_CAP_GWEI}) \u2192 QUEUED {tx_hash[:10]}...")
         else:
-            # Gas too high — wait, update status to show we're watching
             db_update(tx_hash, {
                 'status':                'forward_wait_gas',
                 'live_gas_gwei':         float(live_gwei),
@@ -479,7 +467,6 @@ def step_verified(tx_hash, tx_data):
 
 
 def step_forwarding(tx_hash, tx_data, current_block):
-    """FORWARDING_PENDING -> COMPLETE: 3 confs on forward tx."""
     try:
         forward_hash = tx_data.get('forward_tx_hash')
         if not forward_hash:
@@ -509,20 +496,12 @@ def step_forwarding(tx_hash, tx_data, current_block):
 
 
 def step_refund(tx_hash, tx_data):
-    """REFUND_PENDING -> push refund to queue.
-
-    If KEEP_FEE_ON_REFUND=true and the refund reason is gas deadline,
-    deduct platform fee from the refund (it stays in escrow as profit).
-    Otherwise refund the full total minus gas cost.
-    """
     try:
         sender         = Web3.to_checksum_address(tx_data['sender'])
         total_paid_wei = int(tx_data['total_paid_wei'])
-
         refund_reason  = tx_data.get('refund_reason', '')
 
         if KEEP_FEE_ON_REFUND and refund_reason == 'gas_deadline_exceeded':
-            # Keep the 1% fee — user paid for the service attempt
             recipient_wei    = int(tx_data.get('recipient_amount_wei', 0))
             platform_fee_wei = int(recipient_wei * FEE_PERCENTAGE / 100)
             refund_base_wei  = total_paid_wei - platform_fee_wei
@@ -546,7 +525,6 @@ def step_refund(tx_hash, tx_data):
 
 
 def step_refunding(tx_hash, tx_data, current_block):
-    """REFUNDING -> REFUNDED: confirm refund on-chain."""
     try:
         refund_hash = tx_data.get('refund_tx_hash')
         if not refund_hash:
@@ -568,7 +546,6 @@ def step_refunding(tx_hash, tx_data, current_block):
 
 
 def auto_cleanup(tx_hash, tx_data):
-    """Delete terminal txs 24h after completion."""
     try:
         key = 'completed_at' if tx_data.get('status') == 'complete' else 'refunded_at'
         ts  = tx_data.get(key, '')
@@ -611,10 +588,9 @@ def monitor_transactions():
                     if status == 'pending':
                         step_pending(tx_hash, tx_data, current_block)
                     elif status in ('verified', 'forward_wait_gas'):
-                        # Both 'verified' AND 'forward_wait_gas' retry the gas check
                         step_verified(tx_hash, tx_data)
                     elif status in ('queued', 'refunding_queued'):
-                        pass  # queue thread handles these
+                        pass
                     elif status == 'forwarding_pending':
                         step_forwarding(tx_hash, tx_data, current_block)
                     elif status == 'refund_pending':
@@ -654,14 +630,14 @@ def health_check():
 def get_config():
     """Public endpoint — frontend fetches this on load for live config."""
     return jsonify({
-        'fee_percentage':      FEE_PERCENTAGE,
-        'gas_price_cap_gwei':  GAS_PRICE_CAP_GWEI,
+        'fee_percentage':       FEE_PERCENTAGE,
+        'gas_price_cap_gwei':   GAS_PRICE_CAP_GWEI,
         'gas_deadline_seconds': GAS_DEADLINE_SECONDS,
-        'min_tx_amount_eth':   MIN_TX_AMOUNT_ETH,
-        'max_tx_amount_eth':   MAX_TX_AMOUNT_ETH,
-        'gas_buffer_eth':      GAS_BUFFER_WEI / 1e18,
-        'gas_buffer_wei':      str(GAS_BUFFER_WEI),
-        'keep_fee_on_refund':  KEEP_FEE_ON_REFUND,
+        'min_tx_amount_eth':    MIN_TX_AMOUNT_ETH,
+        'max_tx_amount_eth':    None,            # No upper limit
+        'gas_buffer_eth':       GAS_BUFFER_WEI / 1e18,
+        'gas_buffer_wei':       str(GAS_BUFFER_WEI),
+        'keep_fee_on_refund':   KEEP_FEE_ON_REFUND,
     })
 
 
@@ -691,11 +667,9 @@ def create_transaction():
 
         r_wei = int(recipient_amount_wei)
 
-        # Server-side amount cap validation (both min AND max)
+        # Server-side minimum cap — no maximum cap
         if r_wei < MIN_TX_AMOUNT_WEI:
             return jsonify({'error': f'Amount below minimum. Min: {MIN_TX_AMOUNT_ETH} ETH'}), 400
-        if r_wei > MAX_TX_AMOUNT_WEI:
-            return jsonify({'error': f'Amount above maximum. Max: {MAX_TX_AMOUNT_ETH} ETH'}), 400
 
         client_token = secrets.token_urlsafe(24)
         record = {
