@@ -149,7 +149,7 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 }
 .chain-warning.show { display: block; }
 
-/* Min limit badge — shown under the amount input label */
+/* ── Min limit badge ── */
 .limit-badge {
   display: inline-block;
   background: #e74c3c;
@@ -159,6 +159,21 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   font-size: 12px;
   margin-left: 6px;
   font-weight: 600;
+  transition: background 0.3s;
+}
+/* Pulsing grey while loading */
+.limit-badge.loading {
+  background: #999;
+  animation: badgePulse 1s ease-in-out infinite;
+}
+@keyframes badgePulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+/* Red once value is loaded */
+.limit-badge.loaded {
+  background: #e74c3c;
+  animation: none;
 }
 
 /* ============================================================
@@ -370,7 +385,8 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
       <div class="form-group">
         <label for="amount">
           Amount to Send (ETH)
-          <span id="amountLimits" class="limit-badge">loading...</span>
+          <!-- Badge starts pulsing grey "loading..." then snaps to red real value from backend -->
+          <span id="amountLimits" class="limit-badge loading">loading...</span>
         </label>
         <input type="number" id="amount" placeholder="e.g. 0.01" step="0.0001" min="0.01" oninput="calculateFees()">
         <div id="amountError" class="error-text" style="display:none;"></div>
@@ -435,10 +451,11 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 <script>
 const CONFIG = {
   ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
-  FEE_PERCENTAGE: 1,
-  MIN_TX_AMOUNT_ETH: 0.01,   // updated from /api/config (default 0.01)
-  MAX_TX_AMOUNT_ETH: null,   // no upper cap
-  GAS_BUFFER_WEI: null,
+  FEE_PERCENTAGE:    1,
+  MIN_TX_AMOUNT_ETH: 0.01,   // default; overwritten live from /api/config
+  MAX_TX_AMOUNT_ETH: null,   // no upper cap ever
+  GAS_BUFFER_WEI:    null,
+  GAS_BUFFER_ETH:    null,
   BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api'
 };
 
@@ -454,35 +471,79 @@ let currentBalanceWei = 0n;
 
 const TX1_GAS_LIMIT = 21000;
 
-// ── Load config from backend on startup ──────────────────
+// ─────────────────────────────────────────────────────────────
+// BADGE HELPERS
+// ─────────────────────────────────────────────────────────────
+function setBadgeLoading() {
+  const b = document.getElementById('amountLimits');
+  if (!b) return;
+  b.textContent = 'loading...';
+  b.classList.add('loading');
+  b.classList.remove('loaded');
+}
+
+function setBadgeValue(minEth) {
+  const b = document.getElementById('amountLimits');
+  if (!b) return;
+  // Show exact value — strip trailing zeros but keep at least 2 decimals
+  const display = parseFloat(minEth).toString();
+  b.textContent = 'min ' + display + ' ETH';
+  b.classList.remove('loading');
+  b.classList.add('loaded');
+  // also update the html input min attribute
+  const inp = document.getElementById('amount');
+  if (inp) inp.min = String(minEth);
+}
+
+function setBadgeFallback() {
+  // If backend unreachable, show hardcoded default — never stay grey
+  setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH);
+}
+
+// ─────────────────────────────────────────────────────────────
+// LOAD CONFIG FROM BACKEND  (live from env vars)
+// ─────────────────────────────────────────────────────────────
 async function loadBackendConfig() {
+  setBadgeLoading();
+
+  // Hard timeout: if fetch takes > 8s, fall back to default immediately
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000));
+
   try {
-    const res = await fetch(CONFIG.BACKEND_URL + '/config');
-    if (!res.ok) return;
+    const res = await Promise.race([
+      fetch(CONFIG.BACKEND_URL + '/config'),
+      timeout
+    ]);
+
+    if (!res.ok) throw new Error('non-ok response');
     const cfg = await res.json();
+
+    // Apply values from env
     if (cfg.fee_percentage    != null) CONFIG.FEE_PERCENTAGE    = cfg.fee_percentage;
     if (cfg.min_tx_amount_eth != null) CONFIG.MIN_TX_AMOUNT_ETH = cfg.min_tx_amount_eth;
-    // max_tx_amount_eth is null — no upper cap, intentionally ignored
     if (cfg.gas_buffer_wei    != null) CONFIG.GAS_BUFFER_WEI    = cfg.gas_buffer_wei;
     if (cfg.gas_buffer_eth    != null) CONFIG.GAS_BUFFER_ETH    = cfg.gas_buffer_eth;
+    // max_tx_amount_eth is always null — no upper cap, intentionally ignored
 
+    // Update fee % label in breakdown
     const feeLabel = document.getElementById('feePercLabel');
     if (feeLabel) feeLabel.textContent = CONFIG.FEE_PERCENTAGE;
 
-    updateAmountBadge();
-    console.log('[config]', cfg);
-  } catch(e) {
-    console.warn('Could not load backend config:', e);
+    // Snap badge from grey "loading..." to red real value
+    setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH);
+
+    console.log('[config loaded from backend]', cfg);
+
+  } catch (e) {
+    console.warn('[config] Backend unreachable, using default:', e.message);
+    // Never leave the badge stuck on "loading..." — show fallback
+    setBadgeFallback();
   }
 }
 
-function updateAmountBadge() {
-  const badge = document.getElementById('amountLimits');
-  // Only show minimum — no maximum cap
-  if (badge) badge.textContent = `min ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
-}
-
-// ── Chain guard ──────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// CHAIN GUARD
+// ─────────────────────────────────────────────────────────────
 function enforceAllowedChain() {
   const ok = ALLOWED_CHAINS.has(currentChainId);
   document.getElementById('chainWarning').classList.toggle('show', !ok);
@@ -492,7 +553,9 @@ function enforceAllowedChain() {
   return ok;
 }
 
-// ── Gas price ─────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// GAS PRICE
+// ─────────────────────────────────────────────────────────────
 function refreshGasPrice() {
   if (!window.ethereum) return;
   window.ethereum.request({ method: 'eth_gasPrice' })
@@ -500,7 +563,9 @@ function refreshGasPrice() {
     .catch(() => {});
 }
 
-// ── MetaMask connect ────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// METAMASK CONNECT
+// ─────────────────────────────────────────────────────────────
 function connectMetaMask() {
   const btn  = document.getElementById('connectBtn');
   const text = document.getElementById('btnText');
@@ -552,7 +617,9 @@ function refreshBalance() {
     }).catch(() => {});
 }
 
-// ── Fee calculator ────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// FEE CALCULATOR
+// ─────────────────────────────────────────────────────────────
 function calculateFees() {
   const amt = parseFloat(document.getElementById('amount').value) || 0;
   if (amt <= 0) { document.getElementById('feeBreakdown').style.display = 'none'; return; }
@@ -568,17 +635,19 @@ function calculateFees() {
   let tx1Gas = 0;
   if (liveGasPriceWei) tx1Gas = TX1_GAS_LIMIT * Number(liveGasPriceWei) / 1e18;
 
-  document.getElementById('youSend').textContent      = amt.toFixed(6) + ' ETH';
-  document.getElementById('platformFee').textContent  = fee.toFixed(6) + ' ETH';
-  document.getElementById('forwardGas').textContent   = fwdGasEth.toFixed(6) + ' ETH';
-  document.getElementById('tx1Gas').textContent       = tx1Gas.toFixed(6) + ' ETH';
+  document.getElementById('youSend').textContent        = amt.toFixed(6) + ' ETH';
+  document.getElementById('platformFee').textContent    = fee.toFixed(6) + ' ETH';
+  document.getElementById('forwardGas').textContent     = fwdGasEth.toFixed(6) + ' ETH';
+  document.getElementById('tx1Gas').textContent         = tx1Gas.toFixed(6) + ' ETH';
   document.getElementById('totalDeduction').textContent = (amt + fee + fwdGasEth + tx1Gas).toFixed(6) + ' ETH';
   document.getElementById('feeBreakdown').style.display = 'block';
 }
 
 function validateAddress(a) { return /^0x[0-9a-fA-F]{40}$/.test(a); }
 
-// ── MODAL HELPERS ──────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// MODAL HELPERS
+// ─────────────────────────────────────────────────────────────
 function openModal(to, amountEth, network) {
   document.getElementById('modalTo').textContent      = to         || '-';
   document.getElementById('modalAmount').textContent  = amountEth ? amountEth + ' ETH' : '-';
@@ -611,28 +680,28 @@ function finalizeModal(success, txHash, opts) {
   const btn = document.getElementById('modalBtn');
 
   if (success) {
-    iconInner.textContent   = '✅';
+    iconInner.textContent      = '✅';
     iconInner.style.background = 'linear-gradient(135deg,#d4edda,#b8dfc4)';
     document.getElementById('modalTitle').textContent    = 'Payment Sent!';
     document.getElementById('modalSubtitle').textContent = 'The ETH has been delivered to the recipient.';
     btn.textContent = 'Done';
     btn.classList.add('show', 'success');
   } else if (opts.gasWait) {
-    iconInner.textContent   = '⛽';
+    iconInner.textContent      = '⛽';
     iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
     document.getElementById('modalTitle').textContent    = 'Queued (Gas High)';
     document.getElementById('modalSubtitle').textContent = 'Gas prices are above our cap right now. Your transaction is safely queued and will forward automatically when gas drops.';
     btn.textContent = 'OK, I\'ll wait';
     btn.classList.add('show', 'warn');
   } else if (opts.trackingError) {
-    iconInner.textContent   = '⚠️';
+    iconInner.textContent      = '⚠️';
     iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
     document.getElementById('modalTitle').textContent    = 'Tracking Error';
     document.getElementById('modalSubtitle').textContent = 'Your transaction was sent on-chain but our server could not be reached. Save your tx hash below — funds are safe.';
     btn.textContent = 'Close';
     btn.classList.add('show', 'warn');
   } else {
-    iconInner.textContent   = '❌';
+    iconInner.textContent      = '❌';
     iconInner.style.background = 'linear-gradient(135deg,#f8d7da,#f1b3b7)';
     document.getElementById('modalTitle').textContent    = 'Payment Failed';
     document.getElementById('modalSubtitle').textContent = 'The transaction could not be completed. Please try again.';
@@ -660,7 +729,9 @@ function closeTxModal() {
 }
 window.closeTxModal = closeTxModal;
 
-// ── Payment ───────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// PAYMENT
+// ─────────────────────────────────────────────────────────────
 function initiatePayment() {
   if (!enforceAllowedChain()) return;
 
@@ -680,8 +751,7 @@ function initiatePayment() {
     document.getElementById('amountError').style.display = 'block';
     return;
   }
-
-  // Only enforce minimum — no maximum cap
+  // Only minimum enforced — no maximum cap
   if (amount < CONFIG.MIN_TX_AMOUNT_ETH) {
     document.getElementById('amountError').textContent = `Minimum transaction amount is ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
     document.getElementById('amountError').style.display = 'block';
@@ -726,16 +796,14 @@ function initiatePayment() {
     })
     .then(txHash => {
       _submittedTxHash = txHash;
-
       const saveData = {
-        tx_hash:              txHash,
-        sender:               currentAccount,
-        destination:          dest,
-        amount_wei:           String(totalToSendWei),
-        recipient_amount_wei: String(recipientWei),
+        tx_hash:                txHash,
+        sender:                 currentAccount,
+        destination:            dest,
+        amount_wei:             String(totalToSendWei),
+        recipient_amount_wei:   String(recipientWei),
         forward_gas_buffer_wei: String(fwdGasWei)
       };
-
       return fetch(CONFIG.BACKEND_URL + '/transaction', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -774,7 +842,9 @@ function initiatePayment() {
   }, 400);
 }
 
-// ── Monitor ───────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// MONITOR
+// ─────────────────────────────────────────────────────────────
 function monitorTx(txHash) {
   if (!monitoringActive) return;
   let token = null;
@@ -796,29 +866,24 @@ function monitorTx(txHash) {
   .then(tx => {
     if (!tx) return;
     const s = tx.status;
-
     if (s === 'complete' || s === 'completed') {
       monitoringActive = false;
       finalizeModal(true, txHash);
       updateStatus('🎉 Payment sent!', 'connected');
-
     } else if (s === 'forward_wait_gas') {
       monitoringActive = false;
       finalizeModal(false, txHash, { gasWait: true });
       updateStatus('⛽ Queued — waiting for lower gas', 'processing');
-
     } else if (s === 'failed' || s === 'forward_failed') {
       monitoringActive = false;
       finalizeModal(false, txHash);
       updateStatus('Payment failed', 'error');
-
     } else if (s === 'refunded') {
       monitoringActive = false;
       finalizeModal(false, txHash, { trackingError: false });
-      document.getElementById('modalTitle').textContent = 'Refunded';
+      document.getElementById('modalTitle').textContent    = 'Refunded';
       document.getElementById('modalSubtitle').textContent = 'Gas prices stayed too high. Your funds have been refunded.';
       updateStatus('🔄 Refunded', 'processing');
-
     } else {
       setTimeout(() => monitorTx(txHash), 12000);
     }
@@ -828,7 +893,9 @@ function monitorTx(txHash) {
   });
 }
 
-// ── Event listeners ───────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// EVENT LISTENERS
+// ─────────────────────────────────────────────────────────────
 function setupListeners() {
   window.ethereum.on('accountsChanged', accounts => {
     if (!accounts.length) location.reload();
@@ -850,8 +917,11 @@ window.connectMetaMask = connectMetaMask;
 window.calculateFees   = calculateFees;
 window.initiatePayment = initiatePayment;
 
-// ── Auto-reconnect ────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// ON LOAD — fetch config first, then auto-reconnect
+// ─────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
+  // Fetch live config from backend (reads MIN_TX_AMOUNT_ETH from env)
   loadBackendConfig();
 
   if (!window.ethereum) return;
