@@ -34,16 +34,18 @@ EXPECTED_CHAIN_ID  = os.getenv('EXPECTED_CHAIN_ID')
 RUN_MONITOR        = os.getenv('RUN_MONITOR', '0')
 
 # ── MONGO_URL: set this in Render env vars ────────────────────
-# Format: mongodb+srv://<user>:<password>@<cluster>.mongodb.net/<dbname>?retryWrites=true&w=majority
-# Get it from: MongoDB Atlas → your cluster → Connect → Drivers → copy the URI
 MONGO_URL = os.getenv('MONGO_URL')
 
-# ── Business logic — all tunable from Render env vars ─────────
-FEE_PERCENTAGE             = float(os.getenv('FEE_PERCENTAGE', '1'))
-MIN_TX_AMOUNT_ETH          = float(os.getenv('MIN_TX_AMOUNT_ETH', '0.01'))   # minimum: 0.01 ETH
+# ── Business logic ─────────────────────────────────────────────
+# HARDCODED — change in code only, not env vars
+FEE_PERCENTAGE    = 1.0          # Platform fee: always 1%
+MIN_TX_AMOUNT_ETH = 0.000001     # Minimum TX: 0.000001 ETH (testing mode)
+
 # NOTE: No MAX_TX_AMOUNT_ETH cap — transactions of any size above minimum are accepted
-GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI', '30'))      # gas price cap
-GAS_DEADLINE_SECONDS       = int(os.getenv('GAS_DEADLINE_SECONDS', '3600'))  # 1h queue timeout
+
+# From env vars only (tunable without code change)
+GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI', '100'))
+GAS_DEADLINE_SECONDS       = int(os.getenv('GAS_DEADLINE_SECONDS', '3600'))
 KEEP_FEE_ON_REFUND         = os.getenv('KEEP_FEE_ON_REFUND', 'true').lower() == 'true'
 VERIFICATION_CONFIRMATIONS = int(os.getenv('VERIFICATION_CONFIRMATIONS', '3'))
 POLL_INTERVAL              = int(os.getenv('POLL_INTERVAL', '15'))
@@ -88,19 +90,24 @@ escrow_address = escrow_account.address
 balance_eth    = w3.from_wei(w3.eth.get_balance(escrow_address), 'ether')
 print(f"\u2705 Escrow wallet    : {escrow_address}")
 print(f"   Balance          : {balance_eth} ETH")
-print(f"   Min TX amount    : {MIN_TX_AMOUNT_ETH} ETH")
+print(f"   Min TX amount    : {MIN_TX_AMOUNT_ETH} ETH [HARDCODED]")
 print(f"   Max TX amount    : NO LIMIT")
-print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei")
+print(f"   Platform fee     : {FEE_PERCENTAGE}% [HARDCODED]")
+print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei [from env]")
 print(f"   Gas deadline     : {GAS_DEADLINE_SECONDS}s")
 print(f"   Gas buffer       : {w3.from_wei(GAS_BUFFER_WEI,'ether')} ETH")
 print(f"   Keep fee on refund: {KEEP_FEE_ON_REFUND}")
-print(f"   Platform fee     : {FEE_PERCENTAGE}%")
 
 # =============================================================
 # MONGODB DATABASE LAYER
 # =============================================================
 _mongo_client = None
 _mongo_db     = None
+
+# Serial number counter (thread-safe)
+_serial_lock    = threading.Lock()
+_serial_counter = None  # loaded from DB on first use
+
 
 def _get_db():
     global _mongo_client, _mongo_db
@@ -112,12 +119,33 @@ def _get_db():
     _mongo_db     = _mongo_client['payments']
     _mongo_db.transactions.create_index([('status', ASCENDING)])
     _mongo_db.transactions.create_index([('created_at', ASCENDING)])
+    _mongo_db.transactions.create_index([('serial_number', ASCENDING)])
     print("\u2705 MongoDB connected")
     return _mongo_db
 
 
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _next_serial() -> int:
+    """Return next sequential serial number. Thread-safe."""
+    global _serial_counter
+    with _serial_lock:
+        if _serial_counter is None:
+            # Load highest existing serial from DB on first use
+            try:
+                db  = _get_db()
+                doc = db.transactions.find_one(
+                    {'serial_number': {'$exists': True}},
+                    sort=[('serial_number', -1)]
+                )
+                _serial_counter = (doc['serial_number'] + 1) if doc else 1
+            except Exception:
+                _serial_counter = 1
+        serial = _serial_counter
+        _serial_counter += 1
+        return serial
 
 
 def db_save(tx_data: dict):
@@ -143,7 +171,7 @@ def db_get_active():
     db   = _get_db()
     docs = db.transactions.find(
         {'status': {'$nin': ['complete', 'refunded', 'failed']}},
-        sort=[('created_at', ASCENDING)]
+        sort=[('serial_number', ASCENDING)]   # process in serial order
     )
     result = []
     for d in docs:
@@ -154,7 +182,7 @@ def db_get_active():
 
 def db_get_all():
     db   = _get_db()
-    docs = db.transactions.find({}, sort=[('created_at', ASCENDING)])
+    docs = db.transactions.find({}, sort=[('serial_number', ASCENDING)])
     result = []
     for d in docs:
         d.pop('_id', None)
@@ -252,18 +280,28 @@ def _build_tx_params(destination, value_wei, nonce):
 
 # =============================================================
 # FORWARD QUEUE
-# Single sender thread — sequential nonces, no collisions
+# Single sender thread — processes jobs 1-by-1 in serial order
+# Serial numbers guarantee FIFO ordering across all transactions
 # =============================================================
 _fwd_queue      = []
 _fwd_queue_lock = threading.Lock()
 
 def queue_push(job: dict):
     with _fwd_queue_lock:
-        _fwd_queue.append(job)
-    print(f"\U0001f4e5 QUEUED [{job['type']}]: {job['tx_hash'][:10]}...")
+        # Insert in serial number order for smooth sequential processing
+        serial = job.get('serial_number', 0)
+        inserted = False
+        for i, existing in enumerate(_fwd_queue):
+            if serial < existing.get('serial_number', 0):
+                _fwd_queue.insert(i, job)
+                inserted = True
+                break
+        if not inserted:
+            _fwd_queue.append(job)
+    print(f"\U0001f4e5 QUEUED [#{job.get('serial_number','?')} {job['type']}]: {job['tx_hash'][:10]}...")
 
 def _queue_sender_loop():
-    print("\u2705 ForwardQueue sender thread started")
+    print("\u2705 ForwardQueue sender thread started (serial 1-by-1 mode)")
     while True:
         job = None
         with _fwd_queue_lock:
@@ -273,7 +311,7 @@ def _queue_sender_loop():
             try:
                 _process_queue_job(job)
             except Exception as e:
-                print(f"\u274c Queue job error [{job.get('type')}] {job.get('tx_hash','')[:10]}: {e}")
+                print(f"\u274c Queue job error [#{job.get('serial_number','?')} {job.get('type')}] {job.get('tx_hash','')[:10]}: {e}")
                 reset_nonce()
         else:
             time.sleep(1)
@@ -283,6 +321,7 @@ def _process_queue_job(job):
     job_type    = job['type']   # 'forward' or 'refund'
     destination = Web3.to_checksum_address(job['destination'])
     send_wei    = int(job['send_wei'])
+    serial      = job.get('serial_number', '?')
 
     tx_params, max_fee = _build_tx_params(destination, send_wei, 0)  # nonce placeholder
     actual_gas_cost_wei = GAS_UNIT_LIMIT * max_fee
@@ -293,7 +332,7 @@ def _process_queue_job(job):
 
         # Gas coverage priority: buffer → fee → recipient
         if actual_gas_cost_wei <= buffer_wei:
-            gas_surplus_wei  = buffer_wei - actual_gas_cost_wei   # stays in escrow = your profit
+            gas_surplus_wei  = buffer_wei - actual_gas_cost_wei
             final_send_wei   = send_wei
         elif actual_gas_cost_wei <= buffer_wei + platform_fee_wei:
             deficit          = actual_gas_cost_wei - buffer_wei
@@ -306,7 +345,7 @@ def _process_queue_job(job):
             gas_surplus_wei  = 0
             platform_fee_wei = 0
             final_send_wei   = max(0, send_wei - shortfall)
-            print(f"\u26a0\ufe0f  Extreme gas: cutting {shortfall} wei from recipient on {tx_hash[:10]}...")
+            print(f"\u26a0\ufe0f  Extreme gas: cutting {shortfall} wei from recipient on #{serial} {tx_hash[:10]}...")
 
         nonce = get_next_nonce()
         tx_params['value'] = final_send_wei
@@ -325,7 +364,7 @@ def _process_queue_job(job):
             'final_send_wei':       str(final_send_wei),
             'forward_nonce':        nonce,
         })
-        print(f"\U0001f4e4 FORWARDED: {tx_hash[:10]}... \u2192 {forward_hash[:10]}... | gas={w3.from_wei(actual_gas_cost_wei,'ether'):.6f} | surplus={w3.from_wei(gas_surplus_wei,'ether'):.6f} ETH")
+        print(f"\U0001f4e4 FORWARDED [#{serial}]: {tx_hash[:10]}... \u2192 {forward_hash[:10]}... | gas={w3.from_wei(actual_gas_cost_wei,'ether'):.6f} | surplus={w3.from_wei(gas_surplus_wei,'ether'):.6f} ETH")
 
     elif job_type == 'refund':
         refund_amount = max(0, send_wei - actual_gas_cost_wei)
@@ -335,7 +374,7 @@ def _process_queue_job(job):
                 'status': 'failed',
                 'error':  f'Refund impossible: gas_cost ({actual_gas_cost_wei}) >= total ({send_wei})'
             })
-            print(f"\u274c {tx_hash[:10]}... refund impossible")
+            print(f"\u274c [#{serial}] {tx_hash[:10]}... refund impossible")
             return
 
         nonce = get_next_nonce()
@@ -352,7 +391,7 @@ def _process_queue_job(job):
             'refund_amount_wei':  str(refund_amount),
             'refund_gas_cost_wei': str(actual_gas_cost_wei),
         })
-        print(f"\u21a9\ufe0f  REFUNDING: {tx_hash[:10]}... \u2192 {refund_hash[:10]}...")
+        print(f"\u21a9\ufe0f  REFUNDING [#{serial}]: {tx_hash[:10]}... \u2192 {refund_hash[:10]}...")
 
 # Start queue sender thread
 _queue_thread = threading.Thread(target=_queue_sender_loop, daemon=True)
@@ -362,7 +401,8 @@ _queue_thread.start()
 # AUTH
 # =============================================================
 def _admin_token():
-    return request.headers.get('X-Admin-Token') or request.args.get('admin_token')
+    # SECURITY: Only accept via header, never query param
+    return request.headers.get('X-Admin-Token')
 
 def _client_token():
     return request.headers.get('X-Client-Token') or request.args.get('token')
@@ -401,7 +441,7 @@ def step_pending(tx_hash, tx_data, current_block):
             'escrow_block': receipt['blockNumber'],
             'verified_at':  _now_iso(),
         })
-        print(f"\u2705 VERIFIED: {tx_hash[:10]}... ({confirmations} confs)")
+        print(f"\u2705 VERIFIED [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]}... ({confirmations} confs)")
 
     except Exception as e:
         print(f"\u26a0\ufe0f  step_pending {tx_hash[:10]}...: {e}")
@@ -410,6 +450,7 @@ def step_pending(tx_hash, tx_data, current_block):
 def step_verified(tx_hash, tx_data):
     try:
         live_gwei = _get_current_gas_price_gwei()
+        serial    = tx_data.get('serial_number', '?')
 
         verified_at_str = tx_data.get('verified_at', tx_data.get('created_at', ''))
         if verified_at_str:
@@ -424,7 +465,7 @@ def step_verified(tx_hash, tx_data):
             waiting_seconds = 0
 
         if waiting_seconds > GAS_DEADLINE_SECONDS:
-            print(f"\u23f0 GAS DEADLINE exceeded for {tx_hash[:10]}... (waited {int(waiting_seconds)}s) \u2192 refund")
+            print(f"\u23f0 GAS DEADLINE exceeded for [#{serial}] {tx_hash[:10]}... (waited {int(waiting_seconds)}s) \u2192 refund")
             db_update(tx_hash, {
                 'status':              'refund_pending',
                 'error':               f'Gas price stayed above cap ({GAS_PRICE_CAP_GWEI} Gwei) for {int(waiting_seconds)}s',
@@ -445,6 +486,7 @@ def step_verified(tx_hash, tx_data):
                 'send_wei':         recipient_wei,
                 'gas_buffer_wei':   buffer_wei,
                 'platform_fee_wei': platform_fee_wei,
+                'serial_number':    tx_data.get('serial_number', 0),
             })
             db_update(tx_hash, {
                 'status':            'queued',
@@ -452,7 +494,7 @@ def step_verified(tx_hash, tx_data):
                 'gas_at_queue_gwei': float(live_gwei),
                 'platform_fee_wei':  str(platform_fee_wei),
             })
-            print(f"\u26fd Gas OK ({live_gwei:.1f} Gwei <= cap {GAS_PRICE_CAP_GWEI}) \u2192 QUEUED {tx_hash[:10]}...")
+            print(f"\u26fd Gas OK ({live_gwei:.1f} Gwei <= cap {GAS_PRICE_CAP_GWEI}) \u2192 QUEUED [#{serial}] {tx_hash[:10]}...")
         else:
             db_update(tx_hash, {
                 'status':                'forward_wait_gas',
@@ -460,7 +502,7 @@ def step_verified(tx_hash, tx_data):
                 'gas_cap_gwei':          GAS_PRICE_CAP_GWEI,
                 'gas_wait_updated_at':   _now_iso(),
             })
-            print(f"\u26fd Gas HIGH ({live_gwei:.1f} Gwei > cap {GAS_PRICE_CAP_GWEI}) \u2014 {tx_hash[:10]}... waiting...")
+            print(f"\u26fd Gas HIGH ({live_gwei:.1f} Gwei > cap {GAS_PRICE_CAP_GWEI}) \u2014 [#{serial}] {tx_hash[:10]}... waiting...")
 
     except Exception as e:
         print(f"\u274c step_verified {tx_hash[:10]}...: {e}")
@@ -480,7 +522,7 @@ def step_forwarding(tx_hash, tx_data, current_block):
                 'error':              'Forward tx reverted on-chain',
                 'refund_initiated_at': _now_iso(),
             })
-            print(f"\u26a0\ufe0f  {tx_hash[:10]}... forward reverted \u2192 refund_pending")
+            print(f"\u26a0\ufe0f  [#{tx_data.get('serial_number','?')}] {tx_hash[:10]}... forward reverted \u2192 refund_pending")
             return
         confirmations = current_block - receipt['blockNumber']
         if confirmations < VERIFICATION_CONFIRMATIONS:
@@ -490,7 +532,7 @@ def step_forwarding(tx_hash, tx_data, current_block):
             'forward_block': receipt['blockNumber'],
             'completed_at':  _now_iso(),
         })
-        print(f"\U0001f389 COMPLETE: {tx_hash[:10]}...")
+        print(f"\U0001f389 COMPLETE [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]}...")
     except Exception as e:
         print(f"\u26a0\ufe0f  step_forwarding {tx_hash[:10]}...: {e}")
 
@@ -510,10 +552,11 @@ def step_refund(tx_hash, tx_data):
             refund_base_wei = total_paid_wei
 
         queue_push({
-            'type':        'refund',
-            'tx_hash':     tx_hash,
-            'destination': sender,
-            'send_wei':    refund_base_wei,
+            'type':          'refund',
+            'tx_hash':       tx_hash,
+            'destination':   sender,
+            'send_wei':      refund_base_wei,
+            'serial_number': tx_data.get('serial_number', 0),
         })
         db_update(tx_hash, {
             'status':           'refunding_queued',
@@ -540,7 +583,7 @@ def step_refunding(tx_hash, tx_data, current_block):
             'refunded_at':  _now_iso(),
             'refund_block': receipt['blockNumber'],
         })
-        print(f"\u2705 REFUNDED: {tx_hash[:10]}...")
+        print(f"\u2705 REFUNDED [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]}...")
     except Exception as e:
         print(f"\u26a0\ufe0f  step_refunding {tx_hash[:10]}...: {e}")
 
@@ -556,7 +599,7 @@ def auto_cleanup(tx_hash, tx_data):
             dt = dt.replace(tzinfo=timezone.utc)
         if (datetime.now(timezone.utc) - dt).total_seconds() > 86400:
             db_delete(tx_hash)
-            print(f"\U0001f5d1\ufe0f  AUTO-DELETED: {tx_hash[:10]}...")
+            print(f"\U0001f5d1\ufe0f  AUTO-DELETED [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]}...")
     except Exception:
         pass
 
@@ -580,7 +623,7 @@ def monitor_transactions():
     while True:
         try:
             current_block = w3.eth.block_number
-            active_txs    = db_get_active()
+            active_txs    = db_get_active()   # already sorted by serial_number ASC
             for tx_data in active_txs:
                 tx_hash = tx_data['tx_hash']
                 status  = tx_data.get('status')
@@ -634,7 +677,7 @@ def get_config():
         'gas_price_cap_gwei':   GAS_PRICE_CAP_GWEI,
         'gas_deadline_seconds': GAS_DEADLINE_SECONDS,
         'min_tx_amount_eth':    MIN_TX_AMOUNT_ETH,
-        'max_tx_amount_eth':    None,            # No upper limit
+        'max_tx_amount_eth':    None,
         'gas_buffer_eth':       GAS_BUFFER_WEI / 1e18,
         'gas_buffer_wei':       str(GAS_BUFFER_WEI),
         'keep_fee_on_refund':   KEEP_FEE_ON_REFUND,
@@ -659,6 +702,12 @@ def create_transaction():
             return jsonify({'error': 'Invalid sender address'}), 400
         if not Web3.is_address(destination):
             return jsonify({'error': 'Invalid destination address'}), 400
+
+        # Validate tx_hash format (must be 0x + 64 hex chars)
+        import re
+        if not re.match(r'^0x[a-fA-F0-9]{64}$', str(tx_hash)):
+            return jsonify({'error': 'Invalid tx_hash format'}), 400
+
         try:
             int(amount_wei)
             int(recipient_amount_wei)
@@ -667,13 +716,16 @@ def create_transaction():
 
         r_wei = int(recipient_amount_wei)
 
-        # Server-side minimum cap — no maximum cap
+        # Server-side minimum cap (hardcoded)
         if r_wei < MIN_TX_AMOUNT_WEI:
             return jsonify({'error': f'Amount below minimum. Min: {MIN_TX_AMOUNT_ETH} ETH'}), 400
 
-        client_token = secrets.token_urlsafe(24)
+        serial_number = _next_serial()
+        client_token  = secrets.token_urlsafe(24)
+
         record = {
             'tx_hash':              tx_hash,
+            'serial_number':        serial_number,
             'sender':               Web3.to_checksum_address(sender),
             'destination':          Web3.to_checksum_address(destination),
             'total_paid_wei':       str(amount_wei),
@@ -685,8 +737,8 @@ def create_transaction():
             'chain_id':             chain_id,
         }
         db_save(record)
-        print(f"\u2705 TX saved: {tx_hash[:10]}... ({sender[:10]}... \u2192 {destination[:10]}...)")
-        return jsonify({'success': True, 'tx_hash': tx_hash, 'client_token': client_token})
+        print(f"\u2705 TX saved [#{serial_number}]: {tx_hash[:10]}... ({sender[:10]}... \u2192 {destination[:10]}...)")
+        return jsonify({'success': True, 'tx_hash': tx_hash, 'client_token': client_token, 'serial_number': serial_number})
 
     except Exception as e:
         print(f"\u274c create_transaction: {e}")
@@ -705,10 +757,11 @@ def get_transaction(tx_hash):
         if not tok or not secrets.compare_digest(str(tok), str(tx_data.get('client_token') or '')):
             return jsonify({'error': 'Forbidden'}), 403
         return jsonify({
-            'tx_hash':        tx_data['tx_hash'],
-            'status':         tx_data['status'],
-            'created_at':     tx_data.get('created_at'),
-            'completed_at':   tx_data.get('completed_at'),
+            'tx_hash':         tx_data['tx_hash'],
+            'serial_number':   tx_data.get('serial_number'),
+            'status':          tx_data['status'],
+            'created_at':      tx_data.get('created_at'),
+            'completed_at':    tx_data.get('completed_at'),
             'forward_tx_hash': tx_data.get('forward_tx_hash'),
         })
     except Exception as e:
