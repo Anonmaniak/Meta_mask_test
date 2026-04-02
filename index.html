@@ -111,6 +111,9 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 .fee-info h4 { color: #004085; margin-bottom: 10px; font-size: 14px; }
 .fee-row { display: flex; justify-content: space-between; margin: 8px 0; font-size: 14px; }
 .fee-row.total { font-weight: 700; font-size: 16px; padding-top: 10px; border-top: 2px solid #0066cc; margin-top: 10px; }
+/* Gas cap info row — subtle, not a cost line */
+.fee-row.gas-cap-row { color: #555; font-size: 12px; margin-top: 2px; }
+.fee-row.gas-cap-row span:last-child { font-style: italic; color: #777; }
 
 .spinner {
   display: inline-block;
@@ -161,7 +164,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   font-weight: 600;
   transition: background 0.3s;
 }
-/* Pulsing grey while loading */
 .limit-badge.loading {
   background: #999;
   animation: badgePulse 1s ease-in-out infinite;
@@ -170,7 +172,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.45; }
 }
-/* Red once value is loaded */
 .limit-badge.loaded {
   background: #e74c3c;
   animation: none;
@@ -385,7 +386,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
       <div class="form-group">
         <label for="amount">
           Amount to Send (ETH)
-          <!-- Badge starts pulsing grey "loading..." then snaps to red real value from backend -->
           <span id="amountLimits" class="limit-badge loading">loading...</span>
         </label>
         <input type="number" id="amount" placeholder="e.g. 0.01" step="0.0001" min="0.01" oninput="calculateFees()">
@@ -397,7 +397,10 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
         <div class="fee-row"><span>You Send:</span><span id="youSend">0 ETH</span></div>
         <div class="fee-row"><span>Platform Fee (<span id="feePercLabel">1</span>%):</span><span id="platformFee">0 ETH</span></div>
         <div class="fee-row"><span>Gas Buffer (flat):</span><span id="forwardGas">0 ETH</span></div>
-        <div class="fee-row"><span>Your Tx Gas (est.):</span><span id="tx1Gas">0 ETH</span></div>
+        <div class="fee-row gas-cap-row">
+          <span>⛽ Gas Cap (max):</span>
+          <span id="gasCap">loading...</span>
+        </div>
         <div class="fee-row total"><span>Total from Your Wallet:</span><span id="totalDeduction">0 ETH</span></div>
       </div>
 
@@ -450,12 +453,13 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 
 <script>
 const CONFIG = {
-  ESCROW_WALLET: '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
+  ESCROW_WALLET:     '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
   FEE_PERCENTAGE:    1,
   MIN_TX_AMOUNT_ETH: 0.01,   // default; overwritten live from /api/config
   MAX_TX_AMOUNT_ETH: null,   // no upper cap ever
   GAS_BUFFER_WEI:    null,
   GAS_BUFFER_ETH:    null,
+  GAS_PRICE_CAP_GWEI: null,  // populated from /api/config
   BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api'
 };
 
@@ -468,8 +472,6 @@ let currentChainId    = null;
 let monitoringActive  = false;
 let liveGasPriceWei   = null;
 let currentBalanceWei = 0n;
-
-const TX1_GAS_LIMIT = 21000;
 
 // ─────────────────────────────────────────────────────────────
 // BADGE HELPERS
@@ -485,59 +487,58 @@ function setBadgeLoading() {
 function setBadgeValue(minEth) {
   const b = document.getElementById('amountLimits');
   if (!b) return;
-  // Show exact value — strip trailing zeros but keep at least 2 decimals
-  const display = parseFloat(minEth).toString();
-  b.textContent = 'min ' + display + ' ETH';
+  b.textContent = 'min ' + parseFloat(minEth).toString() + ' ETH';
   b.classList.remove('loading');
   b.classList.add('loaded');
-  // also update the html input min attribute
   const inp = document.getElementById('amount');
   if (inp) inp.min = String(minEth);
 }
 
 function setBadgeFallback() {
-  // If backend unreachable, show hardcoded default — never stay grey
   setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH);
 }
 
+// Update the gas cap info row text
+function updateGasCapRow() {
+  const el = document.getElementById('gasCap');
+  if (!el) return;
+  if (CONFIG.GAS_PRICE_CAP_GWEI != null) {
+    el.textContent = CONFIG.GAS_PRICE_CAP_GWEI + ' Gwei (auto-wait if exceeded)';
+  } else {
+    el.textContent = 'fetching...';
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
-// LOAD CONFIG FROM BACKEND  (live from env vars)
+// LOAD CONFIG FROM BACKEND
 // ─────────────────────────────────────────────────────────────
 async function loadBackendConfig() {
   setBadgeLoading();
-
-  // Hard timeout: if fetch takes > 8s, fall back to default immediately
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000));
-
   try {
     const res = await Promise.race([
       fetch(CONFIG.BACKEND_URL + '/config'),
       timeout
     ]);
-
     if (!res.ok) throw new Error('non-ok response');
     const cfg = await res.json();
 
-    // Apply values from env
-    if (cfg.fee_percentage    != null) CONFIG.FEE_PERCENTAGE    = cfg.fee_percentage;
-    if (cfg.min_tx_amount_eth != null) CONFIG.MIN_TX_AMOUNT_ETH = cfg.min_tx_amount_eth;
-    if (cfg.gas_buffer_wei    != null) CONFIG.GAS_BUFFER_WEI    = cfg.gas_buffer_wei;
-    if (cfg.gas_buffer_eth    != null) CONFIG.GAS_BUFFER_ETH    = cfg.gas_buffer_eth;
-    // max_tx_amount_eth is always null — no upper cap, intentionally ignored
+    if (cfg.fee_percentage       != null) CONFIG.FEE_PERCENTAGE       = cfg.fee_percentage;
+    if (cfg.min_tx_amount_eth    != null) CONFIG.MIN_TX_AMOUNT_ETH    = cfg.min_tx_amount_eth;
+    if (cfg.gas_buffer_wei       != null) CONFIG.GAS_BUFFER_WEI       = cfg.gas_buffer_wei;
+    if (cfg.gas_buffer_eth       != null) CONFIG.GAS_BUFFER_ETH       = cfg.gas_buffer_eth;
+    if (cfg.gas_price_cap_gwei   != null) CONFIG.GAS_PRICE_CAP_GWEI   = cfg.gas_price_cap_gwei;
 
-    // Update fee % label in breakdown
     const feeLabel = document.getElementById('feePercLabel');
     if (feeLabel) feeLabel.textContent = CONFIG.FEE_PERCENTAGE;
 
-    // Snap badge from grey "loading..." to red real value
     setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH);
-
+    updateGasCapRow();
     console.log('[config loaded from backend]', cfg);
-
   } catch (e) {
     console.warn('[config] Backend unreachable, using default:', e.message);
-    // Never leave the badge stuck on "loading..." — show fallback
     setBadgeFallback();
+    updateGasCapRow();
   }
 }
 
@@ -619,28 +620,38 @@ function refreshBalance() {
 
 // ─────────────────────────────────────────────────────────────
 // FEE CALCULATOR
+//
+// What the user pays:
+//   recipientAmt + platformFee(1%) + gasBuffer(flat from backend)
+//
+// "Your Tx Gas" is NOT charged separately — the user pays MetaMask
+// gas naturally when signing TX1. On TX2 (forward), actual gas is
+// deducted from the gas buffer + remaining platform fee pool.
 // ─────────────────────────────────────────────────────────────
 function calculateFees() {
   const amt = parseFloat(document.getElementById('amount').value) || 0;
   if (amt <= 0) { document.getElementById('feeBreakdown').style.display = 'none'; return; }
+
   const fee = amt * CONFIG.FEE_PERCENTAGE / 100;
 
+  // Gas buffer: use backend-supplied flat value if available
   let fwdGasEth = 0;
   if (CONFIG.GAS_BUFFER_ETH) {
-    fwdGasEth = CONFIG.GAS_BUFFER_ETH;
+    fwdGasEth = parseFloat(CONFIG.GAS_BUFFER_ETH);
   } else if (liveGasPriceWei) {
     fwdGasEth = 21000 * Number(liveGasPriceWei) * 1.5 / 1e18;
   }
 
-  let tx1Gas = 0;
-  if (liveGasPriceWei) tx1Gas = TX1_GAS_LIMIT * Number(liveGasPriceWei) / 1e18;
+  // Total = what hits the escrow wallet (TX1 value)
+  const total = amt + fee + fwdGasEth;
 
-  document.getElementById('youSend').textContent        = amt.toFixed(6) + ' ETH';
-  document.getElementById('platformFee').textContent    = fee.toFixed(6) + ' ETH';
+  document.getElementById('youSend').textContent        = amt.toFixed(6)    + ' ETH';
+  document.getElementById('platformFee').textContent    = fee.toFixed(6)    + ' ETH';
   document.getElementById('forwardGas').textContent     = fwdGasEth.toFixed(6) + ' ETH';
-  document.getElementById('tx1Gas').textContent         = tx1Gas.toFixed(6) + ' ETH';
-  document.getElementById('totalDeduction').textContent = (amt + fee + fwdGasEth + tx1Gas).toFixed(6) + ' ETH';
+  document.getElementById('totalDeduction').textContent = total.toFixed(6)  + ' ETH';
   document.getElementById('feeBreakdown').style.display = 'block';
+
+  updateGasCapRow();
 }
 
 function validateAddress(a) { return /^0x[0-9a-fA-F]{40}$/.test(a); }
@@ -731,6 +742,11 @@ window.closeTxModal = closeTxModal;
 
 // ─────────────────────────────────────────────────────────────
 // PAYMENT
+//
+// TX1 value sent to escrow = recipientWei + platformFeeWei + fwdGasWei
+// TX1 MetaMask gas is paid by user's wallet automatically (not added here)
+// TX2 (forward): actual gas deducted from fwdGasWei + remaining platformFeeWei
+// Any gas surplus from fwdGasWei is kept by platform as additional fee
 // ─────────────────────────────────────────────────────────────
 function initiatePayment() {
   if (!enforceAllowedChain()) return;
@@ -751,7 +767,6 @@ function initiatePayment() {
     document.getElementById('amountError').style.display = 'block';
     return;
   }
-  // Only minimum enforced — no maximum cap
   if (amount < CONFIG.MIN_TX_AMOUNT_ETH) {
     document.getElementById('amountError').textContent = `Minimum transaction amount is ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
     document.getElementById('amountError').style.display = 'block';
@@ -761,6 +776,7 @@ function initiatePayment() {
   const recipientWei   = BigInt(Math.floor(amount * 1e18));
   const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
 
+  // Gas buffer from backend (flat value covers TX2 gas + surplus kept as fee)
   let fwdGasWei = 0n;
   if (CONFIG.GAS_BUFFER_WEI) {
     fwdGasWei = BigInt(CONFIG.GAS_BUFFER_WEI);
@@ -768,18 +784,21 @@ function initiatePayment() {
     fwdGasWei = BigInt(Math.floor(21000 * Number(liveGasPriceWei) * 1.5));
   }
 
-  let tx1GasWei = 0n;
-  if (liveGasPriceWei) tx1GasWei = BigInt(Math.floor(21000 * Number(liveGasPriceWei)));
-
+  // TX1 value = everything going into escrow
+  // TX1 gas itself is handled by MetaMask automatically — user signs it
   const totalToSendWei = recipientWei + platformFeeWei + fwdGasWei;
-  const totalRequired  = totalToSendWei + tx1GasWei;
 
   refreshBalance();
 
   setTimeout(() => {
-    if (currentBalanceWei < totalRequired) {
-      const shortfall = Number(totalRequired - currentBalanceWei) / 1e18;
-      document.getElementById('amountError').textContent = 'Insufficient balance — need ' + shortfall.toFixed(6) + ' more ETH';
+    // Balance check: user needs totalToSendWei + headroom for TX1 gas
+    // We estimate TX1 gas headroom from live gas price if available
+    let tx1GasHeadroom = 0n;
+    if (liveGasPriceWei) tx1GasHeadroom = BigInt(Math.floor(21000 * Number(liveGasPriceWei) * 1.2));
+
+    if (currentBalanceWei < totalToSendWei + tx1GasHeadroom) {
+      const shortfall = Number(totalToSendWei + tx1GasHeadroom - currentBalanceWei) / 1e18;
+      document.getElementById('amountError').textContent = 'Insufficient balance — need ~' + shortfall.toFixed(6) + ' more ETH (incl. your tx gas)';
       document.getElementById('amountError').style.display = 'block';
       return;
     }
@@ -792,7 +811,12 @@ function initiatePayment() {
 
     window.ethereum.request({
       method: 'eth_sendTransaction',
-      params: [{ from: currentAccount, to: CONFIG.ESCROW_WALLET, value: '0x' + totalToSendWei.toString(16), gas: '0x5208' }]
+      params: [{
+        from:  currentAccount,
+        to:    CONFIG.ESCROW_WALLET,
+        value: '0x' + totalToSendWei.toString(16),
+        gas:   '0x5208'
+      }]
     })
     .then(txHash => {
       _submittedTxHash = txHash;
@@ -805,14 +829,14 @@ function initiatePayment() {
         forward_gas_buffer_wei: String(fwdGasWei)
       };
       return fetch(CONFIG.BACKEND_URL + '/transaction', {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(saveData)
+        body:    JSON.stringify(saveData)
       })
       .then(r => r.ok ? r.json() : r.json().then(e => { throw new Error(e.error || 'Save failed'); }))
       .then(saved => {
         if (saved.client_token) {
-          try { localStorage.setItem('txToken:' + txHash, saved.client_token); } catch(e) {}
+          try { sessionStorage.setItem('txToken:' + txHash, saved.client_token); } catch(e) {}
         }
         monitoringActive = true;
         document.getElementById('destinationAddress').value = '';
@@ -848,19 +872,13 @@ function initiatePayment() {
 function monitorTx(txHash) {
   if (!monitoringActive) return;
   let token = null;
-  try { token = localStorage.getItem('txToken:' + txHash); } catch(e) {}
+  try { token = sessionStorage.getItem('txToken:' + txHash); } catch(e) {}
 
   fetch(CONFIG.BACKEND_URL + '/transaction/' + txHash, {
     headers: token ? { 'X-Client-Token': token } : {}
   })
   .then(res => {
-    if (res.status === 404) {
-      monitoringActive = false;
-      finalizeModal(true, txHash);
-      updateStatus('🎉 Payment sent!', 'connected');
-      return null;
-    }
-    if (!res.ok) throw new Error('Status fetch failed');
+    if (!res.ok) throw new Error('Status fetch failed: ' + res.status);
     return res.json();
   })
   .then(tx => {
@@ -918,10 +936,9 @@ window.calculateFees   = calculateFees;
 window.initiatePayment = initiatePayment;
 
 // ─────────────────────────────────────────────────────────────
-// ON LOAD — fetch config first, then auto-reconnect
+// ON LOAD
 // ─────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
-  // Fetch live config from backend (reads MIN_TX_AMOUNT_ETH from env)
   loadBackendConfig();
 
   if (!window.ethereum) return;
