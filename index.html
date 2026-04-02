@@ -114,6 +114,8 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 /* Gas cap info row — subtle, not a cost line */
 .fee-row.gas-cap-row { color: #555; font-size: 12px; margin-top: 2px; }
 .fee-row.gas-cap-row span:last-child { font-style: italic; color: #777; }
+/* Gas warning row — shown when live gas > cap */
+.fee-row.gas-warn-row { color: #856404; font-size: 12px; background: #fff3cd; border-radius: 4px; padding: 4px 6px; margin-top: 4px; }
 
 .spinner {
   display: inline-block;
@@ -396,10 +398,13 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
         <h4>💰 Payment Breakdown</h4>
         <div class="fee-row"><span>You Send:</span><span id="youSend">0 ETH</span></div>
         <div class="fee-row"><span>Platform Fee (<span id="feePercLabel">1</span>%):</span><span id="platformFee">0 ETH</span></div>
-        <div class="fee-row"><span>Gas Buffer (flat):</span><span id="forwardGas">0 ETH</span></div>
+        <div class="fee-row"><span>Gas Buffer (<span id="gasBufferLabel">cap-based</span>):</span><span id="forwardGas">0 ETH</span></div>
         <div class="fee-row gas-cap-row">
-          <span>⛽ Gas Cap (max):</span>
+          <span>⛽ Gas Cap (env):</span>
           <span id="gasCap">loading...</span>
+        </div>
+        <div class="fee-row gas-warn-row" id="gasWarnRow" style="display:none;">
+          <span>⚠️ Live gas exceeds cap — actual gas charged to you</span>
         </div>
         <div class="fee-row total"><span>Total from Your Wallet:</span><span id="totalDeduction">0 ETH</span></div>
       </div>
@@ -466,6 +471,7 @@ const CONFIG = {
 const ALLOWED_CHAINS = new Set(['0x1', '0xaa36a7']);
 const CHAIN_NAMES    = { '0x1': 'Ethereum Mainnet', '0xaa36a7': 'Sepolia Testnet' };
 const EXPLORER_BASE  = { '0x1': 'https://etherscan.io/tx/', '0xaa36a7': 'https://sepolia.etherscan.io/tx/' };
+const GAS_UNITS      = 21000; // standard ETH transfer
 
 let currentAccount    = null;
 let currentChainId    = null;
@@ -503,10 +509,70 @@ function updateGasCapRow() {
   const el = document.getElementById('gasCap');
   if (!el) return;
   if (CONFIG.GAS_PRICE_CAP_GWEI != null) {
-    el.textContent = CONFIG.GAS_PRICE_CAP_GWEI + ' Gwei (auto-wait if exceeded)';
+    el.textContent = CONFIG.GAS_PRICE_CAP_GWEI + ' Gwei';
   } else {
     el.textContent = 'fetching...';
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// GAS BUFFER LOGIC
+//
+// Rule:
+//   live gas price <= GAS_PRICE_CAP_GWEI  →  use flat cap-based buffer (env)
+//   live gas price >  GAS_PRICE_CAP_GWEI  →  use actual live gas price (charge user real cost)
+//
+// Returns { gasWei: BigInt, gasEth: number, isLiveGas: boolean }
+// ─────────────────────────────────────────────────────────────
+function resolveGasBuffer() {
+  // Cap-based buffer (from env via backend config)
+  let capGasWei = null;
+  if (CONFIG.GAS_BUFFER_WEI) {
+    capGasWei = BigInt(CONFIG.GAS_BUFFER_WEI);
+  } else if (CONFIG.GAS_PRICE_CAP_GWEI != null) {
+    capGasWei = BigInt(Math.floor(CONFIG.GAS_PRICE_CAP_GWEI * GAS_UNITS * 1e9));
+  }
+
+  // Live gas price
+  const liveGasWei = liveGasPriceWei
+    ? BigInt(Math.floor(Number(liveGasPriceWei) * GAS_UNITS))
+    : null;
+
+  const capGwei = CONFIG.GAS_PRICE_CAP_GWEI;
+
+  // Determine live gas price in Gwei for comparison
+  const liveGwei = liveGasPriceWei
+    ? Number(liveGasPriceWei) / 1e9
+    : null;
+
+  // Decision: if live > cap → charge actual live gas; else use cap-based flat buffer
+  let useWei;
+  let isLiveGas = false;
+
+  if (liveGwei != null && capGwei != null && liveGwei > capGwei) {
+    // Live gas is HIGHER than cap → charge real cost from user
+    useWei = liveGasWei || capGasWei || 0n;
+    isLiveGas = true;
+  } else if (capGasWei != null) {
+    // Live gas is at or below cap → use flat env-based buffer
+    useWei = capGasWei;
+    isLiveGas = false;
+  } else if (liveGasWei != null) {
+    // Fallback: no cap config yet, use live
+    useWei = liveGasWei;
+    isLiveGas = true;
+  } else {
+    useWei = 0n;
+    isLiveGas = false;
+  }
+
+  return {
+    gasWei:     useWei,
+    gasEth:     Number(useWei) / 1e18,
+    isLiveGas,
+    liveGwei:   liveGwei != null ? liveGwei.toFixed(1) : null,
+    capGwei:    capGwei  != null ? capGwei              : null,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -621,12 +687,9 @@ function refreshBalance() {
 // ─────────────────────────────────────────────────────────────
 // FEE CALCULATOR
 //
-// What the user pays:
-//   recipientAmt + platformFee(1%) + gasBuffer(flat from backend)
-//
-// "Your Tx Gas" is NOT charged separately — the user pays MetaMask
-// gas naturally when signing TX1. On TX2 (forward), actual gas is
-// deducted from the gas buffer + remaining platform fee pool.
+// Gas buffer rule:
+//   live gas <= GAS_PRICE_CAP_GWEI  →  flat cap-based buffer (from env)
+//   live gas >  GAS_PRICE_CAP_GWEI  →  actual live gas charged to user
 // ─────────────────────────────────────────────────────────────
 function calculateFees() {
   const amt = parseFloat(document.getElementById('amount').value) || 0;
@@ -634,21 +697,26 @@ function calculateFees() {
 
   const fee = amt * CONFIG.FEE_PERCENTAGE / 100;
 
-  // Gas buffer: use backend-supplied flat value if available
-  let fwdGasEth = 0;
-  if (CONFIG.GAS_BUFFER_ETH) {
-    fwdGasEth = parseFloat(CONFIG.GAS_BUFFER_ETH);
-  } else if (liveGasPriceWei) {
-    fwdGasEth = 21000 * Number(liveGasPriceWei) * 1.5 / 1e18;
+  const gas = resolveGasBuffer();
+
+  // Update gas buffer label to reflect which mode is active
+  const bufLabel = document.getElementById('gasBufferLabel');
+  if (bufLabel) {
+    bufLabel.textContent = gas.isLiveGas
+      ? `live @ ${gas.liveGwei} Gwei`
+      : `cap-based @ ${gas.capGwei} Gwei`;
   }
 
-  // Total = what hits the escrow wallet (TX1 value)
-  const total = amt + fee + fwdGasEth;
+  // Show/hide gas warning row
+  const warnRow = document.getElementById('gasWarnRow');
+  if (warnRow) warnRow.style.display = gas.isLiveGas ? 'flex' : 'none';
 
-  document.getElementById('youSend').textContent        = amt.toFixed(6)    + ' ETH';
-  document.getElementById('platformFee').textContent    = fee.toFixed(6)    + ' ETH';
-  document.getElementById('forwardGas').textContent     = fwdGasEth.toFixed(6) + ' ETH';
-  document.getElementById('totalDeduction').textContent = total.toFixed(6)  + ' ETH';
+  const total = amt + fee + gas.gasEth;
+
+  document.getElementById('youSend').textContent        = amt.toFixed(6)         + ' ETH';
+  document.getElementById('platformFee').textContent    = fee.toFixed(6)         + ' ETH';
+  document.getElementById('forwardGas').textContent     = gas.gasEth.toFixed(6)  + ' ETH';
+  document.getElementById('totalDeduction').textContent = total.toFixed(6)       + ' ETH';
   document.getElementById('feeBreakdown').style.display = 'block';
 
   updateGasCapRow();
@@ -743,10 +811,13 @@ window.closeTxModal = closeTxModal;
 // ─────────────────────────────────────────────────────────────
 // PAYMENT
 //
-// TX1 value sent to escrow = recipientWei + platformFeeWei + fwdGasWei
-// TX1 MetaMask gas is paid by user's wallet automatically (not added here)
-// TX2 (forward): actual gas deducted from fwdGasWei + remaining platformFeeWei
-// Any gas surplus from fwdGasWei is kept by platform as additional fee
+// Gas buffer rule (same as calculateFees):
+//   live gas <= cap  →  fwdGasWei = capGasWei  (env-based flat)
+//   live gas >  cap  →  fwdGasWei = liveGasWei (actual, charged to user)
+//
+// TX1 value = recipientWei + platformFeeWei + fwdGasWei
+// TX1 MetaMask gas paid by user automatically (not included in value)
+// TX2 actual gas deducted from fwdGasWei; surplus kept by platform
 // ─────────────────────────────────────────────────────────────
 function initiatePayment() {
   if (!enforceAllowedChain()) return;
@@ -776,25 +847,19 @@ function initiatePayment() {
   const recipientWei   = BigInt(Math.floor(amount * 1e18));
   const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
 
-  // Gas buffer from backend (flat value covers TX2 gas + surplus kept as fee)
-  let fwdGasWei = 0n;
-  if (CONFIG.GAS_BUFFER_WEI) {
-    fwdGasWei = BigInt(CONFIG.GAS_BUFFER_WEI);
-  } else if (liveGasPriceWei) {
-    fwdGasWei = BigInt(Math.floor(21000 * Number(liveGasPriceWei) * 1.5));
-  }
+  // Resolve gas buffer using the same rule as calculateFees
+  const gas = resolveGasBuffer();
+  const fwdGasWei = gas.gasWei;
 
   // TX1 value = everything going into escrow
-  // TX1 gas itself is handled by MetaMask automatically — user signs it
   const totalToSendWei = recipientWei + platformFeeWei + fwdGasWei;
 
   refreshBalance();
 
   setTimeout(() => {
-    // Balance check: user needs totalToSendWei + headroom for TX1 gas
-    // We estimate TX1 gas headroom from live gas price if available
+    // Balance check: user needs totalToSendWei + headroom for TX1 gas (MetaMask fee)
     let tx1GasHeadroom = 0n;
-    if (liveGasPriceWei) tx1GasHeadroom = BigInt(Math.floor(21000 * Number(liveGasPriceWei) * 1.2));
+    if (liveGasPriceWei) tx1GasHeadroom = BigInt(Math.floor(GAS_UNITS * Number(liveGasPriceWei) * 1.2));
 
     if (currentBalanceWei < totalToSendWei + tx1GasHeadroom) {
       const shortfall = Number(totalToSendWei + tx1GasHeadroom - currentBalanceWei) / 1e18;
