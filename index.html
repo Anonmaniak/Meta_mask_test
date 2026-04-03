@@ -475,8 +475,8 @@ const EXPLORER_BASE  = { '0x1': 'https://etherscan.io/tx/', '0xaa36a7': 'https:/
 const GAS_UNITS      = 21000;
 
 // ── Retry delays for backend save (handles Render free-tier cold start ~50s)
-// Attempt 0 = immediate, 1 = after 8s, 2 = after 20s, 3 = after 35s
-const SAVE_RETRY_DELAYS = [0, 8000, 20000, 35000];
+// 5 attempts: immediate, +10s, +25s, +45s, +65s — total coverage ~145s
+const SAVE_RETRY_DELAYS = [0, 10000, 25000, 45000, 65000];
 
 let currentAccount    = null;
 let currentChainId    = null;
@@ -777,7 +777,7 @@ window.closeTxModal = closeTxModal;
 
 // ─────────────────────────────────────────────────────────────
 // SAVE TX TO BACKEND
-// Retries at 0s, 8s, 20s, 35s to survive Render free-tier cold start (~50s)
+// 5 attempts: 0s, +10s, +25s, +45s, +65s — fully covers Render cold start (~50s)
 // ─────────────────────────────────────────────────────────────
 async function saveTxToBackend(saveData) {
   let lastErr;
@@ -962,7 +962,7 @@ function monitorTx(txHash) {
   })
   .then(res => {
     if (res.status === 404) {
-      // Not found yet — keep polling
+      // Not found yet — keep polling (record may not be saved yet)
       if (monitoringActive) setTimeout(() => monitorTx(txHash), 15000);
       return;
     }
