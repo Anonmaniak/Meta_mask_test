@@ -1,5 +1,6 @@
 Flask==3.0.0
 Flask-CORS==4.0.0
+Flask-Limiter==3.5.0
 web3==6.11.3
 setuptools==80.9.0
 pymongo==4.7.2
