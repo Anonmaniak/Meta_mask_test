@@ -425,6 +425,7 @@ _queue_thread.start()
 
 # =============================================================
 # KEEP-ALIVE — self-ping every 10 min so Render free tier stays awake
+#              + MongoDB ping to prevent Atlas connection timeout
 # =============================================================
 def _keep_alive_loop():
     import urllib.request
@@ -435,11 +436,21 @@ def _keep_alive_loop():
     print(f"\U0001f493 Keep-alive started — pinging {ping_url} every {KEEP_ALIVE_INTERVAL}s")
     while True:
         time.sleep(KEEP_ALIVE_INTERVAL)
+        # ── Render self-ping (prevents free-tier sleep)
         try:
             urllib.request.urlopen(ping_url, timeout=10)
             print("\U0001f493 Keep-alive ping OK")
         except Exception as e:
             print(f"\u26a0\ufe0f  Keep-alive ping failed: {e}")
+        # ── MongoDB ping (prevents Atlas free-tier connection drop)
+        try:
+            _get_db().command('ping')
+            print("\U0001f493 MongoDB ping OK")
+        except Exception as e:
+            print(f"\u26a0\ufe0f  MongoDB ping failed: {e} — forcing reconnect")
+            global _mongo_client, _mongo_db
+            _mongo_client = None
+            _mongo_db     = None
 
 _keep_alive_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
 _keep_alive_thread.start()
