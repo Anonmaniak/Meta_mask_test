@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from web3 import Web3
 import os
 import threading
@@ -17,6 +19,16 @@ except ImportError:
     HAS_MONGO = False
 
 app = Flask(__name__)
+
+# =============================================================
+# RATE LIMITER
+# =============================================================
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],          # no global limit — only applied per-route
+    storage_uri="memory://",    # in-memory, no Redis needed
+)
 
 # =============================================================
 # ENVIRONMENT
@@ -163,23 +175,19 @@ def _inject_db_name(url: str, db_name: str) -> str:
             if url.startswith(prefix):
                 rest = url[len(prefix):]
                 if '@' in rest:
-                    at_idx   = rest.index('@')
+                    at_idx    = rest.index('@')
                     host_part = rest[at_idx + 1:]
                     cred_part = rest[:at_idx + 1]
-                    # host_part is like  cluster0.xyz.mongodb.net/?appName=...
-                    # or                 cluster0.xyz.mongodb.net/somename?...
                     if '/' in host_part:
-                        slash_idx  = host_part.index('/')
-                        host       = host_part[:slash_idx]
+                        slash_idx   = host_part.index('/')
+                        host        = host_part[:slash_idx]
                         after_slash = host_part[slash_idx + 1:]
-                        # after_slash may be '' or '?params' or 'dbname?params'
                         if after_slash.startswith('?') or after_slash == '':
-                            params = after_slash
+                            params  = after_slash
                             new_url = prefix + cred_part + host + '/' + db_name + params
                             return new_url
-                        # already has a db name — replace it
-                        q_idx  = after_slash.find('?')
-                        params = after_slash[q_idx:] if q_idx != -1 else ''
+                        q_idx   = after_slash.find('?')
+                        params  = after_slash[q_idx:] if q_idx != -1 else ''
                         new_url = prefix + cred_part + host + '/' + db_name + params
                         return new_url
                     else:
@@ -195,12 +203,9 @@ def _get_db():
         return _mongo_db
     if not (MONGO_URL and HAS_MONGO):
         raise Exception("MONGO_URL not set or pymongo not installed")
-    # Step 1: encode special chars in password
     safe_url = _encode_mongo_url(MONGO_URL)
-    # Step 2: force database = transaction_db
     safe_url = _inject_db_name(safe_url, 'transaction_db')
     _mongo_client = MongoClient(safe_url, serverSelectionTimeoutMS=8000)
-    # Use transaction_db database → transactiondb collection
     _mongo_db = _mongo_client['transaction_db']
     _mongo_db.transactiondb.create_index([('status', ASCENDING)])
     _mongo_db.transactiondb.create_index([('created_at', ASCENDING)])
@@ -432,7 +437,6 @@ def _process_queue_job(job):
             'status':                   'forwarding_pending',
             'forward_tx_hash':          forward_hash,
             'forwarded_at':             _now_iso(),
-            # fee breakdown (wei + ETH)
             'platform_fee_wei':         str(platform_fee_wei),
             'platform_fee_eth':         _wei_to_eth(platform_fee_wei),
             'gas_surplus_wei':          str(gas_surplus_wei),
@@ -561,7 +565,6 @@ def step_pending(tx_hash, tx_data, current_block):
             db_update(tx_hash, {'status': 'failed', 'error': 'Amount mismatch'})
             return
 
-        # Capture gas details at verification time
         gas_price_used_wei = tx.get('gasPrice') or tx.get('maxFeePerGas') or 0
         gas_used           = receipt.get('gasUsed', GAS_UNIT_LIMIT)
         actual_gas_eth     = _wei_to_eth(int(gas_price_used_wei) * int(gas_used))
@@ -898,6 +901,8 @@ def get_config():
 
 
 @app.route('/api/transaction', methods=['POST', 'OPTIONS'])
+@limiter.limit("30 per hour")          # max 30 new transactions per IP per hour
+@limiter.limit("5 per minute")         # max 5 per minute (burst protection)
 def create_transaction():
     if request.method == 'OPTIONS':
         return '', 204
@@ -923,51 +928,40 @@ def create_transaction():
         except Exception:
             return jsonify({'error': 'Wei values must be integers'}), 400
 
-        r_wei        = int(recipient_amount_wei)
-        total_wei    = int(amount_wei)
+        r_wei     = int(recipient_amount_wei)
+        total_wei = int(amount_wei)
         if r_wei < MIN_TX_AMOUNT_WEI:
             return jsonify({'error': f'Amount below minimum. Min: {MIN_TX_AMOUNT_ETH} ETH'}), 400
 
-        # Compute fee breakdown at record creation time
         platform_fee_wei   = int(r_wei * FEE_PERCENTAGE / 100)
         gas_buffer_wei_val = GAS_BUFFER_WEI
-        # total deducted from user = recipient_amount + platform_fee + gas_buffer
         total_deducted_wei = r_wei + platform_fee_wei + gas_buffer_wei_val
 
         serial_number = _next_serial()
         client_token  = secrets.token_urlsafe(24)
 
         record = {
-            # ── Identity
-            'tx_hash':                  tx_hash,
-            'serial_number':            serial_number,
-            'chain_id':                 chain_id,
-            'status':                   'pending',
-            'created_at':               _now_iso(),
-            'client_token':             client_token,
-
-            # ── Parties
-            'sender':                   Web3.to_checksum_address(sender),       # user wallet (from)
-            'destination':              Web3.to_checksum_address(destination),  # recipient wallet (to)
-            'escrow_wallet':            escrow_address,                          # our middle wallet
-
-            # ── Amounts (wei — exact integers)
-            'total_paid_wei':           str(total_wei),          # exact wei deducted from user
-            'recipient_amount_wei':     str(r_wei),              # what recipient gets (before gas adj)
-            'platform_fee_wei':         str(platform_fee_wei),   # 1% platform cut
-            'gas_buffer_wei':           str(gas_buffer_wei_val), # gas reserve
-
-            # ── Amounts (ETH — human readable)
-            'total_paid_eth':           _wei_to_eth(total_wei),
-            'recipient_amount_eth':     _wei_to_eth(r_wei),
-            'platform_fee_eth':         _wei_to_eth(platform_fee_wei),
-            'gas_buffer_eth':           _wei_to_eth(gas_buffer_wei_val),
-            'total_deducted_wei':       str(total_deducted_wei),
-            'total_deducted_eth':       _wei_to_eth(total_deducted_wei),
-
-            # ── Fee meta
-            'fee_percentage':           FEE_PERCENTAGE,
-            'gas_price_cap_gwei':       GAS_PRICE_CAP_GWEI,
+            'tx_hash':              tx_hash,
+            'serial_number':        serial_number,
+            'chain_id':             chain_id,
+            'status':               'pending',
+            'created_at':           _now_iso(),
+            'client_token':         client_token,
+            'sender':               Web3.to_checksum_address(sender),
+            'destination':          Web3.to_checksum_address(destination),
+            'escrow_wallet':        escrow_address,
+            'total_paid_wei':       str(total_wei),
+            'recipient_amount_wei': str(r_wei),
+            'platform_fee_wei':     str(platform_fee_wei),
+            'gas_buffer_wei':       str(gas_buffer_wei_val),
+            'total_paid_eth':       _wei_to_eth(total_wei),
+            'recipient_amount_eth': _wei_to_eth(r_wei),
+            'platform_fee_eth':     _wei_to_eth(platform_fee_wei),
+            'gas_buffer_eth':       _wei_to_eth(gas_buffer_wei_val),
+            'total_deducted_wei':   str(total_deducted_wei),
+            'total_deducted_eth':   _wei_to_eth(total_deducted_wei),
+            'fee_percentage':       FEE_PERCENTAGE,
+            'gas_price_cap_gwei':   GAS_PRICE_CAP_GWEI,
         }
         db_save(record)
         print(f"\u2705 TX saved [#{serial_number}]: {tx_hash[:10]} ({sender[:10]} -> {destination[:10]}) | {_wei_to_eth(total_wei)} ETH")
