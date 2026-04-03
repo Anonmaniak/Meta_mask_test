@@ -7,6 +7,7 @@ import time
 import secrets
 import re
 from datetime import datetime, timezone
+from urllib.parse import quote_plus
 
 try:
     from pymongo import MongoClient, ASCENDING
@@ -21,9 +22,9 @@ app = Flask(__name__)
 # ENVIRONMENT
 # =============================================================
 _raw_origins = os.getenv('FRONTEND_URL', 'https://zyphra.in')
-FRONTEND_URL = _raw_origins.split(',')[0].strip()
+FRONTEND_URL = _raw_origins.split(',')[0].strip().rstrip('/')
 _ALLOWED_ORIGINS = (
-    [u.strip() for u in _raw_origins.split(',') if u.strip()]
+    [u.strip().rstrip('/') for u in _raw_origins.split(',') if u.strip()]
     + ["http://localhost:3000", "http://localhost:5500",
        "http://127.0.0.1:5500", "http://localhost:8080"]
 )
@@ -36,30 +37,32 @@ RUN_MONITOR        = os.getenv('RUN_MONITOR', '0')
 MONGO_URL          = os.getenv('MONGO_URL')
 
 # =============================================================
-# BUSINESS LOGIC — HARDCODED (change in code only)
+# BUSINESS LOGIC — HARDCODED
 # =============================================================
-FEE_PERCENTAGE    = 1.0       # Platform fee: always 1%
-MIN_TX_AMOUNT_ETH = 0.000001  # Minimum TX: 0.000001 ETH (testing mode)
+FEE_PERCENTAGE    = 1.0
+MIN_TX_AMOUNT_ETH = 0.000001
 
 # =============================================================
 # TUNABLE VIA ENV VARS
 # =============================================================
-GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI',         '100'))
+GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI',         '200'))  # raised from 30
 GAS_DEADLINE_SECONDS       = int(os.getenv('GAS_DEADLINE_SECONDS',       '3600'))
 KEEP_FEE_ON_REFUND         = os.getenv('KEEP_FEE_ON_REFUND', 'true').lower() == 'true'
-VERIFICATION_CONFIRMATIONS = int(os.getenv('VERIFICATION_CONFIRMATIONS', '3'))
-POLL_INTERVAL              = int(os.getenv('POLL_INTERVAL',              '15'))
+VERIFICATION_CONFIRMATIONS = int(os.getenv('VERIFICATION_CONFIRMATIONS', '2'))    # lowered from 3 → faster
+POLL_INTERVAL              = int(os.getenv('POLL_INTERVAL',              '12'))
 
-# Anti-stuck timeouts (seconds) — how long before watchdog rescues each state
-STUCK_PENDING_TIMEOUT      = int(os.getenv('STUCK_PENDING_TIMEOUT',      '1800'))  # 30 min
-STUCK_FORWARDING_TIMEOUT   = int(os.getenv('STUCK_FORWARDING_TIMEOUT',   '600'))   # 10 min
-STUCK_REFUNDING_TIMEOUT    = int(os.getenv('STUCK_REFUNDING_TIMEOUT',    '600'))   # 10 min
-STUCK_QUEUED_TIMEOUT       = int(os.getenv('STUCK_QUEUED_TIMEOUT',       '300'))   # 5 min
+STUCK_PENDING_TIMEOUT      = int(os.getenv('STUCK_PENDING_TIMEOUT',      '1800'))
+STUCK_FORWARDING_TIMEOUT   = int(os.getenv('STUCK_FORWARDING_TIMEOUT',   '600'))
+STUCK_REFUNDING_TIMEOUT    = int(os.getenv('STUCK_REFUNDING_TIMEOUT',    '600'))
+STUCK_QUEUED_TIMEOUT       = int(os.getenv('STUCK_QUEUED_TIMEOUT',       '300'))
 
-# Derived constants
 MIN_TX_AMOUNT_WEI = int(MIN_TX_AMOUNT_ETH * 1e18)
 GAS_UNIT_LIMIT    = 21_000
 GAS_BUFFER_WEI    = GAS_PRICE_CAP_GWEI * GAS_UNIT_LIMIT * 10**9
+
+# Keep-alive: ping own /api/health every 10 min to prevent Render free-tier sleep
+SELF_URL = os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
+KEEP_ALIVE_INTERVAL = 600  # 10 minutes
 
 # =============================================================
 # CORS
@@ -96,18 +99,38 @@ escrow_address = escrow_account.address
 balance_eth    = w3.from_wei(w3.eth.get_balance(escrow_address), 'ether')
 print(f"\u2705 Escrow wallet    : {escrow_address}")
 print(f"   Balance          : {balance_eth} ETH")
-print(f"   Min TX amount    : {MIN_TX_AMOUNT_ETH} ETH [HARDCODED]")
-print(f"   Platform fee     : {FEE_PERCENTAGE}% [HARDCODED]")
-print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei [env]")
-print(f"   Anti-stuck       : pending={STUCK_PENDING_TIMEOUT}s | forwarding={STUCK_FORWARDING_TIMEOUT}s | refunding={STUCK_REFUNDING_TIMEOUT}s | queued={STUCK_QUEUED_TIMEOUT}s")
+print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei")
+print(f"   Confirmations    : {VERIFICATION_CONFIRMATIONS}")
 
 # =============================================================
-# MONGODB
+# MONGODB  — auto-encode special chars in password
 # =============================================================
 _mongo_client = None
 _mongo_db     = None
 _serial_lock    = threading.Lock()
 _serial_counter = None
+
+
+def _encode_mongo_url(url: str) -> str:
+    """
+    If the URL contains a username:password section with special characters,
+    encode them with percent-encoding so MongoClient doesn't choke.
+    Handles: mongodb+srv://user:pass@host/db?params
+    """
+    try:
+        # Only process mongodb+srv:// or mongodb:// schemes
+        for prefix in ('mongodb+srv://', 'mongodb://'):
+            if url.startswith(prefix):
+                rest = url[len(prefix):]  # user:pass@host/...
+                if '@' in rest:
+                    creds, remainder = rest.split('@', 1)
+                    if ':' in creds:
+                        user, password = creds.split(':', 1)
+                        encoded = prefix + quote_plus(user) + ':' + quote_plus(password) + '@' + remainder
+                        return encoded
+        return url
+    except Exception:
+        return url
 
 
 def _get_db():
@@ -116,7 +139,8 @@ def _get_db():
         return _mongo_db
     if not (MONGO_URL and HAS_MONGO):
         raise Exception("MONGO_URL not set or pymongo not installed")
-    _mongo_client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    safe_url = _encode_mongo_url(MONGO_URL)
+    _mongo_client = MongoClient(safe_url, serverSelectionTimeoutMS=8000)
     _mongo_db     = _mongo_client['payments']
     _mongo_db.transactions.create_index([('status', ASCENDING)])
     _mongo_db.transactions.create_index([('created_at', ASCENDING)])
@@ -130,7 +154,6 @@ def _now_iso():
 
 
 def _seconds_since(iso_str: str) -> float:
-    """Return seconds elapsed since an ISO timestamp. Returns 0 on error."""
     try:
         dt = datetime.fromisoformat(iso_str)
         if dt.tzinfo is None:
@@ -284,7 +307,7 @@ def _build_tx_params(destination, value_wei, nonce):
     }, max_fee
 
 # =============================================================
-# FORWARD QUEUE — 1-by-1 serial processing
+# FORWARD QUEUE — serial 1-by-1
 # =============================================================
 _fwd_queue      = []
 _fwd_queue_lock = threading.Lock()
@@ -401,11 +424,32 @@ _queue_thread = threading.Thread(target=_queue_sender_loop, daemon=True)
 _queue_thread.start()
 
 # =============================================================
+# KEEP-ALIVE — self-ping every 10 min so Render free tier stays awake
+# =============================================================
+def _keep_alive_loop():
+    import urllib.request
+    if not SELF_URL:
+        print("\u2139\ufe0f  KEEP_ALIVE: RENDER_EXTERNAL_URL not set — skipping self-ping")
+        return
+    ping_url = SELF_URL + '/api/health'
+    print(f"\U0001f493 Keep-alive started — pinging {ping_url} every {KEEP_ALIVE_INTERVAL}s")
+    while True:
+        time.sleep(KEEP_ALIVE_INTERVAL)
+        try:
+            urllib.request.urlopen(ping_url, timeout=10)
+            print("\U0001f493 Keep-alive ping OK")
+        except Exception as e:
+            print(f"\u26a0\ufe0f  Keep-alive ping failed: {e}")
+
+_keep_alive_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
+_keep_alive_thread.start()
+
+# =============================================================
 # AUTH
 # =============================================================
 
 def _admin_token():
-    return request.headers.get('X-Admin-Token')  # header only, never query param
+    return request.headers.get('X-Admin-Token')
 
 
 def _client_token():
@@ -422,12 +466,9 @@ def is_admin():
 # =============================================================
 
 def step_pending(tx_hash, tx_data, current_block):
-    """TX1 verification: wait for 3 confirmations then validate on-chain."""
     try:
-        # ── Anti-stuck: if pending for too long with no on-chain trace → fail it
         age = _seconds_since(tx_data.get('created_at', ''))
         if age > STUCK_PENDING_TIMEOUT:
-            # Check if it ever landed on-chain at all
             try:
                 receipt = w3.eth.get_transaction_receipt(tx_hash)
             except Exception:
@@ -435,7 +476,7 @@ def step_pending(tx_hash, tx_data, current_block):
             if not receipt:
                 db_update(tx_hash, {
                     'status': 'failed',
-                    'error':  f'TX never mined after {int(age)}s — likely dropped from mempool'
+                    'error':  f'TX never mined after {int(age)}s'
                 })
                 print(f"\U0001f6ab STUCK PENDING rescued [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]}")
                 return
@@ -470,14 +511,13 @@ def step_pending(tx_hash, tx_data, current_block):
 
 
 def step_verified(tx_hash, tx_data):
-    """Gas check: queue forward when gas is acceptable, refund if deadline exceeded."""
     try:
         live_gwei = _get_current_gas_price_gwei()
         serial    = tx_data.get('serial_number', '?')
         waiting   = _seconds_since(tx_data.get('verified_at', tx_data.get('created_at', '')))
 
         if waiting > GAS_DEADLINE_SECONDS:
-            print(f"\u23f0 GAS DEADLINE exceeded [#{serial}] {tx_hash[:10]} ({int(waiting)}s) \u2192 refund")
+            print(f"\u23f0 GAS DEADLINE exceeded [#{serial}] {tx_hash[:10]} -> refund")
             db_update(tx_hash, {
                 'status':              'refund_pending',
                 'error':               f'Gas stayed above cap for {int(waiting)}s',
@@ -520,17 +560,15 @@ def step_verified(tx_hash, tx_data):
 
 
 def step_queued(tx_hash, tx_data):
-    """Anti-stuck: if a queued job was lost (e.g. restart), re-push it to the queue."""
     try:
         age    = _seconds_since(tx_data.get('queued_at', tx_data.get('created_at', '')))
         serial = tx_data.get('serial_number', '?')
 
         if age > STUCK_QUEUED_TIMEOUT:
-            # Check if already in memory queue
             with _fwd_queue_lock:
                 already = any(j['tx_hash'] == tx_hash for j in _fwd_queue)
             if not already:
-                print(f"\U0001f504 STUCK QUEUED rescued [#{serial}] {tx_hash[:10]} — re-pushing to queue")
+                print(f"\U0001f504 STUCK QUEUED rescued [#{serial}] {tx_hash[:10]}")
                 recipient_wei    = int(tx_data['recipient_amount_wei'])
                 buffer_wei       = int(tx_data.get('gas_buffer_wei', str(GAS_BUFFER_WEI)))
                 platform_fee_wei = int(recipient_wei * FEE_PERCENTAGE / 100)
@@ -543,13 +581,12 @@ def step_queued(tx_hash, tx_data):
                     'platform_fee_wei': platform_fee_wei,
                     'serial_number':    tx_data.get('serial_number', 0),
                 })
-                db_update(tx_hash, {'queued_at': _now_iso()})  # reset timer
+                db_update(tx_hash, {'queued_at': _now_iso()})
     except Exception as e:
         print(f"\u274c step_queued {tx_hash[:10]}: {e}")
 
 
 def step_forwarding(tx_hash, tx_data, current_block):
-    """TX2 verification: wait for 3 confirmations then mark complete."""
     try:
         forward_hash = tx_data.get('forward_tx_hash')
         serial       = tx_data.get('serial_number', '?')
@@ -557,7 +594,6 @@ def step_forwarding(tx_hash, tx_data, current_block):
         if not forward_hash:
             return
 
-        # ── Anti-stuck: forward TX broadcast but never confirmed → refund
         age = _seconds_since(tx_data.get('forwarded_at', ''))
         if age > STUCK_FORWARDING_TIMEOUT:
             try:
@@ -565,10 +601,10 @@ def step_forwarding(tx_hash, tx_data, current_block):
             except Exception:
                 receipt = None
             if not receipt:
-                print(f"\U0001f6ab STUCK FORWARDING rescued [#{serial}] {tx_hash[:10]} — forward TX dropped \u2192 refund")
+                print(f"\U0001f6ab STUCK FORWARDING rescued [#{serial}] {tx_hash[:10]}")
                 db_update(tx_hash, {
                     'status':              'refund_pending',
-                    'error':               f'Forward TX {forward_hash[:10]} never confirmed after {int(age)}s',
+                    'error':               f'Forward TX never confirmed after {int(age)}s',
                     'refund_initiated_at': _now_iso(),
                     'refund_reason':       'forward_tx_dropped',
                 })
@@ -584,7 +620,6 @@ def step_forwarding(tx_hash, tx_data, current_block):
                 'error':               'Forward tx reverted on-chain',
                 'refund_initiated_at': _now_iso(),
             })
-            print(f"\u26a0\ufe0f  [#{serial}] {tx_hash[:10]} forward reverted \u2192 refund")
             return
 
         confirmations = current_block - receipt['blockNumber']
@@ -603,7 +638,6 @@ def step_forwarding(tx_hash, tx_data, current_block):
 
 
 def step_refund(tx_hash, tx_data):
-    """Queue a refund job back to sender."""
     try:
         sender         = Web3.to_checksum_address(tx_data['sender'])
         total_paid_wei = int(tx_data['total_paid_wei'])
@@ -613,7 +647,6 @@ def step_refund(tx_hash, tx_data):
             recipient_wei    = int(tx_data.get('recipient_amount_wei', 0))
             platform_fee_wei = int(recipient_wei * FEE_PERCENTAGE / 100)
             refund_base_wei  = total_paid_wei - platform_fee_wei
-            print(f"\U0001f4b0 Keeping {w3.from_wei(platform_fee_wei,'ether'):.6f} ETH fee on gas-timeout refund")
         else:
             refund_base_wei = total_paid_wei
 
@@ -634,7 +667,6 @@ def step_refund(tx_hash, tx_data):
 
 
 def step_refunding_queued(tx_hash, tx_data):
-    """Anti-stuck: if a refund queued job was lost → re-push it."""
     try:
         age    = _seconds_since(tx_data.get('refund_queued_at', tx_data.get('created_at', '')))
         serial = tx_data.get('serial_number', '?')
@@ -643,7 +675,7 @@ def step_refunding_queued(tx_hash, tx_data):
             with _fwd_queue_lock:
                 already = any(j['tx_hash'] == tx_hash for j in _fwd_queue)
             if not already:
-                print(f"\U0001f504 STUCK REFUND QUEUED rescued [#{serial}] {tx_hash[:10]} — re-pushing")
+                print(f"\U0001f504 STUCK REFUND QUEUED rescued [#{serial}]")
                 queue_push({
                     'type':          'refund',
                     'tx_hash':       tx_hash,
@@ -657,7 +689,6 @@ def step_refunding_queued(tx_hash, tx_data):
 
 
 def step_refunding(tx_hash, tx_data, current_block):
-    """Confirm refund TX. Anti-stuck: if dropped → retry."""
     try:
         refund_hash = tx_data.get('refund_tx_hash')
         serial      = tx_data.get('serial_number', '?')
@@ -665,7 +696,6 @@ def step_refunding(tx_hash, tx_data, current_block):
         if not refund_hash:
             return
 
-        # ── Anti-stuck: refund TX dropped → re-queue refund
         age = _seconds_since(tx_data.get('refund_queued_at', tx_data.get('created_at', '')))
         if age > STUCK_REFUNDING_TIMEOUT:
             try:
@@ -673,10 +703,10 @@ def step_refunding(tx_hash, tx_data, current_block):
             except Exception:
                 receipt = None
             if not receipt:
-                print(f"\U0001f6ab STUCK REFUNDING rescued [#{serial}] {tx_hash[:10]} — refund TX dropped \u2192 retry")
+                print(f"\U0001f6ab STUCK REFUNDING rescued [#{serial}]")
                 db_update(tx_hash, {
                     'status':           'refund_pending',
-                    'error':            f'Refund TX {refund_hash[:10]} never confirmed after {int(age)}s — retrying',
+                    'error':            f'Refund TX never confirmed after {int(age)}s',
                     'refund_initiated_at': _now_iso(),
                 })
                 reset_nonce()
@@ -723,7 +753,6 @@ def monitor_transactions():
     global _monitor_running
     with _monitor_lock:
         if _monitor_running:
-            print("\u26a0\ufe0f  Monitor already running")
             return
         _monitor_running = True
 
@@ -742,13 +771,13 @@ def monitor_transactions():
                     elif status in ('verified', 'forward_wait_gas'):
                         step_verified(tx_hash, tx_data)
                     elif status == 'queued':
-                        step_queued(tx_hash, tx_data)               # anti-stuck
+                        step_queued(tx_hash, tx_data)
                     elif status == 'forwarding_pending':
                         step_forwarding(tx_hash, tx_data, current_block)
                     elif status == 'refund_pending':
                         step_refund(tx_hash, tx_data)
                     elif status == 'refunding_queued':
-                        step_refunding_queued(tx_hash, tx_data)     # anti-stuck
+                        step_refunding_queued(tx_hash, tx_data)
                     elif status == 'refunding':
                         step_refunding(tx_hash, tx_data, current_block)
                     elif status in ('complete', 'refunded'):
@@ -839,7 +868,7 @@ def create_transaction():
             'chain_id':             chain_id,
         }
         db_save(record)
-        print(f"\u2705 TX saved [#{serial_number}]: {tx_hash[:10]} ({sender[:10]} \u2192 {destination[:10]})")
+        print(f"\u2705 TX saved [#{serial_number}]: {tx_hash[:10]} ({sender[:10]} -> {destination[:10]})")
         return jsonify({'success': True, 'tx_hash': tx_hash, 'client_token': client_token, 'serial_number': serial_number})
 
     except Exception as e:
@@ -895,9 +924,9 @@ if __name__ == '__main__':
     if str(RUN_MONITOR).strip() == '1':
         t = threading.Thread(target=monitor_transactions, daemon=True)
         t.start()
-        print("\u2705 RUN_MONITOR=1 \u2192 monitor thread started")
+        print("\u2705 RUN_MONITOR=1 -> monitor thread started")
     else:
-        print("\u2139\ufe0f  RUN_MONITOR=0 \u2192 monitor in dedicated worker")
+        print("\u2139\ufe0f  RUN_MONITOR=0 -> monitor in dedicated worker")
     print(f"\n\U0001f680 Backend on port {port}")
     print(f"\U0001f30d Allowed origins: {_ALLOWED_ORIGINS}\n")
     app.run(host='0.0.0.0', port=port, debug=False)
