@@ -448,7 +448,7 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 const CONFIG = {
   ESCROW_WALLET:     '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
   FEE_PERCENTAGE:    1,
-  MIN_TX_AMOUNT_ETH: 0.000001,  // safe default; overwritten from /api/config
+  MIN_TX_AMOUNT_ETH: 0.000001,
   MAX_TX_AMOUNT_ETH: null,
   GAS_BUFFER_WEI:    null,
   GAS_BUFFER_ETH:    null,
@@ -508,32 +508,18 @@ function resolveGasBuffer() {
     ? BigInt(Math.floor(Number(liveGasPriceWei) * GAS_UNITS))
     : null;
 
-  const capGwei  = CONFIG.GAS_PRICE_CAP_GWEI;
-  const liveGwei = liveGasPriceWei ? Number(liveGasPriceWei) / 1e9 : null;
-
   let useWei;
-  let isLiveGas = false;
-
-  if (liveGwei != null && capGwei != null && liveGwei > capGwei) {
-    useWei = liveGasWei || capGasWei || 0n;
-    isLiveGas = true;
-  } else if (capGasWei != null) {
+  if (capGasWei != null) {
     useWei = capGasWei;
-    isLiveGas = false;
   } else if (liveGasWei != null) {
     useWei = liveGasWei;
-    isLiveGas = true;
   } else {
     useWei = 0n;
-    isLiveGas = false;
   }
 
   return {
-    gasWei:   useWei,
-    gasEth:   Number(useWei) / 1e18,
-    isLiveGas,
-    liveGwei: liveGwei != null ? liveGwei.toFixed(1) : null,
-    capGwei:  capGwei  != null ? capGwei              : null,
+    gasWei: useWei,
+    gasEth: Number(useWei) / 1e18,
   };
 }
 
@@ -717,8 +703,8 @@ function finalizeModal(success, txHash, opts) {
   } else if (opts.trackingError) {
     iconInner.textContent      = '⚠️';
     iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
-    document.getElementById('modalTitle').textContent    = 'Tracking Error';
-    document.getElementById('modalSubtitle').textContent = 'Your transaction was sent on-chain but our server could not be reached. Save your tx hash below — funds are safe.';
+    document.getElementById('modalTitle').textContent    = 'Sent — Save Your Tx Hash';
+    document.getElementById('modalSubtitle').textContent = 'ETH was sent on-chain successfully. Our server could not be reached to track it. Your tx hash is shown below — funds are safe.';
     btn.textContent = 'Close';
     btn.classList.add('show', 'warn');
   } else {
@@ -746,9 +732,38 @@ function finalizeModal(success, txHash, opts) {
 function closeTxModal() {
   document.getElementById('txModal').classList.add('hidden');
   monitoringActive = false;
+  // Always re-enable the payment button when modal closes
+  const btn = document.getElementById('paymentBtn');
+  if (btn) btn.disabled = !ALLOWED_CHAINS.has(currentChainId);
   refreshBalance();
 }
 window.closeTxModal = closeTxModal;
+
+// ─────────────────────────────────────────────────────────────
+// SAVE TX TO BACKEND — with 2 retries
+// ─────────────────────────────────────────────────────────────
+async function saveTxToBackend(saveData, retries) {
+  retries = (retries === undefined) ? 2 : retries;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const r = await fetch(CONFIG.BACKEND_URL + '/transaction', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(saveData)
+      });
+      const json = await r.json();
+      if (!r.ok) throw new Error(json.error || ('HTTP ' + r.status));
+      return json; // success
+    } catch (e) {
+      console.warn('[saveTx] attempt', attempt + 1, 'failed:', e.message);
+      if (attempt < retries) {
+        await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
+      } else {
+        throw e; // all retries exhausted
+      }
+    }
+  }
+}
 
 // ─────────────────────────────────────────────────────────────
 // PAYMENT
@@ -779,7 +794,7 @@ async function initiatePayment() {
     return;
   }
   if (amount < CONFIG.MIN_TX_AMOUNT_ETH) {
-    document.getElementById('amountError').textContent = `Minimum transaction amount is ${CONFIG.MIN_TX_AMOUNT_ETH} ETH`;
+    document.getElementById('amountError').textContent = 'Minimum transaction amount is ' + CONFIG.MIN_TX_AMOUNT_ETH + ' ETH';
     document.getElementById('amountError').style.display = 'block';
     return;
   }
@@ -793,7 +808,6 @@ async function initiatePayment() {
   const totalToSendWei = recipientWei + platformFeeWei + fwdGasWei;
 
   refreshBalance();
-
   await new Promise(r => setTimeout(r, 400));
 
   let tx1GasHeadroom = 0n;
@@ -813,6 +827,7 @@ async function initiatePayment() {
   let _submittedTxHash = null;
 
   try {
+    // ── STEP 1: MetaMask send
     const txHash = await window.ethereum.request({
       method: 'eth_sendTransaction',
       params: [{
@@ -823,8 +838,23 @@ async function initiatePayment() {
       }]
     });
 
+    // MetaMask confirmed — tx is on its way
     _submittedTxHash = txHash;
+    console.log('[payment] MetaMask tx submitted:', txHash);
 
+    // Show tx hash in modal immediately so user can track it
+    const shortHash = txHash.slice(0,10) + '...' + txHash.slice(-6);
+    document.getElementById('modalRef').textContent = shortHash;
+    document.getElementById('refRow').classList.add('show');
+    const base = EXPLORER_BASE[currentChainId];
+    if (base) {
+      const link = document.getElementById('explorerLink');
+      link.href = base + txHash;
+      link.classList.add('show');
+    }
+    document.getElementById('modalSubtitle').textContent = 'Transaction submitted — registering with server...';
+
+    // ── STEP 2: Save to backend (with retries)
     const saveData = {
       tx_hash:                txHash,
       sender:                 currentAccount,
@@ -834,41 +864,52 @@ async function initiatePayment() {
       forward_gas_buffer_wei: String(fwdGasWei)
     };
 
-    const r = await fetch(CONFIG.BACKEND_URL + '/transaction', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(saveData)
-    });
+    let saved = null;
+    let saveOk = false;
+    try {
+      saved  = await saveTxToBackend(saveData);
+      saveOk = true;
+      console.log('[payment] Backend save OK:', saved);
+    } catch (saveErr) {
+      // Backend save failed even after retries — tx is still on-chain, just not tracked
+      console.error('[payment] Backend save FAILED after retries:', saveErr.message);
+      finalizeModal(false, txHash, { trackingError: true });
+      updateStatus('⚠️ Tx sent on-chain — server unreachable. Save your tx hash!', 'processing');
+      return; // don't proceed to monitoring
+    }
 
-    const saved = r.ok ? await r.json() : await r.json().then(e => { throw new Error(e.error || 'Save failed'); });
-
-    if (saved.client_token) {
+    if (saved && saved.client_token) {
       try { sessionStorage.setItem('txToken:' + txHash, saved.client_token); } catch(e) {}
     }
 
+    // ── STEP 3: Clear form, start monitoring
     monitoringActive = true;
     document.getElementById('destinationAddress').value = '';
     document.getElementById('amount').value = '';
     document.getElementById('feeBreakdown').style.display = 'none';
+    document.getElementById('modalSubtitle').textContent = 'Registered! Monitoring your payment...';
+    updateStatus('⏳ Monitoring payment...', 'processing');
     setTimeout(() => monitorTx(txHash), 12000);
 
   } catch (err) {
-    console.error('Payment error:', err);
+    console.error('[payment] Error:', err);
     if (err.code === 4001 || (err.message && err.message.toLowerCase().includes('rejected'))) {
+      // User rejected in MetaMask — just close modal cleanly
       document.getElementById('txModal').classList.add('hidden');
-      updateStatus('⚠️ Payment cancelled', 'processing');
+      updateStatus('⚠️ Payment cancelled by user', 'processing');
     } else if (_submittedTxHash) {
+      // Tx went through but something else failed
       finalizeModal(false, _submittedTxHash, { trackingError: true });
-      updateStatus('⚠️ Tx sent — server unreachable', 'processing');
-    } else if (!document.getElementById('txModal').classList.contains('hidden')) {
-      finalizeModal(false, null);
-      updateStatus('Payment failed', 'error');
+      updateStatus('⚠️ Tx sent — unexpected error. Save your tx hash!', 'processing');
     } else {
+      // Tx never left — clean failure
+      finalizeModal(false, null);
       updateStatus('Payment failed', 'error');
     }
     monitoringActive = false;
   } finally {
-    document.getElementById('paymentBtn').disabled = false;
+    // ALWAYS re-enable the payment button when done
+    document.getElementById('paymentBtn').disabled = !ALLOWED_CHAINS.has(currentChainId);
   }
 }
 
@@ -885,7 +926,7 @@ function monitorTx(txHash) {
   })
   .then(res => {
     if (!res.ok) {
-      // 404 means record not found yet — keep polling, not a success
+      // 404 = not found yet, keep polling
       if (res.status === 404) {
         if (monitoringActive) setTimeout(() => monitorTx(txHash), 15000);
         return;
