@@ -45,10 +45,10 @@ MIN_TX_AMOUNT_ETH = 0.000001
 # =============================================================
 # TUNABLE VIA ENV VARS
 # =============================================================
-GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI',         '200'))  # raised from 30
+GAS_PRICE_CAP_GWEI         = int(os.getenv('GAS_PRICE_CAP_GWEI',         '200'))
 GAS_DEADLINE_SECONDS       = int(os.getenv('GAS_DEADLINE_SECONDS',       '3600'))
 KEEP_FEE_ON_REFUND         = os.getenv('KEEP_FEE_ON_REFUND', 'true').lower() == 'true'
-VERIFICATION_CONFIRMATIONS = int(os.getenv('VERIFICATION_CONFIRMATIONS', '2'))    # lowered from 3 → faster
+VERIFICATION_CONFIRMATIONS = int(os.getenv('VERIFICATION_CONFIRMATIONS', '2'))
 POLL_INTERVAL              = int(os.getenv('POLL_INTERVAL',              '12'))
 
 STUCK_PENDING_TIMEOUT      = int(os.getenv('STUCK_PENDING_TIMEOUT',      '1800'))
@@ -60,9 +60,9 @@ MIN_TX_AMOUNT_WEI = int(MIN_TX_AMOUNT_ETH * 1e18)
 GAS_UNIT_LIMIT    = 21_000
 GAS_BUFFER_WEI    = GAS_PRICE_CAP_GWEI * GAS_UNIT_LIMIT * 10**9
 
-# Keep-alive: ping own /api/health every 10 min to prevent Render free-tier sleep
-SELF_URL = os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
-KEEP_ALIVE_INTERVAL = 600  # 10 minutes
+# Keep-alive
+SELF_URL             = os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
+KEEP_ALIVE_INTERVAL  = 600
 
 # =============================================================
 # CORS
@@ -103,50 +103,15 @@ print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei")
 print(f"   Confirmations    : {VERIFICATION_CONFIRMATIONS}")
 
 # =============================================================
-# MONGODB  — auto-encode special chars in password
+# HELPERS
 # =============================================================
-_mongo_client = None
-_mongo_db     = None
-_serial_lock    = threading.Lock()
-_serial_counter = None
 
-
-def _encode_mongo_url(url: str) -> str:
-    """
-    If the URL contains a username:password section with special characters,
-    encode them with percent-encoding so MongoClient doesn't choke.
-    Handles: mongodb+srv://user:pass@host/db?params
-    """
+def _wei_to_eth(wei_val) -> str:
+    """Convert wei (int or str) to ETH string with 18 decimal precision."""
     try:
-        # Only process mongodb+srv:// or mongodb:// schemes
-        for prefix in ('mongodb+srv://', 'mongodb://'):
-            if url.startswith(prefix):
-                rest = url[len(prefix):]  # user:pass@host/...
-                if '@' in rest:
-                    creds, remainder = rest.split('@', 1)
-                    if ':' in creds:
-                        user, password = creds.split(':', 1)
-                        encoded = prefix + quote_plus(user) + ':' + quote_plus(password) + '@' + remainder
-                        return encoded
-        return url
+        return str(w3.from_wei(int(wei_val), 'ether'))
     except Exception:
-        return url
-
-
-def _get_db():
-    global _mongo_client, _mongo_db
-    if _mongo_db is not None:
-        return _mongo_db
-    if not (MONGO_URL and HAS_MONGO):
-        raise Exception("MONGO_URL not set or pymongo not installed")
-    safe_url = _encode_mongo_url(MONGO_URL)
-    _mongo_client = MongoClient(safe_url, serverSelectionTimeoutMS=8000)
-    _mongo_db     = _mongo_client['payments']
-    _mongo_db.transactions.create_index([('status', ASCENDING)])
-    _mongo_db.transactions.create_index([('created_at', ASCENDING)])
-    _mongo_db.transactions.create_index([('serial_number', ASCENDING)])
-    print("\u2705 MongoDB connected")
-    return _mongo_db
+        return '0'
 
 
 def _now_iso():
@@ -162,6 +127,88 @@ def _seconds_since(iso_str: str) -> float:
     except Exception:
         return 0
 
+# =============================================================
+# MONGODB  — stores in transaction_db > transactiondb
+# =============================================================
+_mongo_client = None
+_mongo_db     = None
+_serial_lock    = threading.Lock()
+_serial_counter = None
+
+
+def _encode_mongo_url(url: str) -> str:
+    """Percent-encode special characters in MongoDB credentials."""
+    try:
+        for prefix in ('mongodb+srv://', 'mongodb://'):
+            if url.startswith(prefix):
+                rest = url[len(prefix):]
+                if '@' in rest:
+                    creds, remainder = rest.split('@', 1)
+                    if ':' in creds:
+                        user, password = creds.split(':', 1)
+                        encoded = prefix + quote_plus(user) + ':' + quote_plus(password) + '@' + remainder
+                        return encoded
+        return url
+    except Exception:
+        return url
+
+
+def _inject_db_name(url: str, db_name: str) -> str:
+    """
+    Ensure the connection string targets the correct database.
+    Rewrites:  ...@host/?params  →  ...@host/db_name?params
+    """
+    try:
+        for prefix in ('mongodb+srv://', 'mongodb://'):
+            if url.startswith(prefix):
+                rest = url[len(prefix):]
+                if '@' in rest:
+                    at_idx   = rest.index('@')
+                    host_part = rest[at_idx + 1:]
+                    cred_part = rest[:at_idx + 1]
+                    # host_part is like  cluster0.xyz.mongodb.net/?appName=...
+                    # or                 cluster0.xyz.mongodb.net/somename?...
+                    if '/' in host_part:
+                        slash_idx  = host_part.index('/')
+                        host       = host_part[:slash_idx]
+                        after_slash = host_part[slash_idx + 1:]
+                        # after_slash may be '' or '?params' or 'dbname?params'
+                        if after_slash.startswith('?') or after_slash == '':
+                            params = after_slash
+                            new_url = prefix + cred_part + host + '/' + db_name + params
+                            return new_url
+                        # already has a db name — replace it
+                        q_idx  = after_slash.find('?')
+                        params = after_slash[q_idx:] if q_idx != -1 else ''
+                        new_url = prefix + cred_part + host + '/' + db_name + params
+                        return new_url
+                    else:
+                        return prefix + cred_part + host_part + '/' + db_name
+        return url
+    except Exception:
+        return url
+
+
+def _get_db():
+    global _mongo_client, _mongo_db
+    if _mongo_db is not None:
+        return _mongo_db
+    if not (MONGO_URL and HAS_MONGO):
+        raise Exception("MONGO_URL not set or pymongo not installed")
+    # Step 1: encode special chars in password
+    safe_url = _encode_mongo_url(MONGO_URL)
+    # Step 2: force database = transaction_db
+    safe_url = _inject_db_name(safe_url, 'transaction_db')
+    _mongo_client = MongoClient(safe_url, serverSelectionTimeoutMS=8000)
+    # Use transaction_db database → transactiondb collection
+    _mongo_db = _mongo_client['transaction_db']
+    _mongo_db.transactiondb.create_index([('status', ASCENDING)])
+    _mongo_db.transactiondb.create_index([('created_at', ASCENDING)])
+    _mongo_db.transactiondb.create_index([('serial_number', ASCENDING)])
+    _mongo_db.transactiondb.create_index([('sender', ASCENDING)])
+    print("\u2705 MongoDB connected → transaction_db.transactiondb")
+    return _mongo_db
+
 
 def _next_serial() -> int:
     global _serial_counter
@@ -169,7 +216,7 @@ def _next_serial() -> int:
         if _serial_counter is None:
             try:
                 db  = _get_db()
-                doc = db.transactions.find_one(
+                doc = db.transactiondb.find_one(
                     {'serial_number': {'$exists': True}},
                     sort=[('serial_number', -1)]
                 )
@@ -186,14 +233,14 @@ def db_save(tx_data):
     doc = dict(tx_data)
     doc['_id'] = doc['tx_hash']
     try:
-        db.transactions.insert_one(doc)
+        db.transactiondb.insert_one(doc)
     except DuplicateKeyError:
-        db.transactions.replace_one({'_id': doc['_id']}, doc)
+        db.transactiondb.replace_one({'_id': doc['_id']}, doc)
 
 
 def db_get(tx_hash):
     db  = _get_db()
-    doc = db.transactions.find_one({'_id': tx_hash})
+    doc = db.transactiondb.find_one({'_id': tx_hash})
     if not doc:
         return None
     doc.pop('_id', None)
@@ -202,7 +249,7 @@ def db_get(tx_hash):
 
 def db_get_active():
     db   = _get_db()
-    docs = db.transactions.find(
+    docs = db.transactiondb.find(
         {'status': {'$nin': ['complete', 'refunded', 'failed']}},
         sort=[('serial_number', ASCENDING)]
     )
@@ -215,7 +262,7 @@ def db_get_active():
 
 def db_get_all():
     db   = _get_db()
-    docs = db.transactions.find({}, sort=[('serial_number', ASCENDING)])
+    docs = db.transactiondb.find({}, sort=[('serial_number', ASCENDING)])
     result = []
     for d in docs:
         d.pop('_id', None)
@@ -224,11 +271,11 @@ def db_get_all():
 
 
 def db_update(tx_hash, updates):
-    _get_db().transactions.update_one({'_id': tx_hash}, {'$set': updates})
+    _get_db().transactiondb.update_one({'_id': tx_hash}, {'$set': updates})
 
 
 def db_delete(tx_hash):
-    _get_db().transactions.delete_one({'_id': tx_hash})
+    _get_db().transactiondb.delete_one({'_id': tx_hash})
 
 
 try:
@@ -382,14 +429,19 @@ def _process_queue_job(job):
         forward_hash = w3.eth.send_raw_transaction(raw).hex()
 
         db_update(tx_hash, {
-            'status':              'forwarding_pending',
-            'forward_tx_hash':     forward_hash,
-            'forwarded_at':        _now_iso(),
-            'platform_fee_wei':    str(platform_fee_wei),
-            'gas_surplus_wei':     str(gas_surplus_wei),
-            'actual_gas_cost_wei': str(actual_gas_cost_wei),
-            'final_send_wei':      str(final_send_wei),
-            'forward_nonce':       nonce,
+            'status':                   'forwarding_pending',
+            'forward_tx_hash':          forward_hash,
+            'forwarded_at':             _now_iso(),
+            # fee breakdown (wei + ETH)
+            'platform_fee_wei':         str(platform_fee_wei),
+            'platform_fee_eth':         _wei_to_eth(platform_fee_wei),
+            'gas_surplus_wei':          str(gas_surplus_wei),
+            'gas_surplus_eth':          _wei_to_eth(gas_surplus_wei),
+            'actual_gas_cost_wei':      str(actual_gas_cost_wei),
+            'actual_gas_cost_eth':      _wei_to_eth(actual_gas_cost_wei),
+            'final_send_wei':           str(final_send_wei),
+            'final_send_eth':           _wei_to_eth(final_send_wei),
+            'forward_nonce':            nonce,
         })
         print(f"\U0001f4e4 FORWARDED [#{serial}]: {tx_hash[:10]} \u2192 {forward_hash[:10]}")
 
@@ -415,7 +467,9 @@ def _process_queue_job(job):
             'status':              'refunding',
             'refund_tx_hash':      refund_hash,
             'refund_amount_wei':   str(refund_amount),
+            'refund_amount_eth':   _wei_to_eth(refund_amount),
             'refund_gas_cost_wei': str(actual_gas_cost_wei),
+            'refund_gas_cost_eth': _wei_to_eth(actual_gas_cost_wei),
         })
         print(f"\u21a9\ufe0f  REFUNDING [#{serial}]: {tx_hash[:10]} \u2192 {refund_hash[:10]}")
 
@@ -424,8 +478,7 @@ _queue_thread = threading.Thread(target=_queue_sender_loop, daemon=True)
 _queue_thread.start()
 
 # =============================================================
-# KEEP-ALIVE — self-ping every 10 min so Render free tier stays awake
-#              + MongoDB ping to prevent Atlas connection timeout
+# KEEP-ALIVE
 # =============================================================
 def _keep_alive_loop():
     import urllib.request
@@ -436,13 +489,11 @@ def _keep_alive_loop():
     print(f"\U0001f493 Keep-alive started — pinging {ping_url} every {KEEP_ALIVE_INTERVAL}s")
     while True:
         time.sleep(KEEP_ALIVE_INTERVAL)
-        # ── Render self-ping (prevents free-tier sleep)
         try:
             urllib.request.urlopen(ping_url, timeout=10)
             print("\U0001f493 Keep-alive ping OK")
         except Exception as e:
             print(f"\u26a0\ufe0f  Keep-alive ping failed: {e}")
-        # ── MongoDB ping (prevents Atlas free-tier connection drop)
         try:
             _get_db().command('ping')
             print("\U0001f493 MongoDB ping OK")
@@ -510,10 +561,19 @@ def step_pending(tx_hash, tx_data, current_block):
             db_update(tx_hash, {'status': 'failed', 'error': 'Amount mismatch'})
             return
 
+        # Capture gas details at verification time
+        gas_price_used_wei = tx.get('gasPrice') or tx.get('maxFeePerGas') or 0
+        gas_used           = receipt.get('gasUsed', GAS_UNIT_LIMIT)
+        actual_gas_eth     = _wei_to_eth(int(gas_price_used_wei) * int(gas_used))
+
         db_update(tx_hash, {
-            'status':       'verified',
-            'escrow_block': receipt['blockNumber'],
-            'verified_at':  _now_iso(),
+            'status':               'verified',
+            'escrow_block':         receipt['blockNumber'],
+            'verified_at':          _now_iso(),
+            'confirmations':        confirmations,
+            'gas_price_used_gwei':  float(w3.from_wei(int(gas_price_used_wei), 'gwei')),
+            'gas_used_units':       int(gas_used),
+            'user_gas_cost_eth':    actual_gas_eth,
         })
         print(f"\u2705 VERIFIED [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]} ({confirmations} confs)")
 
@@ -551,10 +611,12 @@ def step_verified(tx_hash, tx_data):
                 'serial_number':    tx_data.get('serial_number', 0),
             })
             db_update(tx_hash, {
-                'status':            'queued',
-                'queued_at':         _now_iso(),
-                'gas_at_queue_gwei': float(live_gwei),
-                'platform_fee_wei':  str(platform_fee_wei),
+                'status':                   'queued',
+                'queued_at':                _now_iso(),
+                'gas_at_queue_gwei':        float(live_gwei),
+                'platform_fee_wei':         str(platform_fee_wei),
+                'platform_fee_eth':         _wei_to_eth(platform_fee_wei),
+                'fee_percentage_applied':   FEE_PERCENTAGE,
             })
             print(f"\u26fd QUEUED [#{serial}] {tx_hash[:10]} (gas {live_gwei:.1f} Gwei)")
         else:
@@ -672,6 +734,7 @@ def step_refund(tx_hash, tx_data):
             'status':           'refunding_queued',
             'refund_queued_at': _now_iso(),
             'refund_base_wei':  str(refund_base_wei),
+            'refund_base_eth':  _wei_to_eth(refund_base_wei),
         })
     except Exception as e:
         print(f"\u274c step_refund {tx_hash[:10]}: {e}")
@@ -716,8 +779,8 @@ def step_refunding(tx_hash, tx_data, current_block):
             if not receipt:
                 print(f"\U0001f6ab STUCK REFUNDING rescued [#{serial}]")
                 db_update(tx_hash, {
-                    'status':           'refund_pending',
-                    'error':            f'Refund TX never confirmed after {int(age)}s',
+                    'status':              'refund_pending',
+                    'error':               f'Refund TX never confirmed after {int(age)}s',
                     'refund_initiated_at': _now_iso(),
                 })
                 reset_nonce()
@@ -742,6 +805,7 @@ def step_refunding(tx_hash, tx_data, current_block):
 
 
 def auto_cleanup(tx_hash, tx_data):
+    """Delete completed/refunded records after 24 hours."""
     try:
         key = 'completed_at' if tx_data.get('status') == 'complete' else 'refunded_at'
         ts  = tx_data.get(key, '')
@@ -815,6 +879,7 @@ def health_check():
         'chain_id':             chain_id,
         'current_block':        w3.eth.block_number,
         'storage':              'mongodb',
+        'db':                   'transaction_db.transactiondb',
     })
 
 
@@ -858,29 +923,60 @@ def create_transaction():
         except Exception:
             return jsonify({'error': 'Wei values must be integers'}), 400
 
-        r_wei = int(recipient_amount_wei)
+        r_wei        = int(recipient_amount_wei)
+        total_wei    = int(amount_wei)
         if r_wei < MIN_TX_AMOUNT_WEI:
             return jsonify({'error': f'Amount below minimum. Min: {MIN_TX_AMOUNT_ETH} ETH'}), 400
+
+        # Compute fee breakdown at record creation time
+        platform_fee_wei   = int(r_wei * FEE_PERCENTAGE / 100)
+        gas_buffer_wei_val = GAS_BUFFER_WEI
+        # total deducted from user = recipient_amount + platform_fee + gas_buffer
+        total_deducted_wei = r_wei + platform_fee_wei + gas_buffer_wei_val
 
         serial_number = _next_serial()
         client_token  = secrets.token_urlsafe(24)
 
         record = {
-            'tx_hash':              tx_hash,
-            'serial_number':        serial_number,
-            'sender':               Web3.to_checksum_address(sender),
-            'destination':          Web3.to_checksum_address(destination),
-            'total_paid_wei':       str(amount_wei),
-            'recipient_amount_wei': str(r_wei),
-            'gas_buffer_wei':       str(GAS_BUFFER_WEI),
-            'status':               'pending',
-            'created_at':           _now_iso(),
-            'client_token':         client_token,
-            'chain_id':             chain_id,
+            # ── Identity
+            'tx_hash':                  tx_hash,
+            'serial_number':            serial_number,
+            'chain_id':                 chain_id,
+            'status':                   'pending',
+            'created_at':               _now_iso(),
+            'client_token':             client_token,
+
+            # ── Parties
+            'sender':                   Web3.to_checksum_address(sender),       # user wallet (from)
+            'destination':              Web3.to_checksum_address(destination),  # recipient wallet (to)
+            'escrow_wallet':            escrow_address,                          # our middle wallet
+
+            # ── Amounts (wei — exact integers)
+            'total_paid_wei':           str(total_wei),          # exact wei deducted from user
+            'recipient_amount_wei':     str(r_wei),              # what recipient gets (before gas adj)
+            'platform_fee_wei':         str(platform_fee_wei),   # 1% platform cut
+            'gas_buffer_wei':           str(gas_buffer_wei_val), # gas reserve
+
+            # ── Amounts (ETH — human readable)
+            'total_paid_eth':           _wei_to_eth(total_wei),
+            'recipient_amount_eth':     _wei_to_eth(r_wei),
+            'platform_fee_eth':         _wei_to_eth(platform_fee_wei),
+            'gas_buffer_eth':           _wei_to_eth(gas_buffer_wei_val),
+            'total_deducted_wei':       str(total_deducted_wei),
+            'total_deducted_eth':       _wei_to_eth(total_deducted_wei),
+
+            # ── Fee meta
+            'fee_percentage':           FEE_PERCENTAGE,
+            'gas_price_cap_gwei':       GAS_PRICE_CAP_GWEI,
         }
         db_save(record)
-        print(f"\u2705 TX saved [#{serial_number}]: {tx_hash[:10]} ({sender[:10]} -> {destination[:10]})")
-        return jsonify({'success': True, 'tx_hash': tx_hash, 'client_token': client_token, 'serial_number': serial_number})
+        print(f"\u2705 TX saved [#{serial_number}]: {tx_hash[:10]} ({sender[:10]} -> {destination[:10]}) | {_wei_to_eth(total_wei)} ETH")
+        return jsonify({
+            'success':       True,
+            'tx_hash':       tx_hash,
+            'client_token':  client_token,
+            'serial_number': serial_number,
+        })
 
     except Exception as e:
         print(f"\u274c create_transaction: {e}")
@@ -899,12 +995,16 @@ def get_transaction(tx_hash):
         if not tok or not secrets.compare_digest(str(tok), str(tx_data.get('client_token') or '')):
             return jsonify({'error': 'Forbidden'}), 403
         return jsonify({
-            'tx_hash':         tx_data['tx_hash'],
-            'serial_number':   tx_data.get('serial_number'),
-            'status':          tx_data['status'],
-            'created_at':      tx_data.get('created_at'),
-            'completed_at':    tx_data.get('completed_at'),
-            'forward_tx_hash': tx_data.get('forward_tx_hash'),
+            'tx_hash':              tx_data['tx_hash'],
+            'serial_number':        tx_data.get('serial_number'),
+            'status':               tx_data['status'],
+            'created_at':           tx_data.get('created_at'),
+            'completed_at':         tx_data.get('completed_at'),
+            'forward_tx_hash':      tx_data.get('forward_tx_hash'),
+            'total_paid_eth':       tx_data.get('total_paid_eth'),
+            'recipient_amount_eth': tx_data.get('recipient_amount_eth'),
+            'platform_fee_eth':     tx_data.get('platform_fee_eth'),
+            'final_send_eth':       tx_data.get('final_send_eth'),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
