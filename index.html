@@ -594,7 +594,7 @@ async function loadBackendConfig() {
     if (feeLabel) feeLabel.textContent = CONFIG.FEE_PERCENTAGE;
     configLoaded = true;
     setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH);
-    console.log('[config loaded]', cfg);
+    //console.log('[config loaded]', cfg);
   } catch (e) {
     console.warn('[config] fallback:', e.message);
     configLoaded = true;
