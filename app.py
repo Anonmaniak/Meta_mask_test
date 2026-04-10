@@ -26,8 +26,8 @@ app = Flask(__name__)
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=[],          # no global limit — only applied per-route
-    storage_uri="memory://",    # in-memory, no Redis needed
+    default_limits=[],
+    storage_uri="memory://",
 )
 
 # =============================================================
@@ -49,7 +49,7 @@ RUN_MONITOR        = os.getenv('RUN_MONITOR', '0')
 MONGO_URL          = os.getenv('MONGO_URL')
 
 # =============================================================
-# BUSINESS LOGIC — HARDCODED
+# BUSINESS LOGIC
 # =============================================================
 FEE_PERCENTAGE    = 1.0
 MIN_TX_AMOUNT_ETH = 0.000001
@@ -72,9 +72,8 @@ MIN_TX_AMOUNT_WEI = int(MIN_TX_AMOUNT_ETH * 1e18)
 GAS_UNIT_LIMIT    = 21_000
 GAS_BUFFER_WEI    = GAS_PRICE_CAP_GWEI * GAS_UNIT_LIMIT * 10**9
 
-# Keep-alive
-SELF_URL             = os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
-KEEP_ALIVE_INTERVAL  = 600
+SELF_URL            = os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
+KEEP_ALIVE_INTERVAL = 600
 
 # =============================================================
 # CORS
@@ -119,7 +118,6 @@ print(f"   Confirmations    : {VERIFICATION_CONFIRMATIONS}")
 # =============================================================
 
 def _wei_to_eth(wei_val) -> str:
-    """Convert wei (int or str) to ETH string with 18 decimal precision."""
     try:
         return str(w3.from_wei(int(wei_val), 'ether'))
     except Exception:
@@ -140,16 +138,13 @@ def _seconds_since(iso_str: str) -> float:
         return 0
 
 # =============================================================
-# MONGODB  — stores in transaction_db > transactiondb
+# MONGODB
 # =============================================================
 _mongo_client = None
 _mongo_db     = None
-_serial_lock    = threading.Lock()
-_serial_counter = None
 
 
 def _encode_mongo_url(url: str) -> str:
-    """Percent-encode special characters in MongoDB credentials."""
     try:
         for prefix in ('mongodb+srv://', 'mongodb://'):
             if url.startswith(prefix):
@@ -158,18 +153,13 @@ def _encode_mongo_url(url: str) -> str:
                     creds, remainder = rest.split('@', 1)
                     if ':' in creds:
                         user, password = creds.split(':', 1)
-                        encoded = prefix + quote_plus(user) + ':' + quote_plus(password) + '@' + remainder
-                        return encoded
+                        return prefix + quote_plus(user) + ':' + quote_plus(password) + '@' + remainder
         return url
     except Exception:
         return url
 
 
 def _inject_db_name(url: str, db_name: str) -> str:
-    """
-    Ensure the connection string targets the correct database.
-    Rewrites:  ...@host/?params  →  ...@host/db_name?params
-    """
     try:
         for prefix in ('mongodb+srv://', 'mongodb://'):
             if url.startswith(prefix):
@@ -183,13 +173,10 @@ def _inject_db_name(url: str, db_name: str) -> str:
                         host        = host_part[:slash_idx]
                         after_slash = host_part[slash_idx + 1:]
                         if after_slash.startswith('?') or after_slash == '':
-                            params  = after_slash
-                            new_url = prefix + cred_part + host + '/' + db_name + params
-                            return new_url
-                        q_idx   = after_slash.find('?')
-                        params  = after_slash[q_idx:] if q_idx != -1 else ''
-                        new_url = prefix + cred_part + host + '/' + db_name + params
-                        return new_url
+                            return prefix + cred_part + host + '/' + db_name + after_slash
+                        q_idx  = after_slash.find('?')
+                        params = after_slash[q_idx:] if q_idx != -1 else ''
+                        return prefix + cred_part + host + '/' + db_name + params
                     else:
                         return prefix + cred_part + host_part + '/' + db_name
         return url
@@ -207,40 +194,57 @@ def _get_db():
     safe_url = _inject_db_name(safe_url, 'transaction_db')
     _mongo_client = MongoClient(safe_url, serverSelectionTimeoutMS=8000)
     _mongo_db = _mongo_client['transaction_db']
+    # Indexes for transactions
     _mongo_db.transactiondb.create_index([('status', ASCENDING)])
     _mongo_db.transactiondb.create_index([('created_at', ASCENDING)])
-    _mongo_db.transactiondb.create_index([('serial_number', ASCENDING)])
+    _mongo_db.transactiondb.create_index(
+        [('serial_number', ASCENDING)], unique=True, sparse=True
+    )
     _mongo_db.transactiondb.create_index([('sender', ASCENDING)])
-    print("\u2705 MongoDB connected → transaction_db.transactiondb")
+    # Index for idempotency — prevent double-submit of same tx_hash
+    _mongo_db.transactiondb.create_index([('tx_hash', ASCENDING)], unique=True, sparse=True)
+    print("\u2705 MongoDB connected \u2192 transaction_db.transactiondb")
     return _mongo_db
 
 
+# =============================================================
+# ATOMIC SERIAL via MongoDB $inc  (race-proof for 100+ users)
+# =============================================================
 def _next_serial() -> int:
-    global _serial_counter
-    with _serial_lock:
-        if _serial_counter is None:
-            try:
-                db  = _get_db()
-                doc = db.transactiondb.find_one(
-                    {'serial_number': {'$exists': True}},
-                    sort=[('serial_number', -1)]
-                )
-                _serial_counter = (doc['serial_number'] + 1) if doc else 1
-            except Exception:
-                _serial_counter = 1
-        serial = _serial_counter
-        _serial_counter += 1
-        return serial
+    """
+    Uses MongoDB atomic findAndModify ($inc) so even 100 simultaneous
+    requests each get a unique, sequential serial number.
+    No Python-level lock or counter needed.
+    """
+    db     = _get_db()
+    result = db.counters.find_one_and_update(
+        {'_id': 'tx_serial'},
+        {'$inc': {'seq': 1}},
+        upsert=True,
+        return_document=True   # returns the UPDATED doc (post-increment)
+    )
+    return result['seq']
 
 
-def db_save(tx_data):
+# =============================================================
+# DB HELPERS
+# =============================================================
+
+def db_save(tx_data) -> bool:
+    """
+    Insert new transaction record.
+    Returns True on success, False if tx_hash already exists (idempotency guard).
+    On duplicate: does NOT overwrite — returns existing record silently.
+    """
     db  = _get_db()
     doc = dict(tx_data)
     doc['_id'] = doc['tx_hash']
     try:
         db.transactiondb.insert_one(doc)
+        return True
     except DuplicateKeyError:
-        db.transactiondb.replace_one({'_id': doc['_id']}, doc)
+        # tx_hash already in DB — idempotency: just return True, don't overwrite
+        return False
 
 
 def db_get(tx_hash):
@@ -359,13 +363,17 @@ def _build_tx_params(destination, value_wei, nonce):
     }, max_fee
 
 # =============================================================
-# FORWARD QUEUE — serial 1-by-1
+# FORWARD QUEUE — processes transactions one-by-one by serial_number
+# First Come First Serve: serial #1 → #2 → #3 ...
+# Even if 100 users submit simultaneously, they are queued in
+# serial order and forwarded/verified one at a time.
 # =============================================================
 _fwd_queue      = []
 _fwd_queue_lock = threading.Lock()
 
 
 def queue_push(job: dict):
+    """Insert job into queue sorted by serial_number (ascending = FCFS)."""
     with _fwd_queue_lock:
         serial   = job.get('serial_number', 0)
         inserted = False
@@ -380,7 +388,8 @@ def queue_push(job: dict):
 
 
 def _queue_sender_loop():
-    print("\u2705 ForwardQueue sender thread started (serial 1-by-1)")
+    """Single worker thread — processes one job at a time."""
+    print("\u2705 ForwardQueue sender thread started (FCFS serial order)")
     while True:
         job = None
         with _fwd_queue_lock:
@@ -434,18 +443,18 @@ def _process_queue_job(job):
         forward_hash = w3.eth.send_raw_transaction(raw).hex()
 
         db_update(tx_hash, {
-            'status':                   'forwarding_pending',
-            'forward_tx_hash':          forward_hash,
-            'forwarded_at':             _now_iso(),
-            'platform_fee_wei':         str(platform_fee_wei),
-            'platform_fee_eth':         _wei_to_eth(platform_fee_wei),
-            'gas_surplus_wei':          str(gas_surplus_wei),
-            'gas_surplus_eth':          _wei_to_eth(gas_surplus_wei),
-            'actual_gas_cost_wei':      str(actual_gas_cost_wei),
-            'actual_gas_cost_eth':      _wei_to_eth(actual_gas_cost_wei),
-            'final_send_wei':           str(final_send_wei),
-            'final_send_eth':           _wei_to_eth(final_send_wei),
-            'forward_nonce':            nonce,
+            'status':              'forwarding_pending',
+            'forward_tx_hash':     forward_hash,
+            'forwarded_at':        _now_iso(),
+            'platform_fee_wei':    str(platform_fee_wei),
+            'platform_fee_eth':    _wei_to_eth(platform_fee_wei),
+            'gas_surplus_wei':     str(gas_surplus_wei),
+            'gas_surplus_eth':     _wei_to_eth(gas_surplus_wei),
+            'actual_gas_cost_wei': str(actual_gas_cost_wei),
+            'actual_gas_cost_eth': _wei_to_eth(actual_gas_cost_wei),
+            'final_send_wei':      str(final_send_wei),
+            'final_send_eth':      _wei_to_eth(final_send_wei),
+            'forward_nonce':       nonce,
         })
         print(f"\U0001f4e4 FORWARDED [#{serial}]: {tx_hash[:10]} \u2192 {forward_hash[:10]}")
 
@@ -570,13 +579,13 @@ def step_pending(tx_hash, tx_data, current_block):
         actual_gas_eth     = _wei_to_eth(int(gas_price_used_wei) * int(gas_used))
 
         db_update(tx_hash, {
-            'status':               'verified',
-            'escrow_block':         receipt['blockNumber'],
-            'verified_at':          _now_iso(),
-            'confirmations':        confirmations,
-            'gas_price_used_gwei':  float(w3.from_wei(int(gas_price_used_wei), 'gwei')),
-            'gas_used_units':       int(gas_used),
-            'user_gas_cost_eth':    actual_gas_eth,
+            'status':              'verified',
+            'escrow_block':        receipt['blockNumber'],
+            'verified_at':         _now_iso(),
+            'confirmations':       confirmations,
+            'gas_price_used_gwei': float(w3.from_wei(int(gas_price_used_wei), 'gwei')),
+            'gas_used_units':      int(gas_used),
+            'user_gas_cost_eth':   actual_gas_eth,
         })
         print(f"\u2705 VERIFIED [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]} ({confirmations} confs)")
 
@@ -614,12 +623,12 @@ def step_verified(tx_hash, tx_data):
                 'serial_number':    tx_data.get('serial_number', 0),
             })
             db_update(tx_hash, {
-                'status':                   'queued',
-                'queued_at':                _now_iso(),
-                'gas_at_queue_gwei':        float(live_gwei),
-                'platform_fee_wei':         str(platform_fee_wei),
-                'platform_fee_eth':         _wei_to_eth(platform_fee_wei),
-                'fee_percentage_applied':   FEE_PERCENTAGE,
+                'status':                 'queued',
+                'queued_at':              _now_iso(),
+                'gas_at_queue_gwei':      float(live_gwei),
+                'platform_fee_wei':       str(platform_fee_wei),
+                'platform_fee_eth':       _wei_to_eth(platform_fee_wei),
+                'fee_percentage_applied': FEE_PERCENTAGE,
             })
             print(f"\u26fd QUEUED [#{serial}] {tx_hash[:10]} (gas {live_gwei:.1f} Gwei)")
         else:
@@ -808,7 +817,6 @@ def step_refunding(tx_hash, tx_data, current_block):
 
 
 def auto_cleanup(tx_hash, tx_data):
-    """Delete completed/refunded records after 24 hours."""
     try:
         key = 'completed_at' if tx_data.get('status') == 'complete' else 'refunded_at'
         ts  = tx_data.get(key, '')
@@ -888,21 +896,18 @@ def health_check():
 
 @app.route('/api/config', methods=['GET'])
 def get_config():
+    # Only expose what the frontend needs — no internal business logic values
     return jsonify({
-        'fee_percentage':       FEE_PERCENTAGE,
-        'gas_price_cap_gwei':   GAS_PRICE_CAP_GWEI,
-        'gas_deadline_seconds': GAS_DEADLINE_SECONDS,
         'min_tx_amount_eth':    MIN_TX_AMOUNT_ETH,
         'max_tx_amount_eth':    None,
-        'gas_buffer_eth':       GAS_BUFFER_WEI / 1e18,
-        'gas_buffer_wei':       str(GAS_BUFFER_WEI),
-        'keep_fee_on_refund':   KEEP_FEE_ON_REFUND,
+        'gas_price_cap_gwei':   GAS_PRICE_CAP_GWEI,
+        'gas_deadline_seconds': GAS_DEADLINE_SECONDS,
     })
 
 
 @app.route('/api/transaction', methods=['POST', 'OPTIONS'])
-@limiter.limit("30 per hour")          # max 30 new transactions per IP per hour
-@limiter.limit("5 per minute")         # max 5 per minute (burst protection)
+@limiter.limit("30 per hour")
+@limiter.limit("5 per minute")
 def create_transaction():
     if request.method == 'OPTIONS':
         return '', 204
@@ -933,10 +938,23 @@ def create_transaction():
         if r_wei < MIN_TX_AMOUNT_WEI:
             return jsonify({'error': f'Amount below minimum. Min: {MIN_TX_AMOUNT_ETH} ETH'}), 400
 
+        # ── Idempotency guard: if tx_hash already registered return existing ──
+        existing = db_get(tx_hash)
+        if existing:
+            print(f"\u26a0\ufe0f  Duplicate submission blocked: {tx_hash[:10]} (serial #{existing.get('serial_number')})")
+            return jsonify({
+                'success':       True,
+                'tx_hash':       existing['tx_hash'],
+                'client_token':  existing['client_token'],
+                'serial_number': existing['serial_number'],
+                'duplicate':     True,
+            })
+
         platform_fee_wei   = int(r_wei * FEE_PERCENTAGE / 100)
         gas_buffer_wei_val = GAS_BUFFER_WEI
         total_deducted_wei = r_wei + platform_fee_wei + gas_buffer_wei_val
 
+        # ── Atomic serial number — race-proof for 100+ simultaneous users ──
         serial_number = _next_serial()
         client_token  = secrets.token_urlsafe(24)
 

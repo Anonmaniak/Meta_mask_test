@@ -6,7 +6,7 @@ services:
     region: oregon
     branch: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 120
     plan: free
     envVars:
       - key: PORT
@@ -15,7 +15,7 @@ services:
         value: "3.11.0"
       - key: RUN_MONITOR
         value: "0"
-      # ── Business Logic (change anytime from Render dashboard) ──
+      # ── Business Logic ──
       - key: FEE_PERCENTAGE
         value: "1"
       - key: MIN_TX_AMOUNT_ETH
@@ -26,7 +26,7 @@ services:
         value: "3"
       - key: POLL_INTERVAL
         value: "15"
-      # ── Secrets (set manually in Render dashboard, never in code) ──
+      # ── Secrets (set manually in Render dashboard) ──
       - key: FRONTEND_URL
         sync: false
       - key: RPC_URL
@@ -40,7 +40,7 @@ services:
       - key: EXPECTED_CHAIN_ID
         sync: false
 
-  # ── Background Worker ──────────────────────────────────────
+  # ── Background Worker (verify + forward monitor) ───────────
   - type: worker
     name: transaction-monitor
     env: python
