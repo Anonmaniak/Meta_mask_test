@@ -1,5 +1,5 @@
 services:
-  # ── Web API + Monitor (single service, free tier compatible) ──
+  # ── Web API ──
   - type: web
     name: secure-payment-api
     env: python
@@ -13,7 +13,6 @@ services:
         value: "10000"
       - key: PYTHON_VERSION
         value: "3.11.0"
-      # Monitor runs inside the web process (free tier — no separate worker)
       - key: RUN_MONITOR
         value: "1"
       # ── Business Logic ──
@@ -35,6 +34,39 @@ services:
       - key: ADMIN_PRIVATE_KEY
         sync: false
       - key: ADMIN_TOKEN
+        sync: false
+      - key: MONGO_URL
+        sync: false
+      - key: EXPECTED_CHAIN_ID
+        sync: false
+
+  # ── Background Worker (verify + forward monitor) ──
+  - type: worker
+    name: transaction-monitor
+    env: python
+    region: oregon
+    branch: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker.py
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: FEE_PERCENTAGE
+        value: "1"
+      - key: MIN_TX_AMOUNT_ETH
+        value: "0.1"
+      - key: GAS_PRICE_CAP_GWEI
+        value: "50"
+      - key: VERIFICATION_CONFIRMATIONS
+        value: "3"
+      - key: POLL_INTERVAL
+        value: "15"
+      - key: RUN_MONITOR
+        value: "1"
+      - key: RPC_URL
+        sync: false
+      - key: ADMIN_PRIVATE_KEY
         sync: false
       - key: MONGO_URL
         sync: false
