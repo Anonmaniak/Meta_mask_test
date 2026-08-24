@@ -1,8 +1,0 @@
-{
-  "name": "metamask-payment-system",
-  "version": "1.0.0",
-  "description": "MetaMask payment system - Vercel Serverless",
-  "dependencies": {
-    "ethers": "^6.9.0"
-  }
-}
