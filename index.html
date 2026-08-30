@@ -455,7 +455,6 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
     </div>
 
     <button id="modalBtn" class="modal-btn" onclick="closeTxModal()">Done</button>
-    <a id="explorerLink" class="explorer-link" href="#" target="_blank" rel="noopener">View on Etherscan ↗</a>
 
   </div>
 </div>
@@ -777,7 +776,6 @@ function openModal(to, amountEth, network) {
   document.getElementById('progressBarWrap').classList.remove('hidden');
   document.getElementById('refRow').classList.remove('show');
   document.getElementById('modalBtn').classList.remove('show', 'success', 'fail', 'warn');
-  document.getElementById('explorerLink').classList.remove('show');
   document.getElementById('txModal').classList.remove('hidden');
 }
 
@@ -824,12 +822,6 @@ function finalizeModal(success, txHash, opts) {
     const short = txHash.slice(0,10) + '...' + txHash.slice(-6);
     document.getElementById('modalRef').textContent = short;
     document.getElementById('refRow').classList.add('show');
-    const base = EXPLORER_BASE[currentChainId];
-    if (base) {
-      const link = document.getElementById('explorerLink');
-      link.href = base + txHash;
-      link.classList.add('show');
-    }
   }
 }
 
@@ -962,13 +954,7 @@ async function initiatePayment(overrideHighGas = false) {
     // Show hash immediately so user can track even if save fails
     document.getElementById('modalRef').textContent = txHash.slice(0,10) + '...' + txHash.slice(-6);
     document.getElementById('refRow').classList.add('show');
-    const base = EXPLORER_BASE[currentChainId];
-    if (base) {
-      const link = document.getElementById('explorerLink');
-      link.href = base + txHash;
-      link.classList.add('show');
-    }
-    document.getElementById('modalSubtitle').textContent = 'TX1 confirmed by MetaMask! Registering with server...';
+    document.getElementById('modalSubtitle').textContent = 'Transaction submitted — registering with server...';
 
     // ── STEP 2: Save to backend with retries (handles Render cold start)
     const userGasCap = (overrideHighGas && liveGwei !== null)
@@ -1005,8 +991,8 @@ async function initiatePayment(overrideHighGas = false) {
     document.getElementById('destinationAddress').value = '';
     document.getElementById('amount').value = '';
     document.getElementById('feeBreakdown').style.display = 'none';
-    document.getElementById('modalSubtitle').textContent = 'Registered! Serial #' + (saved.serial_number || '?') + ' — monitoring...';
-    updateStatus('⏳ Monitoring payment #' + (saved.serial_number || '?') + '...', 'processing');
+    document.getElementById('modalSubtitle').textContent = 'Transaction registered — monitoring confirmation...';
+    updateStatus('⏳ Monitoring payment...', 'processing');
     setTimeout(() => monitorTx(txHash), 12000);
 
   } catch (err) {
