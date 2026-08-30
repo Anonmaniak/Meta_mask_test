@@ -460,6 +460,45 @@ input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(1
   </div>
 </div>
 
+<!-- GAS PRICE WARNING MODAL -->
+<div id="gasConfirmModal" class="tx-modal hidden">
+  <div class="tx-modal__backdrop" onclick="closeGasModal()"></div>
+  <div class="tx-modal__card">
+    <div class="modal-icon-wrap" style="width: 72px; height: 72px; margin-bottom: 16px;">
+      <div class="modal-icon-inner" style="inset: 0; background: linear-gradient(135deg, #fff3cd, #ffe08a); font-size: 32px;">⛽</div>
+    </div>
+    <div class="modal-title" style="color: #856404; font-size: 20px;">High Gas Price Detected</div>
+    <div class="modal-subtitle" style="color: #666; font-size: 14px; margin-bottom: 18px;">
+      Network gas is currently higher than the standard cap.
+    </div>
+    <div class="modal-details" style="text-align: left; margin-bottom: 20px;">
+      <div class="detail-row">
+        <span class="dl">Current Gas</span>
+        <span class="dv" id="modalLiveGas" style="color: #dc3545; font-weight: 700;">-</span>
+      </div>
+      <div class="detail-row">
+        <span class="dl">Standard Cap</span>
+        <span class="dv" id="modalCapGas">-</span>
+      </div>
+      <div class="detail-row">
+        <span class="dl">Est. Total</span>
+        <span class="dv" id="modalHighGasTotal">-</span>
+      </div>
+    </div>
+    <p style="font-size: 13px; color: #555; margin-bottom: 20px; line-height: 1.4;">
+      Gas price is higher than standard. If you proceed, the transaction will be processed with a higher gas reserve. Do you want to proceed?
+    </p>
+    <div style="display: flex; gap: 12px;">
+      <button type="button" onclick="closeGasModal()" style="background: #e0e0e0; color: #333; margin: 0; padding: 14px; font-size: 15px; border-radius: 12px; box-shadow: none;">
+        Cancel / Wait
+      </button>
+      <button type="button" onclick="proceedWithHighGas()" style="background: linear-gradient(135deg, #f6851b, #e2761b); color: #fff; margin: 0; padding: 14px; font-size: 15px; border-radius: 12px;">
+        Yes, Proceed
+      </button>
+    </div>
+  </div>
+</div>
+
 <script>
 const CONFIG = {
   ESCROW_WALLET:      '0x7e4692aaa29fe7632fa0bdc8effd25cc70867d33',
@@ -549,7 +588,7 @@ function setBadgeFallback() { setBadgeValue(CONFIG.MIN_TX_AMOUNT_ETH); }
 // ─────────────────────────────────────────────────────────────
 // GAS BUFFER
 // ─────────────────────────────────────────────────────────────
-function resolveGasBuffer() {
+function resolveGasBuffer(overrideHighGas = false) {
   let capGasWei = null;
   if (CONFIG.GAS_BUFFER_WEI) {
     capGasWei = BigInt(CONFIG.GAS_BUFFER_WEI);
@@ -562,7 +601,10 @@ function resolveGasBuffer() {
     : null;
 
   let useWei;
-  if (capGasWei != null) {
+  if (overrideHighGas && liveGasWei != null) {
+    // Under user-confirmed high gas, allocate sufficient gas buffer (15% safety headroom)
+    useWei = BigInt(Math.floor(Number(liveGasWei) * 1.15));
+  } else if (capGasWei != null) {
     useWei = capGasWei;
   } else if (liveGasWei != null) {
     useWei = liveGasWei;
@@ -571,6 +613,28 @@ function resolveGasBuffer() {
   }
 
   return { gasWei: useWei, gasEth: Number(useWei) / 1e18 };
+}
+
+function showGasModal(liveGwei, capGwei, amount) {
+  document.getElementById('modalLiveGas').textContent = liveGwei.toFixed(1) + ' Gwei';
+  document.getElementById('modalCapGas').textContent  = capGwei + ' Gwei';
+
+  const recipientWei   = BigInt(Math.floor(amount * 1e18));
+  const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
+  const gas            = resolveGasBuffer(true);
+  const totalEth       = (Number(recipientWei + platformFeeWei + gas.gasWei) / 1e18).toFixed(6);
+
+  document.getElementById('modalHighGasTotal').textContent = totalEth + ' ETH';
+  document.getElementById('gasConfirmModal').classList.remove('hidden');
+}
+
+function closeGasModal() {
+  document.getElementById('gasConfirmModal').classList.add('hidden');
+}
+
+function proceedWithHighGas() {
+  closeGasModal();
+  initiatePayment(true);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -813,7 +877,7 @@ async function saveTxToBackend(saveData) {
 // ─────────────────────────────────────────────────────────────
 // PAYMENT
 // ─────────────────────────────────────────────────────────────
-async function initiatePayment() {
+async function initiatePayment(overrideHighGas = false) {
   if (!enforceAllowedChain()) return;
   if (!configLoaded) {
     updateStatus('⏳ Loading config, please wait...', 'processing');
@@ -842,9 +906,18 @@ async function initiatePayment() {
     return;
   }
 
+  // Check if live gas price exceeds the configured cap
+  const liveGwei = liveGasPriceWei ? (Number(liveGasPriceWei) / 1e9) : null;
+  const capGwei  = CONFIG.GAS_PRICE_CAP_GWEI;
+
+  if (!overrideHighGas && liveGwei !== null && capGwei !== null && liveGwei > capGwei) {
+    showGasModal(liveGwei, capGwei, amount);
+    return;
+  }
+
   const recipientWei   = BigInt(Math.floor(amount * 1e18));
   const platformFeeWei = BigInt(Math.floor(amount * CONFIG.FEE_PERCENTAGE / 100 * 1e18));
-  const gas            = resolveGasBuffer();
+  const gas            = resolveGasBuffer(overrideHighGas);
   const fwdGasWei      = gas.gasWei;
   const totalToSendWei = recipientWei + platformFeeWei + fwdGasWei;
 
@@ -898,13 +971,18 @@ async function initiatePayment() {
     document.getElementById('modalSubtitle').textContent = 'TX1 confirmed by MetaMask! Registering with server...';
 
     // ── STEP 2: Save to backend with retries (handles Render cold start)
+    const userGasCap = (overrideHighGas && liveGwei !== null)
+      ? Math.ceil(liveGwei * 1.3)
+      : (CONFIG.GAS_PRICE_CAP_GWEI || 200);
+
     const saveData = {
       tx_hash:                txHash,
       sender:                 currentAccount,
       destination:            dest,
       amount_wei:             String(totalToSendWei),
       recipient_amount_wei:   String(recipientWei),
-      forward_gas_buffer_wei: String(fwdGasWei)
+      forward_gas_buffer_wei: String(fwdGasWei),
+      gas_price_cap_gwei:     userGasCap
     };
 
     let saved = null;
@@ -1023,9 +1101,11 @@ function updateStatus(msg, type) {
   document.getElementById('statusBox').className    = 'status-box ' + type;
 }
 
-window.connectMetaMask = connectMetaMask;
-window.calculateFees   = calculateFees;
-window.initiatePayment = initiatePayment;
+window.connectMetaMask    = connectMetaMask;
+window.calculateFees      = calculateFees;
+window.initiatePayment    = initiatePayment;
+window.closeGasModal      = closeGasModal;
+window.proceedWithHighGas = proceedWithHighGas;
 
 // ─────────────────────────────────────────────────────────────
 // ON LOAD
