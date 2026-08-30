@@ -609,7 +609,8 @@ def step_verified(tx_hash, tx_data):
             })
             return
 
-        if live_gwei <= GAS_PRICE_CAP_GWEI:
+        tx_gas_cap = float(tx_data.get('gas_price_cap_gwei') or GAS_PRICE_CAP_GWEI)
+        if live_gwei <= tx_gas_cap:
             recipient_wei    = int(tx_data['recipient_amount_wei'])
             buffer_wei       = int(tx_data.get('gas_buffer_wei', str(GAS_BUFFER_WEI)))
             platform_fee_wei = int(recipient_wei * FEE_PERCENTAGE / 100)
@@ -635,10 +636,10 @@ def step_verified(tx_hash, tx_data):
             db_update(tx_hash, {
                 'status':              'forward_wait_gas',
                 'live_gas_gwei':       float(live_gwei),
-                'gas_cap_gwei':        GAS_PRICE_CAP_GWEI,
+                'gas_cap_gwei':        tx_gas_cap,
                 'gas_wait_updated_at': _now_iso(),
             })
-            print(f"\u26fd Gas HIGH ({live_gwei:.1f} > {GAS_PRICE_CAP_GWEI}) [#{serial}] waiting...")
+            print(f"\u26fd Gas HIGH ({live_gwei:.1f} > {tx_gas_cap}) [#{serial}] waiting...")
 
     except Exception as e:
         print(f"\u274c step_verified {tx_hash[:10]}: {e}")
@@ -951,7 +952,19 @@ def create_transaction():
             })
 
         platform_fee_wei   = int(r_wei * FEE_PERCENTAGE / 100)
-        gas_buffer_wei_val = GAS_BUFFER_WEI
+
+        user_gas_buffer = data.get('forward_gas_buffer_wei') or data.get('gas_buffer_wei')
+        try:
+            gas_buffer_wei_val = int(user_gas_buffer) if user_gas_buffer is not None else GAS_BUFFER_WEI
+        except Exception:
+            gas_buffer_wei_val = GAS_BUFFER_WEI
+
+        user_gas_cap = data.get('gas_price_cap_gwei')
+        try:
+            gas_cap_val = float(user_gas_cap) if user_gas_cap is not None else GAS_PRICE_CAP_GWEI
+        except Exception:
+            gas_cap_val = GAS_PRICE_CAP_GWEI
+
         total_deducted_wei = r_wei + platform_fee_wei + gas_buffer_wei_val
 
         # ── Atomic serial number — race-proof for 100+ simultaneous users ──
@@ -979,7 +992,7 @@ def create_transaction():
             'total_deducted_wei':   str(total_deducted_wei),
             'total_deducted_eth':   _wei_to_eth(total_deducted_wei),
             'fee_percentage':       FEE_PERCENTAGE,
-            'gas_price_cap_gwei':   GAS_PRICE_CAP_GWEI,
+            'gas_price_cap_gwei':   gas_cap_val,
         }
         db_save(record)
         print(f"\u2705 TX saved [#{serial_number}]: {tx_hash[:10]} ({sender[:10]} -> {destination[:10]}) | {_wei_to_eth(total_wei)} ETH")
