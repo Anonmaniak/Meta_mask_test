@@ -1,1 +1,1 @@
-(verified 966-char simplified worker from sandbox)
+(full 966-char simplified worker from sandbox)
