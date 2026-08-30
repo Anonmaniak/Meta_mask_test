@@ -41,7 +41,11 @@ _ALLOWED_ORIGINS = (
        "http://127.0.0.1:5500", "http://localhost:8080"]
 )
 
-RPC_URL            = os.getenv('RPC_URL')
+RPC_URL_MAINNET          = os.getenv('RPC_URL_MAINNET')
+RPC_URL_MAINNET_FALLBACK = os.getenv('RPC_URL_MAINNET_FALLBACK')
+RPC_URL_SEPOLIA          = os.getenv('RPC_URL_SEPOLIA')
+RPC_URL_LEGACY           = os.getenv('RPC_URL')
+
 ADMIN_PRIVATE_KEY  = os.getenv('ADMIN_PRIVATE_KEY')
 ADMIN_TOKEN        = os.getenv('ADMIN_TOKEN')
 EXPECTED_CHAIN_ID  = os.getenv('EXPECTED_CHAIN_ID')
@@ -87,29 +91,84 @@ CORS(app, resources={
 })
 
 # =============================================================
-# BLOCKCHAIN
+# BLOCKCHAIN PROVIDERS (Dual Mainnet + Sepolia Testnet)
 # =============================================================
-if not RPC_URL:
-    raise Exception("RPC_URL environment variable not set")
-
-w3 = Web3(Web3.HTTPProvider(RPC_URL))
-if not w3.is_connected():
-    raise Exception(f"Failed to connect to blockchain: {RPC_URL}")
-
-chain_id = int(w3.eth.chain_id)
-if EXPECTED_CHAIN_ID and int(EXPECTED_CHAIN_ID) != chain_id:
-    raise Exception(f"RPC chain_id={chain_id} but EXPECTED_CHAIN_ID={EXPECTED_CHAIN_ID}")
-
-print(f"\u2705 Blockchain: chain_id={chain_id}, block={w3.eth.block_number}")
+if not (RPC_URL_MAINNET or RPC_URL_SEPOLIA or RPC_URL_LEGACY):
+    raise Exception("No RPC_URL configured! Please set RPC_URL_MAINNET, RPC_URL_MAINNET_FALLBACK, or RPC_URL_SEPOLIA")
 
 if not ADMIN_PRIVATE_KEY:
     raise Exception("ADMIN_PRIVATE_KEY not set")
 
-escrow_account = w3.eth.account.from_key(ADMIN_PRIVATE_KEY)
+from eth_account import Account
+escrow_account = Account.from_key(ADMIN_PRIVATE_KEY)
 escrow_address = escrow_account.address
-balance_eth    = w3.from_wei(w3.eth.get_balance(escrow_address), 'ether')
+
+_w3_mainnet          = Web3(Web3.HTTPProvider(RPC_URL_MAINNET, request_kwargs={'timeout': 10})) if RPC_URL_MAINNET else None
+_w3_mainnet_fallback = Web3(Web3.HTTPProvider(RPC_URL_MAINNET_FALLBACK, request_kwargs={'timeout': 10})) if RPC_URL_MAINNET_FALLBACK else None
+_w3_sepolia          = Web3(Web3.HTTPProvider(RPC_URL_SEPOLIA, request_kwargs={'timeout': 10})) if RPC_URL_SEPOLIA else None
+_w3_legacy           = Web3(Web3.HTTPProvider(RPC_URL_LEGACY, request_kwargs={'timeout': 10})) if RPC_URL_LEGACY else None
+
+
+def get_w3(target_chain_id: int = 1) -> Web3:
+    target_chain_id = int(target_chain_id or 1)
+    if target_chain_id == 1:
+        if _w3_mainnet:
+            try:
+                if _w3_mainnet.is_connected():
+                    return _w3_mainnet
+            except Exception:
+                pass
+        if _w3_mainnet_fallback:
+            try:
+                if _w3_mainnet_fallback.is_connected():
+                    return _w3_mainnet_fallback
+            except Exception:
+                pass
+        if _w3_legacy:
+            return _w3_legacy
+        raise Exception("No active Web3 provider available for Ethereum Mainnet (chain 1)")
+
+    elif target_chain_id == 11155111:
+        if _w3_sepolia:
+            try:
+                if _w3_sepolia.is_connected():
+                    return _w3_sepolia
+            except Exception:
+                pass
+        if _w3_legacy:
+            return _w3_legacy
+        raise Exception("No active Web3 provider available for Sepolia Testnet (chain 11155111)")
+
+    else:
+        if _w3_legacy:
+            return _w3_legacy
+        if _w3_mainnet:
+            return _w3_mainnet
+        raise Exception(f"Unsupported chain_id: {target_chain_id}")
+
+
 print(f"\u2705 Escrow wallet    : {escrow_address}")
-print(f"   Balance          : {balance_eth} ETH")
+if _w3_mainnet:
+    try:
+        print(f"\u2705 Mainnet RPC (Primary)  : connected (block {_w3_mainnet.eth.block_number})")
+    except Exception as e:
+        print(f"\u26a0\ufe0f  Mainnet RPC (Primary)  : {e}")
+if _w3_mainnet_fallback:
+    try:
+        print(f"\u2705 Mainnet RPC (Fallback) : connected (block {_w3_mainnet_fallback.eth.block_number})")
+    except Exception as e:
+        print(f"\u26a0\ufe0f  Mainnet RPC (Fallback) : {e}")
+if _w3_sepolia:
+    try:
+        print(f"\u2705 Sepolia RPC            : connected (block {_w3_sepolia.eth.block_number})")
+    except Exception as e:
+        print(f"\u26a0\ufe0f  Sepolia RPC            : {e}")
+if _w3_legacy:
+    try:
+        print(f"\u2705 Legacy RPC             : connected (block {_w3_legacy.eth.block_number})")
+    except Exception as e:
+        print(f"\u26a0\ufe0f  Legacy RPC             : {e}")
+
 print(f"   Gas price cap    : {GAS_PRICE_CAP_GWEI} Gwei")
 print(f"   Confirmations    : {VERIFICATION_CONFIRMATIONS}")
 
@@ -119,7 +178,7 @@ print(f"   Confirmations    : {VERIFICATION_CONFIRMATIONS}")
 
 def _wei_to_eth(wei_val) -> str:
     try:
-        return str(w3.from_wei(int(wei_val), 'ether'))
+        return str(Web3.from_wei(int(wei_val), 'ether'))
     except Exception:
         return '0'
 
@@ -293,34 +352,52 @@ except Exception as e:
     print(f"\u26a0\ufe0f  MongoDB init warning: {e}")
 
 # =============================================================
-# NONCE MANAGER
+# NONCE MANAGER (Per-Chain isolated nonces)
 # =============================================================
-_nonce_lock  = threading.Lock()
-_nonce_cache = None
+_nonce_locks = {
+    1:        threading.Lock(),
+    11155111: threading.Lock(),
+}
+_nonce_caches = {
+    1:        None,
+    11155111: None,
+}
 
 
-def get_next_nonce():
-    global _nonce_cache
-    with _nonce_lock:
+def get_next_nonce(chain_id: int = 1):
+    chain_id = int(chain_id or 1)
+    lock = _nonce_locks.get(chain_id)
+    if not lock:
+        lock = threading.Lock()
+        _nonce_locks[chain_id] = lock
+
+    with lock:
+        w3 = get_w3(chain_id)
         on_chain = w3.eth.get_transaction_count(escrow_address, 'pending')
-        if _nonce_cache is None or on_chain > _nonce_cache:
-            _nonce_cache = on_chain
-        nonce        = _nonce_cache
-        _nonce_cache += 1
+        current = _nonce_caches.get(chain_id)
+        if current is None or on_chain > current:
+            _nonce_caches[chain_id] = on_chain
+        nonce = _nonce_caches[chain_id]
+        _nonce_caches[chain_id] += 1
         return nonce
 
 
-def reset_nonce():
-    global _nonce_cache
-    with _nonce_lock:
-        _nonce_cache = None
+def reset_nonce(chain_id: int = 1):
+    chain_id = int(chain_id or 1)
+    lock = _nonce_locks.get(chain_id)
+    if lock:
+        with lock:
+            _nonce_caches[chain_id] = None
+    else:
+        _nonce_caches[chain_id] = None
 
 # =============================================================
 # GAS HELPERS
 # =============================================================
 
-def _get_current_gas_price_gwei() -> float:
+def _get_current_gas_price_gwei(chain_id: int = 1) -> float:
     try:
+        w3       = get_w3(chain_id)
         block    = w3.eth.get_block('latest')
         base_fee = block.get('baseFeePerGas')
         if base_fee:
@@ -331,12 +408,13 @@ def _get_current_gas_price_gwei() -> float:
             total_wei = int(base_fee * 1.2) + priority
         else:
             total_wei = w3.eth.gas_price
-        return w3.from_wei(total_wei, 'gwei')
+        return float(w3.from_wei(total_wei, 'gwei'))
     except Exception:
-        return 9999
+        return 9999.0
 
 
-def _build_tx_params(destination, value_wei, nonce):
+def _build_tx_params(destination, value_wei, nonce, chain_id: int = 1):
+    w3 = get_w3(chain_id)
     try:
         block    = w3.eth.get_block('latest')
         base_fee = block.get('baseFeePerGas')
@@ -359,7 +437,7 @@ def _build_tx_params(destination, value_wei, nonce):
         'gas':                  GAS_UNIT_LIMIT,
         'maxFeePerGas':         max_fee,
         'maxPriorityFeePerGas': priority,
-        'chainId':              chain_id,
+        'chainId':              int(chain_id),
     }, max_fee
 
 # =============================================================
@@ -384,7 +462,7 @@ def queue_push(job: dict):
                 break
         if not inserted:
             _fwd_queue.append(job)
-    print(f"\U0001f4e5 QUEUED [#{job.get('serial_number','?')} {job['type']}]: {job['tx_hash'][:10]}...")
+    print(f"\U0001f4e5 QUEUED [#{job.get('serial_number','?')} {job['type']} on chain {job.get('chain_id', 1)}]: {job['tx_hash'][:10]}...")
 
 
 def _queue_sender_loop():
@@ -399,8 +477,9 @@ def _queue_sender_loop():
             try:
                 _process_queue_job(job)
             except Exception as e:
+                cid = int(job.get('chain_id', 1))
                 print(f"\u274c Queue job error [#{job.get('serial_number','?')} {job.get('type')}] {job.get('tx_hash','')[:10]}: {e}")
-                reset_nonce()
+                reset_nonce(cid)
         else:
             time.sleep(1)
 
@@ -411,8 +490,10 @@ def _process_queue_job(job):
     destination = Web3.to_checksum_address(job['destination'])
     send_wei    = int(job['send_wei'])
     serial      = job.get('serial_number', '?')
+    chain_id    = int(job.get('chain_id', 1))
+    w3          = get_w3(chain_id)
 
-    tx_params, max_fee  = _build_tx_params(destination, send_wei, 0)
+    tx_params, max_fee  = _build_tx_params(destination, send_wei, 0, chain_id)
     actual_gas_cost_wei = GAS_UNIT_LIMIT * max_fee
 
     if job_type == 'forward':
@@ -435,7 +516,7 @@ def _process_queue_job(job):
             final_send_wei   = max(0, send_wei - shortfall)
             print(f"\u26a0\ufe0f  Extreme gas: cutting {shortfall} wei from recipient #{serial}")
 
-        nonce              = get_next_nonce()
+        nonce              = get_next_nonce(chain_id)
         tx_params['value'] = final_send_wei
         tx_params['nonce'] = nonce
         signed       = w3.eth.account.sign_transaction(tx_params, ADMIN_PRIVATE_KEY)
@@ -456,7 +537,7 @@ def _process_queue_job(job):
             'final_send_eth':      _wei_to_eth(final_send_wei),
             'forward_nonce':       nonce,
         })
-        print(f"\U0001f4e4 FORWARDED [#{serial}]: {tx_hash[:10]} \u2192 {forward_hash[:10]}")
+        print(f"\U0001f4e4 FORWARDED [#{serial} on chain {chain_id}]: {tx_hash[:10]} \u2192 {forward_hash[:10]}")
 
     elif job_type == 'refund':
         refund_amount = max(0, send_wei - actual_gas_cost_wei)
@@ -468,7 +549,7 @@ def _process_queue_job(job):
             print(f"\u274c [#{serial}] {tx_hash[:10]} refund impossible")
             return
 
-        nonce              = get_next_nonce()
+        nonce              = get_next_nonce(chain_id)
         tx_params['to']    = destination
         tx_params['value'] = refund_amount
         tx_params['nonce'] = nonce
@@ -484,7 +565,7 @@ def _process_queue_job(job):
             'refund_gas_cost_wei': str(actual_gas_cost_wei),
             'refund_gas_cost_eth': _wei_to_eth(actual_gas_cost_wei),
         })
-        print(f"\u21a9\ufe0f  REFUNDING [#{serial}]: {tx_hash[:10]} \u2192 {refund_hash[:10]}")
+        print(f"\u21a9\ufe0f  REFUNDING [#{serial} on chain {chain_id}]: {tx_hash[:10]} \u2192 {refund_hash[:10]}")
 
 
 _queue_thread = threading.Thread(target=_queue_sender_loop, daemon=True)
@@ -542,7 +623,10 @@ def is_admin():
 
 def step_pending(tx_hash, tx_data, current_block):
     try:
-        age = _seconds_since(tx_data.get('created_at', ''))
+        chain_id = int(tx_data.get('chain_id', 1))
+        w3       = get_w3(chain_id)
+        age      = _seconds_since(tx_data.get('created_at', ''))
+
         if age > STUCK_PENDING_TIMEOUT:
             try:
                 receipt = w3.eth.get_transaction_receipt(tx_hash)
@@ -553,7 +637,7 @@ def step_pending(tx_hash, tx_data, current_block):
                     'status': 'failed',
                     'error':  f'TX never mined after {int(age)}s'
                 })
-                print(f"\U0001f6ab STUCK PENDING rescued [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]}")
+                print(f"\U0001f6ab STUCK PENDING rescued [#{tx_data.get('serial_number','?')} on chain {chain_id}]: {tx_hash[:10]}")
                 return
 
         receipt = w3.eth.get_transaction_receipt(tx_hash)
@@ -587,7 +671,7 @@ def step_pending(tx_hash, tx_data, current_block):
             'gas_used_units':      int(gas_used),
             'user_gas_cost_eth':   actual_gas_eth,
         })
-        print(f"\u2705 VERIFIED [#{tx_data.get('serial_number','?')}]: {tx_hash[:10]} ({confirmations} confs)")
+        print(f"\u2705 VERIFIED [#{tx_data.get('serial_number','?')} on chain {chain_id}]: {tx_hash[:10]} ({confirmations} confs)")
 
     except Exception as e:
         print(f"\u26a0\ufe0f  step_pending {tx_hash[:10]}: {e}")
@@ -595,12 +679,13 @@ def step_pending(tx_hash, tx_data, current_block):
 
 def step_verified(tx_hash, tx_data):
     try:
-        live_gwei = _get_current_gas_price_gwei()
+        chain_id  = int(tx_data.get('chain_id', 1))
+        live_gwei = _get_current_gas_price_gwei(chain_id)
         serial    = tx_data.get('serial_number', '?')
         waiting   = _seconds_since(tx_data.get('verified_at', tx_data.get('created_at', '')))
 
         if waiting > GAS_DEADLINE_SECONDS:
-            print(f"\u23f0 GAS DEADLINE exceeded [#{serial}] {tx_hash[:10]} -> refund")
+            print(f"\u23f0 GAS DEADLINE exceeded [#{serial} on chain {chain_id}] {tx_hash[:10]} -> refund")
             db_update(tx_hash, {
                 'status':              'refund_pending',
                 'error':               f'Gas stayed above cap for {int(waiting)}s',
@@ -617,6 +702,7 @@ def step_verified(tx_hash, tx_data):
             queue_push({
                 'type':             'forward',
                 'tx_hash':          tx_hash,
+                'chain_id':         chain_id,
                 'destination':      tx_data['destination'],
                 'send_wei':         recipient_wei,
                 'gas_buffer_wei':   buffer_wei,
@@ -631,7 +717,7 @@ def step_verified(tx_hash, tx_data):
                 'platform_fee_eth':       _wei_to_eth(platform_fee_wei),
                 'fee_percentage_applied': FEE_PERCENTAGE,
             })
-            print(f"\u26fd QUEUED [#{serial}] {tx_hash[:10]} (gas {live_gwei:.1f} Gwei)")
+            print(f"\u26fd QUEUED [#{serial} on chain {chain_id}] {tx_hash[:10]} (gas {live_gwei:.1f} Gwei)")
         else:
             db_update(tx_hash, {
                 'status':              'forward_wait_gas',
@@ -639,7 +725,7 @@ def step_verified(tx_hash, tx_data):
                 'gas_cap_gwei':        tx_gas_cap,
                 'gas_wait_updated_at': _now_iso(),
             })
-            print(f"\u26fd Gas HIGH ({live_gwei:.1f} > {tx_gas_cap}) [#{serial}] waiting...")
+            print(f"\u26fd Gas HIGH ({live_gwei:.1f} > {tx_gas_cap}) [#{serial} on chain {chain_id}] waiting...")
 
     except Exception as e:
         print(f"\u274c step_verified {tx_hash[:10]}: {e}")
@@ -647,20 +733,22 @@ def step_verified(tx_hash, tx_data):
 
 def step_queued(tx_hash, tx_data):
     try:
-        age    = _seconds_since(tx_data.get('queued_at', tx_data.get('created_at', '')))
-        serial = tx_data.get('serial_number', '?')
+        age      = _seconds_since(tx_data.get('queued_at', tx_data.get('created_at', '')))
+        serial   = tx_data.get('serial_number', '?')
+        chain_id = int(tx_data.get('chain_id', 1))
 
         if age > STUCK_QUEUED_TIMEOUT:
             with _fwd_queue_lock:
                 already = any(j['tx_hash'] == tx_hash for j in _fwd_queue)
             if not already:
-                print(f"\U0001f504 STUCK QUEUED rescued [#{serial}] {tx_hash[:10]}")
+                print(f"\U0001f504 STUCK QUEUED rescued [#{serial} on chain {chain_id}] {tx_hash[:10]}")
                 recipient_wei    = int(tx_data['recipient_amount_wei'])
                 buffer_wei       = int(tx_data.get('gas_buffer_wei', str(GAS_BUFFER_WEI)))
                 platform_fee_wei = int(recipient_wei * FEE_PERCENTAGE / 100)
                 queue_push({
                     'type':             'forward',
                     'tx_hash':          tx_hash,
+                    'chain_id':         chain_id,
                     'destination':      tx_data['destination'],
                     'send_wei':         recipient_wei,
                     'gas_buffer_wei':   buffer_wei,
@@ -676,6 +764,8 @@ def step_forwarding(tx_hash, tx_data, current_block):
     try:
         forward_hash = tx_data.get('forward_tx_hash')
         serial       = tx_data.get('serial_number', '?')
+        chain_id     = int(tx_data.get('chain_id', 1))
+        w3           = get_w3(chain_id)
 
         if not forward_hash:
             return
@@ -687,14 +777,14 @@ def step_forwarding(tx_hash, tx_data, current_block):
             except Exception:
                 receipt = None
             if not receipt:
-                print(f"\U0001f6ab STUCK FORWARDING rescued [#{serial}] {tx_hash[:10]}")
+                print(f"\U0001f6ab STUCK FORWARDING rescued [#{serial} on chain {chain_id}] {tx_hash[:10]}")
                 db_update(tx_hash, {
                     'status':              'refund_pending',
                     'error':               f'Forward TX never confirmed after {int(age)}s',
                     'refund_initiated_at': _now_iso(),
                     'refund_reason':       'forward_tx_dropped',
                 })
-                reset_nonce()
+                reset_nonce(chain_id)
                 return
 
         receipt = w3.eth.get_transaction_receipt(forward_hash)
@@ -717,7 +807,7 @@ def step_forwarding(tx_hash, tx_data, current_block):
             'forward_block': receipt['blockNumber'],
             'completed_at':  _now_iso(),
         })
-        print(f"\U0001f389 COMPLETE [#{serial}]: {tx_hash[:10]}")
+        print(f"\U0001f389 COMPLETE [#{serial} on chain {chain_id}]: {tx_hash[:10]}")
 
     except Exception as e:
         print(f"\u26a0\ufe0f  step_forwarding {tx_hash[:10]}: {e}")
@@ -728,6 +818,7 @@ def step_refund(tx_hash, tx_data):
         sender         = Web3.to_checksum_address(tx_data['sender'])
         total_paid_wei = int(tx_data['total_paid_wei'])
         refund_reason  = tx_data.get('refund_reason', '')
+        chain_id       = int(tx_data.get('chain_id', 1))
 
         if KEEP_FEE_ON_REFUND and refund_reason == 'gas_deadline_exceeded':
             recipient_wei    = int(tx_data.get('recipient_amount_wei', 0))
@@ -739,6 +830,7 @@ def step_refund(tx_hash, tx_data):
         queue_push({
             'type':          'refund',
             'tx_hash':       tx_hash,
+            'chain_id':      chain_id,
             'destination':   sender,
             'send_wei':      refund_base_wei,
             'serial_number': tx_data.get('serial_number', 0),
@@ -755,17 +847,19 @@ def step_refund(tx_hash, tx_data):
 
 def step_refunding_queued(tx_hash, tx_data):
     try:
-        age    = _seconds_since(tx_data.get('refund_queued_at', tx_data.get('created_at', '')))
-        serial = tx_data.get('serial_number', '?')
+        age      = _seconds_since(tx_data.get('refund_queued_at', tx_data.get('created_at', '')))
+        serial   = tx_data.get('serial_number', '?')
+        chain_id = int(tx_data.get('chain_id', 1))
 
         if age > STUCK_QUEUED_TIMEOUT:
             with _fwd_queue_lock:
                 already = any(j['tx_hash'] == tx_hash for j in _fwd_queue)
             if not already:
-                print(f"\U0001f504 STUCK REFUND QUEUED rescued [#{serial}]")
+                print(f"\U0001f504 STUCK REFUND QUEUED rescued [#{serial} on chain {chain_id}]")
                 queue_push({
                     'type':          'refund',
                     'tx_hash':       tx_hash,
+                    'chain_id':      chain_id,
                     'destination':   Web3.to_checksum_address(tx_data['sender']),
                     'send_wei':      int(tx_data.get('refund_base_wei', tx_data['total_paid_wei'])),
                     'serial_number': tx_data.get('serial_number', 0),
@@ -779,6 +873,8 @@ def step_refunding(tx_hash, tx_data, current_block):
     try:
         refund_hash = tx_data.get('refund_tx_hash')
         serial      = tx_data.get('serial_number', '?')
+        chain_id    = int(tx_data.get('chain_id', 1))
+        w3          = get_w3(chain_id)
 
         if not refund_hash:
             return
@@ -790,13 +886,13 @@ def step_refunding(tx_hash, tx_data, current_block):
             except Exception:
                 receipt = None
             if not receipt:
-                print(f"\U0001f6ab STUCK REFUNDING rescued [#{serial}]")
+                print(f"\U0001f6ab STUCK REFUNDING rescued [#{serial} on chain {chain_id}]")
                 db_update(tx_hash, {
                     'status':              'refund_pending',
                     'error':               f'Refund TX never confirmed after {int(age)}s',
                     'refund_initiated_at': _now_iso(),
                 })
-                reset_nonce()
+                reset_nonce(chain_id)
                 return
 
         receipt = w3.eth.get_transaction_receipt(refund_hash)
@@ -811,7 +907,7 @@ def step_refunding(tx_hash, tx_data, current_block):
             'refunded_at':  _now_iso(),
             'refund_block': receipt['blockNumber'],
         })
-        print(f"\u2705 REFUNDED [#{serial}]: {tx_hash[:10]}")
+        print(f"\u2705 REFUNDED [#{serial} on chain {chain_id}]: {tx_hash[:10]}")
 
     except Exception as e:
         print(f"\u26a0\ufe0f  step_refunding {tx_hash[:10]}: {e}")
@@ -847,26 +943,35 @@ def monitor_transactions():
 
     while True:
         try:
-            current_block = w3.eth.block_number
-            active_txs    = db_get_active()
+            current_blocks = {}
+            def _get_block(cid):
+                if cid not in current_blocks:
+                    try:
+                        current_blocks[cid] = get_w3(cid).eth.block_number
+                    except Exception:
+                        current_blocks[cid] = 0
+                return current_blocks[cid]
+
+            active_txs = db_get_active()
             for tx_data in active_txs:
                 tx_hash = tx_data['tx_hash']
                 status  = tx_data.get('status')
+                cid     = int(tx_data.get('chain_id', 1))
                 try:
                     if status == 'pending':
-                        step_pending(tx_hash, tx_data, current_block)
+                        step_pending(tx_hash, tx_data, _get_block(cid))
                     elif status in ('verified', 'forward_wait_gas'):
                         step_verified(tx_hash, tx_data)
                     elif status == 'queued':
                         step_queued(tx_hash, tx_data)
                     elif status == 'forwarding_pending':
-                        step_forwarding(tx_hash, tx_data, current_block)
+                        step_forwarding(tx_hash, tx_data, _get_block(cid))
                     elif status == 'refund_pending':
                         step_refund(tx_hash, tx_data)
                     elif status == 'refunding_queued':
                         step_refunding_queued(tx_hash, tx_data)
                     elif status == 'refunding':
-                        step_refunding(tx_hash, tx_data, current_block)
+                        step_refunding(tx_hash, tx_data, _get_block(cid))
                     elif status in ('complete', 'refunded'):
                         auto_cleanup(tx_hash, tx_data)
                 except Exception as e:
@@ -882,16 +987,37 @@ def monitor_transactions():
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
+    mainnet_connected = False
+    sepolia_connected = False
+    try:
+        mainnet_w3 = get_w3(1)
+        mainnet_connected = mainnet_w3.is_connected()
+    except Exception:
+        pass
+
+    try:
+        sepolia_w3 = get_w3(11155111)
+        sepolia_connected = sepolia_w3.is_connected()
+    except Exception:
+        pass
+
     return jsonify({
-        'status':               'healthy',
-        'timestamp':            _now_iso(),
-        'service':              'secure-payment-backend',
-        'blockchain_connected': w3.is_connected(),
-        'escrow_address':       escrow_address,
-        'chain_id':             chain_id,
-        'current_block':        w3.eth.block_number,
-        'storage':              'mongodb',
-        'db':                   'transaction_db.transactiondb',
+        'status':         'healthy',
+        'timestamp':      _now_iso(),
+        'service':        'secure-payment-backend',
+        'escrow_address': escrow_address,
+        'networks': {
+            'mainnet': {
+                'configured': bool(RPC_URL_MAINNET or RPC_URL_MAINNET_FALLBACK or RPC_URL_LEGACY),
+                'connected':  mainnet_connected,
+            },
+            'sepolia': {
+                'configured': bool(RPC_URL_SEPOLIA or RPC_URL_LEGACY),
+                'connected':  sepolia_connected,
+            }
+        },
+        'storage':        'mongodb',
+        'db':             'transaction_db.transactiondb',
     })
 
 
@@ -939,6 +1065,12 @@ def create_transaction():
         if r_wei < MIN_TX_AMOUNT_WEI:
             return jsonify({'error': f'Amount below minimum. Min: {MIN_TX_AMOUNT_ETH} ETH'}), 400
 
+        req_chain_id = data.get('chain_id')
+        try:
+            tx_chain_id = int(req_chain_id) if req_chain_id is not None else 1
+        except Exception:
+            tx_chain_id = 1
+
         # ── Idempotency guard: if tx_hash already registered return existing ──
         existing = db_get(tx_hash)
         if existing:
@@ -974,7 +1106,7 @@ def create_transaction():
         record = {
             'tx_hash':              tx_hash,
             'serial_number':        serial_number,
-            'chain_id':             chain_id,
+            'chain_id':             tx_chain_id,
             'status':               'pending',
             'created_at':           _now_iso(),
             'client_token':         client_token,
