@@ -961,8 +961,10 @@ async function initiatePayment(overrideHighGas = false) {
       ? Math.ceil(liveGwei * 1.3)
       : (CONFIG.GAS_PRICE_CAP_GWEI || 200);
 
+    const chainIdInt = currentChainId ? parseInt(currentChainId, 16) : 1;
     const saveData = {
       tx_hash:                txHash,
+      chain_id:               chainIdInt,
       sender:                 currentAccount,
       destination:            dest,
       amount_wei:             String(totalToSendWei),
