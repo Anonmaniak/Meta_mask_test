@@ -6,7 +6,7 @@ services:
     region: oregon
     branch: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
+    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 120
     plan: free
     envVars:
       - key: PORT
@@ -14,7 +14,7 @@ services:
       - key: PYTHON_VERSION
         value: "3.11.0"
       - key: RUN_MONITOR
-        value: "1"
+        value: "0"
       # ── Business Logic ──
       - key: FEE_PERCENTAGE
         value: "1"
@@ -32,8 +32,6 @@ services:
       - key: RPC_URL
         sync: false
       - key: ADMIN_PRIVATE_KEY
-        sync: false
-      - key: ADMIN_TOKEN
         sync: false
       - key: MONGO_URL
         sync: false
