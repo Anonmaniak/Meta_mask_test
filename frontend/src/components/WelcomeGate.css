@@ -1,0 +1,128 @@
+/* Welcome gate: the only thing a visitor sees before connecting and paying.
+   Theme-aware (uses the app's CSS variables), unlike the always-black first-visit splash.
+   Scales cleanly to fit mobile, tablet, laptop, and large desktop viewports without scrollbars. */
+
+.wg {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: clamp(8px, 2dvh, 24px) clamp(12px, 3vw, 24px);
+  color: var(--text-main);
+}
+
+.wg::-webkit-scrollbar {
+  display: none;
+}
+
+.wg__stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  width: 100%;
+  max-width: min(640px, 100%);
+  margin: auto 0;
+}
+
+.wg__field {
+  display: block;
+  width: min(58vw, 34dvh, 380px);
+  aspect-ratio: 1 / 1;
+  flex-shrink: 0;
+  color: var(--text-main); /* DotField reads this as its point colour */
+}
+
+.wg__caption {
+  margin: clamp(6px, 1.4dvh, 14px) 0 0;
+  font-size: clamp(11px, 1.5dvh, 13px);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.wg__headline {
+  margin: clamp(10px, 2.4dvh, 28px) 0 0;
+  font-family: 'Outfit', 'Inter', system-ui, sans-serif;
+  font-size: clamp(24px, min(6.2vw, 5.5dvh), 54px);
+  font-weight: 700;
+  line-height: 1.06;
+  letter-spacing: -0.035em;
+}
+
+.wg__subline {
+  margin: clamp(6px, 1.3dvh, 12px) 0 0;
+  font-size: clamp(14px, min(2.4vw, 2.4dvh), 20px);
+  color: var(--text-main);
+}
+
+.wg__connect {
+  margin-top: clamp(14px, 2.8dvh, 30px);
+  padding: clamp(9px, 1.5dvh, 12px) clamp(20px, 3vw, 28px);
+  font-size: clamp(0.86rem, 1.8dvh, 0.95rem);
+  border-radius: 9999px;
+  gap: 8px;
+}
+
+.wg__connect:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.wg__status {
+  margin-top: clamp(8px, 1.6dvh, 14px);
+  max-width: min(440px, 90vw);
+}
+
+.wg__status:empty {
+  display: none;
+}
+
+.wg__error,
+.wg__notice {
+  margin: 0;
+  font-size: clamp(0.8rem, 1.6dvh, 0.9rem);
+  line-height: 1.45;
+}
+
+.wg__error {
+  color: var(--text-main);
+  border: 1px solid var(--border-focus);
+  padding: 8px 14px;
+  border-radius: 10px;
+}
+
+.wg__error a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.wg__notice {
+  color: var(--text-secondary);
+}
+
+.wg__spin {
+  animation: wg-spin 0.9s linear infinite;
+}
+
+@media (max-height: 540px) {
+  .wg__field {
+    width: min(44vw, 26dvh, 220px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wg__spin {
+    animation: none;
+  }
+}

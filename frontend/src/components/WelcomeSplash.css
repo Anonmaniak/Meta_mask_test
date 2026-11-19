@@ -1,0 +1,142 @@
+/* ==========================================================================
+   Zyphra.in first-visit welcome splash
+   Always black / white (independent of the light/dark theme toggle).
+   Timeline (ms):  300 point lights  ·  500 pulse starts  ·  1100 headline
+                   2000 subline  ·  2700 caption  ·  4800 fade out
+   ========================================================================== */
+
+.zws {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  color: #fff;
+  opacity: 1;
+  transition: opacity 650ms cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
+  padding: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0) env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
+}
+
+.zws:focus {
+  outline: none;
+}
+
+.zws--out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.zws__stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 0 24px;
+  max-width: 100%;
+}
+
+.zws__field {
+  display: block;
+  width: min(72vw, 48vh, 480px);
+  aspect-ratio: 1 / 1;
+}
+
+.zws__caption {
+  margin: 14px 0 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: #8a8a8a;
+  opacity: 0;
+  animation: zws-fade 700ms ease 2700ms forwards;
+}
+
+.zws__headline {
+  margin: clamp(22px, 5vh, 40px) 0 0;
+  font-family: 'Outfit', 'Inter', system-ui, sans-serif;
+  font-size: clamp(30px, 7vw, 64px);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.035em;
+  color: #fff;
+}
+
+/* left-to-right wipe: the single orchestrated reveal */
+.zws__wipe {
+  display: inline-block;
+  clip-path: inset(0 100% 0 0);
+  animation: zws-wipe 850ms cubic-bezier(0.7, 0, 0.2, 1) 1100ms forwards;
+}
+
+.zws__subline {
+  margin: 14px 0 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: clamp(16px, 2.4vw, 22px);
+  font-weight: 400;
+  letter-spacing: 0.005em;
+  color: #fff;
+  opacity: 0;
+  animation: zws-fade 800ms ease 2000ms forwards;
+}
+
+.zws__skip {
+  position: absolute;
+  right: max(20px, env(safe-area-inset-right, 0px));
+  bottom: max(20px, env(safe-area-inset-bottom, 0px));
+  appearance: none;
+  background: transparent;
+  color: #9a9a9a;
+  border: 1px solid #2f2f2f;
+  padding: 8px 16px;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+
+.zws__skip:hover {
+  color: #fff;
+  border-color: #fff;
+}
+
+.zws__skip:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+  color: #fff;
+}
+
+@keyframes zws-wipe {
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes zws-fade {
+  to {
+    opacity: 1;
+  }
+}
+
+/* Reduced motion: show everything immediately, no animation. */
+@media (prefers-reduced-motion: reduce) {
+  .zws {
+    transition-duration: 200ms;
+  }
+
+  .zws__wipe {
+    clip-path: none;
+    animation: none;
+  }
+
+  .zws__subline,
+  .zws__caption {
+    opacity: 1;
+    animation: none;
+  }
+}

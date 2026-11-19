@@ -1,0 +1,41 @@
+# Environment variables & secrets (keep templates)
+.env
+.env.*
+!.env.example
+!backend/.env.example
+!frontend/.env.example
+
+# Python caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+venv/
+env/
+ENV/
+*.egg-info/
+build/
+dist/
+
+# Node / Vite build outputs & dependencies
+node_modules/
+dist-ssr/
+*.local
+
+# Local development SQLite databases & logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

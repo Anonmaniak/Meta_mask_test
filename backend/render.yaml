@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: zyphra-chat-api
+    env: python
+    region: oregon
+    buildCommand: pip install -r requirements.txt && python run_migrations.py
+    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
+    plan: free
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: APP_DOMAIN
+        value: "zyphra.in"
+      - key: FRONTEND_URL
+        sync: false
+      - key: NEON_DATABASE_URL
+        sync: false
+      - key: RPC_URL_MAINNET
+        sync: false
+      - key: RPC_URL_MAINNET_FALLBACK
+        sync: false
+      - key: RPC_URL_SEPOLIA
+        sync: false
+      - key: EXPECTED_CHAIN_ID
+        value: "11155111"
+      - key: ADMIN_WALLET_ADDRESSES
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+
+      - key: ADMIN_LOGIN_ID
+        sync: false
+      - key: ADMIN_LOGIN_PASSWORD
+        sync: false
