@@ -11,6 +11,20 @@ frontend/src/tests/browserCryptoRunner.ts, frontend/test-crypto.html,
 frontend/tests/chatCrypto.node.test.ts, frontend/tests/chatCryptoMulti.node.test.ts,
 frontend/tests/chatKeyService.node.test.ts, frontend/tests/failedSendHandling.node.test.ts, frontend/src/App.css
 
+## 0000000. UI polish, instant isolated chat switching & branding (NEW)
+- **Instant, strictly isolated chat switching (`Chat.tsx`, `PlatformViews.tsx`)**:
+  - Clicking a **Private chat** in the sidebar now selects the peer immediately without blocking on a network lookup, and refreshes device details in the background only when missing or stale.
+  - Switching between **Members' room**, **Groups**, and **Private chats** swaps cached messages and conversation state synchronously before paint (`useLayoutEffect`), isolates in-flight fetches per conversation scope with a generation guard so slower responses from a previous chat can never overwrite the active chat, and parallelizes DM/Group network requests (`Promise.all`).
+  - Removed the `syncSidebarLists` <-> `selectedGroup` re-sync cascade and cached the Members' room feed per account so returning to Members' room renders immediately.
+- **Circular animated header search & streamlined chat headers (`MessageExtras.tsx`, `chatExtras.css`, `PlatformViews.tsx`, `Chat.tsx`)**:
+  - Moved in-chat search (`ChatSearchBar`) into the top-right of `.chat-stage-header` across **Members' room**, **Group chats**, and **1-to-1 private chats** as a `36px` circular icon button that smoothly expands into a pill search bar (with inner input borders suppressed).
+  - Moved the circular `⋮` (`ConversationMenu`) button up into `.chat-stage-header` next to search (capped height so it stays above the composer without clipping), removed the empty toolbar strip when no pins/chips/notices are active, and removed the redundant **Browse groups** / **Find a member** buttons from active chat headers.
+- **Branding, welcome gate & forms (`Header.tsx`, `SupportView.tsx`, `AdminPortal.tsx`, `AdminDashboard.tsx`, `E2EESecurityModals.tsx`, `WelcomeGate.css`, `index.css`, `favicon.svg`, `index.html`)**:
+  - Renamed the **Concierge** tab and page heading to **Contact Admin**, and updated the `/Admin456` tab title and header subtitle to **Admin**.
+  - Added the circular brass **Z** emblem as the browser tab favicon (`frontend/public/favicon.svg` linked in `frontend/index.html`).
+  - Scaled up the left column copy/button/feature list in `WelcomeGate.css` slightly and added top breathing room to `.console-topbar--gated`.
+  - Added custom theme-aware dropdown chevrons (`36px` right padding) to all `<select>` elements across client and Admin screens, and switched the Admin pricing fields to a 2x2 grid (`admin-settings-grid--two`) so option labels never clip.
+
 ## 000000. Production readiness (launch scan)
 - **Production never runs on a temporary database.** On Render (or `ENVIRONMENT=production`) the server used to fall back silently to a local SQLite file when PostgreSQL was missing or unreachable; Render wipes that file on every deploy / restart, so messages and payments made meanwhile would vanish. Now it retries for about 30 s and then refuses to start (the build's migration step too). `/api/health` answers 503 if it is ever on the fallback. `ALLOW_SQLITE_FALLBACK=1` opts out (single-machine installs only). Local development is unchanged. (`backend/chat_db.py`, `backend/app.py`)
 - **Frontend build requires `VITE_BACKEND_URL`.** Without it the app called `https://<site>/api`, which Vercel answers with the web page, so every request failed. The production build now stops with instructions. (`frontend/vite.config.ts`)

@@ -65,6 +65,25 @@ import {
 
 type RoomMessage = PublicChatMessageRecord & { isOptimistic?: boolean; localFiles?: File[] };
 
+interface PublicRoomCacheEntry {
+  messages: RoomMessage[];
+  pins: RoomPin[];
+  nextBeforeSeq: number | null;
+  online: { watching: number; active_live: number };
+  policy: {
+    guest_read_enabled: boolean;
+    guest_posting_enabled: boolean;
+    max_length: number;
+    edit_window_seconds: number;
+    retention_days?: number;
+    max_file_bytes?: number;
+    max_files_per_message?: number;
+  };
+}
+
+// Per-account cache so switching away from Members' room and back renders immediately.
+const _publicRoomCache: Record<string, PublicRoomCacheEntry> = {};
+
 /** Short one-line excerpt of a Members' room message, for the reply bar and live quote updates. */
 function roomReplyPreview(m: Pick<RoomMessage, 'content' | 'attachments'>): string {
   const text = (m.content || '').replace(/\s+/g, ' ').trim();
@@ -101,9 +120,11 @@ export const OpenPublicChatView: React.FC<{
   isPlatformPaid,
   onOpenAdmissionModal,
 }) => {
-    const [messages, setMessages] = useState<RoomMessage[]>([]);
+    const cacheKey = (account || '').toLowerCase() || 'anon';
+    const initialCached = _publicRoomCache[cacheKey];
+    const [messages, setMessages] = useState<RoomMessage[]>(() => initialCached?.messages || []);
     // Members' room extras: pinned messages, who is typing, in-room search
-    const [roomPins, setRoomPins] = useState<RoomPin[]>([]);
+    const [roomPins, setRoomPins] = useState<RoomPin[]>(() => initialCached?.pins || []);
     const [roomTyping, setRoomTyping] = useState<Record<string, { name: string; until: number }>>({});
     const [roomNow, setRoomNow] = useState(() => Date.now());
     const [roomSearchOpen, setRoomSearchOpen] = useState(false);
@@ -114,8 +135,8 @@ export const OpenPublicChatView: React.FC<{
     myRoomIdRef.current = e2eeProfile?.user_id || null;
     // Files picked for the next message (uploaded when the member presses Send)
     const [pendingFiles, setPendingFiles] = useState<File[]>([]);
-    const [nextBeforeSeq, setNextBeforeSeq] = useState<number | null>(null);
-    const [onlineStats, setOnlineStats] = useState({ watching: 0, active_live: 0 });
+    const [nextBeforeSeq, setNextBeforeSeq] = useState<number | null>(() => initialCached?.nextBeforeSeq ?? null);
+    const [onlineStats, setOnlineStats] = useState(() => initialCached?.online || { watching: 0, active_live: 0 });
     const [policy, setPolicy] = useState<{
       guest_read_enabled: boolean;
       guest_posting_enabled: boolean;
@@ -124,12 +145,15 @@ export const OpenPublicChatView: React.FC<{
       retention_days?: number;
       max_file_bytes?: number;
       max_files_per_message?: number;
-    }>({
-      guest_read_enabled: true,
-      guest_posting_enabled: true,
-      max_length: 1000,
-      edit_window_seconds: 900,
-    });
+    }>(
+      () =>
+        initialCached?.policy || {
+          guest_read_enabled: true,
+          guest_posting_enabled: true,
+          max_length: 1000,
+          edit_window_seconds: 900,
+        }
+    );
     const [input, setInput] = useState('');
     const [sending, setSending] = useState(false);
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -139,12 +163,31 @@ export const OpenPublicChatView: React.FC<{
     // Message being replied to, and a short "original not loaded" note after tapping a quote
     const [replyTarget, setReplyTarget] = useState<{ message_id: string; author_user_id: string | null; display_name: string; preview: string } | null>(null);
     const [replyJumpMissId, setReplyJumpMissId] = useState<string | null>(null);
-    const [initialLoading, setInitialLoading] = useState(true);
+    const [initialLoading, setInitialLoading] = useState(() => !initialCached);
     const streamRef = useRef<HTMLDivElement>(null);
-    const initialScrolledRef = useRef(false);
+    const initialScrolledRef = useRef(Boolean(initialCached));
     const accountRef = useRef<string | null>(account);
     const wsSubRef = useRef<ReturnType<typeof connectPublicChatWebSocket> | null>(null);
     accountRef.current = account;
+
+    useEffect(() => {
+      if (initialLoading) return;
+      _publicRoomCache[cacheKey] = {
+        messages: messages.filter((m) => !m.isOptimistic),
+        pins: roomPins,
+        nextBeforeSeq,
+        online: onlineStats,
+        policy,
+      };
+    }, [cacheKey, initialLoading, messages, roomPins, nextBeforeSeq, onlineStats, policy]);
+
+    useEffect(() => {
+      if (initialCached && streamRef.current) {
+        streamRef.current.scrollTop = streamRef.current.scrollHeight;
+      }
+      // Scroll immediately to latest cached message on remount.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const normalizeOnlineStats = (raw: any) => ({
       watching: Number(raw?.watching ?? raw?.public_viewers ?? raw?.public_room_sockets ?? 0),

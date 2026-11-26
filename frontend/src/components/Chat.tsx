@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { friendlyError } from '../services/friendlyError';
 import {
   MessageSquare,
@@ -496,9 +496,14 @@ export const Chat: React.FC<ChatProps> = ({
   const isFirstLoadRef = useRef(true);
   const syncInFlightRef = useRef(false);
   const syncQueuedRef = useRef(false);
-  const loadMsgsInFlightRef = useRef(false);
-  const loadMsgsQueuedRef = useRef(false);
+  const scopeSyncChainRef = useRef<Record<string, Promise<void>>>({});
+  const scopeSyncPendingRef = useRef<Record<string, boolean>>({});
+  const activeScopeRef = useRef<string | null>(null);
+  const loadGenRef = useRef(0);
+  const selectedGroupIdRef = useRef<string | null>(null);
+  const resolvedPeerCacheRef = useRef<Record<string, { peer: ResolvedPeerTarget; at: number }>>({});
   const syncCacheRef = useRef<Record<string, ConversationSyncEntry>>({});
+  const convStateCacheRef = useRef<Record<string, ConversationState>>({});
   const peerSecCacheRef = useRef<Record<string, PeerSecuritySnapshot>>({});
   const forceSecurityRefreshRef = useRef(false);
   // Background sends run one at a time so Olm/MLS ratchet state is never used by two sends at once.
@@ -581,6 +586,12 @@ export const Chat: React.FC<ChatProps> = ({
   useEffect(() => {
     if (!e2eeProfile) {
       vaultInitInFlightRef.current = null;
+      syncCacheRef.current = {};
+      convStateCacheRef.current = {};
+      resolvedPeerCacheRef.current = {};
+      peerSecCacheRef.current = {};
+      scopeSyncChainRef.current = {};
+      scopeSyncPendingRef.current = {};
       setVaultBoundUserId(null);
       setLocalDeviceId(null);
       setMyDevices([]);
@@ -589,6 +600,7 @@ export const Chat: React.FC<ChatProps> = ({
       setGroups([]);
       setSelectedPeer(null);
       setSelectedGroup(null);
+      setLoadedScopeKey(null);
       setMessages([]);
       if (!account) {
         setAddMenuOpen(false);
@@ -602,6 +614,12 @@ export const Chat: React.FC<ChatProps> = ({
       return;
     }
     if (vaultBoundUserId && vaultBoundUserId !== e2eeProfile.user_id) {
+      syncCacheRef.current = {};
+      convStateCacheRef.current = {};
+      resolvedPeerCacheRef.current = {};
+      peerSecCacheRef.current = {};
+      scopeSyncChainRef.current = {};
+      scopeSyncPendingRef.current = {};
       setLocalDeviceId(null);
       setMyDevices([]);
       setDmConversations([]);
@@ -609,6 +627,7 @@ export const Chat: React.FC<ChatProps> = ({
       setGroups([]);
       setSelectedPeer(null);
       setSelectedGroup(null);
+      setLoadedScopeKey(null);
       setMessages([]);
     }
   }, [e2eeProfile, vaultBoundUserId, account, activeTab, onModeChange]);
@@ -714,7 +733,18 @@ export const Chat: React.FC<ChatProps> = ({
   }, [account, chainIdHex, authLoading, ensureLocalDeviceVaultReady]);
 
   const registerOpenedPeer = useCallback((peer: ResolvedPeerTarget) => {
+    resolvedPeerCacheRef.current[peer.user_id] = { peer, at: Date.now() };
     setOpenedPeers((prev) => {
+      const existing = prev.find((p) => p.user_id === peer.user_id);
+      if (
+        existing &&
+        existing.username === peer.username &&
+        existing.primary_wallet === peer.primary_wallet &&
+        existing.identity_version === peer.identity_version &&
+        existing.devices.length === peer.devices.length
+      ) {
+        return prev;
+      }
       const filtered = prev.filter((p) => p.user_id !== peer.user_id);
       return [peer, ...filtered];
     });
@@ -864,10 +894,23 @@ export const Chat: React.FC<ChatProps> = ({
           openGroupWhenReadyRef.current = null;
           setSelectedGroup(justAccepted);
           handleSelectChannelTab('groups');
-        } else if (selectedGroup) {
-          const updatedSel =
-            grpRes.groups.find((g) => g.group_id === selectedGroup.group_id) || null;
-          setSelectedGroup(updatedSel);
+        } else if (selectedGroupIdRef.current) {
+          const curId = selectedGroupIdRef.current;
+          const updatedSel = grpRes.groups.find((g) => g.group_id === curId) || null;
+          setSelectedGroup((prev) => {
+            if (!prev || prev.group_id !== curId) return prev;
+            if (!updatedSel) return null;
+            if (
+              prev.current_epoch === updatedSel.current_epoch &&
+              prev.name === updatedSel.name &&
+              prev.members.length === updatedSel.members.length &&
+              JSON.stringify(prev.policy) === JSON.stringify(updatedSel.policy) &&
+              JSON.stringify(prev.members) === JSON.stringify(updatedSel.members)
+            ) {
+              return prev;
+            }
+            return updatedSel;
+          });
         }
       } while (syncQueuedRef.current);
     } catch (err: any) {
@@ -884,7 +927,7 @@ export const Chat: React.FC<ChatProps> = ({
       syncInFlightRef.current = false;
       if (e2eeProfile) setSidebarLoadedUserId(e2eeProfile.user_id);
     }
-  }, [isVaultReadyForProfile, e2eeProfile, localDeviceId, selectedGroup, handleSelectChannelTab]);
+  }, [isVaultReadyForProfile, e2eeProfile, localDeviceId, handleSelectChannelTab]);
 
   const handleRequestJoinGroup = async (g: DiscoverableGroupRecord) => {
     if (!account) {
@@ -927,35 +970,68 @@ export const Chat: React.FC<ChatProps> = ({
     }
   };
 
-  const loadActiveChannelMessages = useCallback(async () => {
-    if (loadMsgsInFlightRef.current) {
-      loadMsgsQueuedRef.current = true;
+  const selectedPeerId = selectedPeer?.user_id || null;
+  const selectedGroupId = selectedGroup?.group_id || null;
+  selectedGroupIdRef.current = selectedGroupId;
+
+  const activeScope =
+    activeTab === 'dm' && selectedPeerId
+      ? `dm|${selectedPeerId}`
+      : activeTab === 'groups' && selectedGroupId
+        ? `groups|${selectedGroupId}`
+        : null;
+  activeScopeRef.current = activeScope;
+
+  // Instantly isolate & swap cached messages before paint whenever the active conversation changes.
+  useLayoutEffect(() => {
+    loadGenRef.current += 1;
+    if (!isVaultReadyForProfile || !e2eeProfile || !localDeviceId || !activeScope) {
+      setMessages([]);
+      setLoadedScopeKey(null);
       return;
     }
-    loadMsgsInFlightRef.current = true;
-    const scopeAtStart =
-      activeTab === 'dm' && selectedPeer
-        ? `dm|${selectedPeer.user_id}`
-        : activeTab === 'groups' && selectedGroup
-          ? `groups|${selectedGroup.group_id}`
-          : null;
-    try {
-      do {
-        loadMsgsQueuedRef.current = false;
-        if (!isVaultReadyForProfile || !e2eeProfile || !localDeviceId) {
-          setMessages([]);
-          return;
-        }
+    const cacheKey = `${e2eeProfile.user_id}|${localDeviceId}|${activeScope}`;
+    const cached = syncCacheRef.current[cacheKey];
+    if (cached) {
+      const snapshot = [...cached.msgs];
+      setMessages((prev) => mergeLocalEntries(snapshot, prev, activeScope));
+      setLoadedScopeKey(activeScope);
+    } else {
+      setMessages((prev) => mergeLocalEntries([], prev, activeScope));
+      setLoadedScopeKey(null);
+    }
+  }, [activeScope, isVaultReadyForProfile, e2eeProfile?.user_id, localDeviceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const loadActiveChannelMessages = useCallback(async () => {
+    if (!isVaultReadyForProfile || !e2eeProfile || !localDeviceId) {
+      return;
+    }
+    const scopeAtStart = activeScopeRef.current;
+    if (!scopeAtStart) return;
+    const targetPeerId = activeTab === 'dm' ? selectedPeerId : null;
+    const targetGroupId = activeTab === 'groups' ? selectedGroupId : null;
+    if (activeTab === 'dm' && !targetPeerId) return;
+    if (activeTab === 'groups' && !targetGroupId) return;
+
+    // Coalesce duplicate triggers for the same conversation without blocking other conversations.
+    if (scopeSyncPendingRef.current[scopeAtStart]) return;
+    scopeSyncPendingRef.current[scopeAtStart] = true;
+
+    const myUserId = e2eeProfile.user_id;
+    const myDevId = localDeviceId;
+    const mySendReceipts = e2eeProfile.send_read_receipts !== false;
+    const myGen = loadGenRef.current;
+    const isStillCurrent = () =>
+      activeScopeRef.current === scopeAtStart && loadGenRef.current === myGen;
+
+    const prevChain = scopeSyncChainRef.current[scopeAtStart] || Promise.resolve();
+    const run = prevChain.catch(() => {}).then(async () => {
+      scopeSyncPendingRef.current[scopeAtStart] = false;
+      try {
         // 1. PRIVATE 1-TO-1 CHAT (Olm v2 Double Ratchet)
-        if (activeTab === 'dm') {
-          if (!selectedPeer) {
-            setMessages([]);
-            return;
-          }
-
-          const dmScope = `dm|${selectedPeer.user_id}`;
-          const dmCacheKey = `${e2eeProfile.user_id}|${localDeviceId}|${dmScope}`;
+        if (targetPeerId) {
+          const dmScope = `dm|${targetPeerId}`;
+          const dmCacheKey = `${myUserId}|${myDevId}|${dmScope}`;
           const dmEntry: ConversationSyncEntry = syncCacheRef.current[dmCacheKey] || {
             lastSeq: 0,
             msgs: [],
@@ -963,55 +1039,38 @@ export const Chat: React.FC<ChatProps> = ({
             lastReceiptSeq: 0,
           };
           syncCacheRef.current[dmCacheKey] = dmEntry;
-          // Show what we already have instantly (also on channel switch); network only adds the new part.
-          setMessages((prev) => mergeLocalEntries([...dmEntry.msgs], prev, dmScope));
 
-          // Peer device record is refreshed in the background on first open, device changes, or every 30s.
-          const secKey = `${e2eeProfile.user_id}|${selectedPeer.user_id}`;
+          const secKey = `${myUserId}|${targetPeerId}`;
           const cachedSec = peerSecCacheRef.current[secKey];
-          if (!cachedSec || forceSecurityRefreshRef.current || Date.now() - cachedSec.at > 30000) {
-            forceSecurityRefreshRef.current = false;
-            const latestPeer = await fetchPeerActiveDevices(selectedPeer.user_id);
-            await evaluateAndRecordPeerTrust(
-              e2eeProfile.user_id,
-              selectedPeer.user_id,
-              latestPeer.identity_version,
-              latestPeer.devices
-            );
-            peerSecCacheRef.current[secKey] = { at: Date.now() };
-          }
+          const needSecCheck = !cachedSec || forceSecurityRefreshRef.current || Date.now() - cachedSec.at > 30000;
+          if (needSecCheck) forceSecurityRefreshRef.current = false;
 
           const resolveDm = async (rec: any) => {
             if (rec.deleted || rec.expired) {
-              // Deleted for everyone / disappeared. A remaining copy is a session-setup message: decrypt it
-              // only so this device's encrypted session keeps working, then throw the text away.
-              const setupCt = rec.device_ciphertexts?.[localDeviceId];
-              const already = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(e2eeProfile.user_id, rec.message_id);
+              const setupCt = rec.device_ciphertexts?.[myDevId];
+              const already = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(myUserId, rec.message_id);
               if (setupCt && !already) {
                 try {
-                  await decryptOlmDeviceCiphertext(e2eeProfile.user_id, rec.sender_curve25519_key, setupCt.message_type, setupCt.ciphertext_b64);
+                  await decryptOlmDeviceCiphertext(myUserId, rec.sender_curve25519_key, setupCt.message_type, setupCt.ciphertext_b64);
                 } catch {
                   // nothing to keep either way
                 }
               }
-              if (already) await deleteVaultRecord(`dec_msg:${e2eeProfile.user_id}:${rec.message_id}`).catch(() => { });
+              if (already) await deleteVaultRecord(`dec_msg:${myUserId}:${rec.message_id}`).catch(() => { });
               return null;
             }
-            let cached = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(
-              e2eeProfile.user_id,
-              rec.message_id
-            );
+            let cached = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(myUserId, rec.message_id);
             if (!cached) {
-              const devCt = rec.device_ciphertexts[localDeviceId];
+              const devCt = rec.device_ciphertexts[myDevId];
               if (devCt) {
                 try {
                   cached = await decryptOlmDeviceCiphertext(
-                    e2eeProfile.user_id,
+                    myUserId,
                     rec.sender_curve25519_key,
                     devCt.message_type,
                     devCt.ciphertext_b64
                   );
-                  await saveVaultDecryptedMessage(e2eeProfile.user_id, rec.message_id, cached);
+                  await saveVaultDecryptedMessage(myUserId, rec.message_id, cached);
                 } catch {
                   cached = null;
                 }
@@ -1023,6 +1082,7 @@ export const Chat: React.FC<ChatProps> = ({
             id: rec.message_id,
             seq: rec.seq,
             channel: rec.conversation_id,
+            localScope: dmScope,
             sender: rec.sender_user_id,
             message: rec.deleted || rec.expired ? '' : cached ? cached.text : 'This message is not available on this device.',
             attachments: cached?.attachments,
@@ -1037,26 +1097,46 @@ export const Chat: React.FC<ChatProps> = ({
             expiresAt: rec.expires_at || null,
           });
 
-          // Retry only the few records that could not be decrypted earlier.
+          // Run peer device check in parallel with fetching new DM ciphertexts.
+          const secPromise = needSecCheck
+            ? fetchPeerActiveDevices(targetPeerId)
+                .then(async (latestPeer) => {
+                  await evaluateAndRecordPeerTrust(
+                    myUserId,
+                    targetPeerId,
+                    latestPeer.identity_version,
+                    latestPeer.devices
+                  );
+                  peerSecCacheRef.current[secKey] = { at: Date.now() };
+                })
+                .catch(() => {})
+            : Promise.resolve();
+
+          const fetchDmPromise = (async () => {
+            let currentDmSeq = dmEntry.lastSeq;
+            const out: any[] = [];
+            while (true) {
+              const dmFeed = await fetchOlmDmCiphertexts(targetPeerId, myDevId, currentDmSeq, 100);
+              if (!dmFeed.messages || dmFeed.messages.length === 0) break;
+              out.push(...dmFeed.messages);
+              const lastMsg = dmFeed.messages[dmFeed.messages.length - 1];
+              if (lastMsg.seq <= currentDmSeq) break;
+              currentDmSeq = lastMsg.seq;
+              if (dmFeed.messages.length < 100) break;
+            }
+            return out;
+          })();
+
+          const [, newDmMessages] = await Promise.all([secPromise, fetchDmPromise]);
+
+          let changed = false;
           for (const [mid, rec] of Object.entries(dmEntry.retry)) {
             const cached = await resolveDm(rec);
             if (cached) {
               delete dmEntry.retry[mid];
               dmEntry.msgs = dmEntry.msgs.map((m) => (m.id === mid ? dmToDisplay(rec, cached) : m));
+              changed = true;
             }
-          }
-
-          // Fetch ONLY messages newer than what we already hold (not the whole history every time).
-          let currentDmSeq = dmEntry.lastSeq;
-          const newDmMessages: any[] = [];
-          while (true) {
-            const dmFeed = await fetchOlmDmCiphertexts(selectedPeer.user_id, localDeviceId, currentDmSeq, 100);
-            if (!dmFeed.messages || dmFeed.messages.length === 0) break;
-            newDmMessages.push(...dmFeed.messages);
-            const lastMsg = dmFeed.messages[dmFeed.messages.length - 1];
-            if (lastMsg.seq <= currentDmSeq) break;
-            currentDmSeq = lastMsg.seq;
-            if (dmFeed.messages.length < 100) break;
           }
 
           let maxSeq = dmEntry.lastSeq;
@@ -1064,62 +1144,40 @@ export const Chat: React.FC<ChatProps> = ({
             if (rec.seq > maxSeq) maxSeq = rec.seq;
             const cached = await resolveDm(rec);
             if (!cached && !rec.deleted && !rec.expired) dmEntry.retry[rec.message_id] = rec;
-            dmEntry.msgs.push(dmToDisplay(rec, cached));
+            if (!dmEntry.msgs.some((m) => m.id === rec.message_id)) {
+              dmEntry.msgs.push(dmToDisplay(rec, cached));
+              changed = true;
+            }
           }
           dmEntry.lastSeq = maxSeq;
-          const dmServerMsgs = [...dmEntry.msgs];
-          setMessages((prev) => mergeLocalEntries(dmServerMsgs, prev, dmScope));
-          conversationShown(`dm:${selectedPeer.user_id}`, maxSeq);
 
-          // Optional DM read receipts - only when there is something newer to acknowledge
-          if (maxSeq > dmEntry.lastReceiptSeq && e2eeProfile.send_read_receipts !== false) {
-            dmEntry.lastReceiptSeq = maxSeq;
-            sendDmReadReceipt(selectedPeer.user_id, maxSeq).catch(() => { });
+          if (isStillCurrent()) {
+            if (changed || newDmMessages.length > 0 || dmEntry.msgs.length === 0) {
+              const dmServerMsgs = [...dmEntry.msgs];
+              setMessages((prev) => mergeLocalEntries(dmServerMsgs, prev, dmScope));
+            }
+            setLoadedScopeKey(scopeAtStart);
+            conversationShown(`dm:${targetPeerId}`, maxSeq);
+
+            if (maxSeq > dmEntry.lastReceiptSeq && mySendReceipts) {
+              dmEntry.lastReceiptSeq = maxSeq;
+              sendDmReadReceipt(targetPeerId, maxSeq).catch(() => { });
+            }
+            fetchDmReadReceipts(targetPeerId)
+              .then((r) => {
+                if (!isStillCurrent()) return;
+                const peerRec = r.receipts?.[targetPeerId];
+                setPeerLastReadSeq(peerRec ? peerRec.last_read_seq : 0);
+              })
+              .catch(() => { });
           }
-          fetchDmReadReceipts(selectedPeer.user_id)
-            .then((r) => {
-              const peerRec = r.receipts?.[selectedPeer.user_id];
-              setPeerLastReadSeq(peerRec ? peerRec.last_read_seq : 0);
-            })
-            .catch(() => { });
-          continue;
+          return;
         }
 
         // 2. ENCRYPTED GROUP CHAT (RFC 9420 MLS TreeKEM)
-        if (activeTab === 'groups') {
-          if (!selectedGroup) {
-            setMessages([]);
-            return;
-          }
-
-          {
-            const earlyKey = `${e2eeProfile.user_id}|${localDeviceId}|groups|${selectedGroup.group_id}`;
-            const early = syncCacheRef.current[earlyKey];
-            const earlyScope = `groups|${selectedGroup.group_id}`;
-            setMessages((prev) => mergeLocalEntries(early ? [...early.msgs] : [], prev, earlyScope));
-          }
-          const secBefore = await getMlsGroupSecurityInfo(
-            e2eeProfile.user_id,
-            selectedGroup.group_id
-          );
-          const localEpoch = secBefore?.epoch ?? 0;
-          const commitFeed = await fetchServerMlsCommits(selectedGroup.group_id, localEpoch);
-          if (commitFeed.commits.length > 0) {
-            const commitOutcome = await processIncomingMlsCommits(
-              e2eeProfile.user_id,
-              selectedGroup.group_id,
-              commitFeed.commits
-            );
-            if (commitOutcome.selfRemoved) {
-              setSelectedGroup(null);
-              await syncSidebarLists();
-              return;
-            }
-          }
-
-
-          const grpScope = `groups|${selectedGroup.group_id}`;
-          const grpCacheKey = `${e2eeProfile.user_id}|${localDeviceId}|${grpScope}`;
+        if (targetGroupId) {
+          const grpScope = `groups|${targetGroupId}`;
+          const grpCacheKey = `${myUserId}|${myDevId}|${grpScope}`;
           const grpEntry: ConversationSyncEntry = syncCacheRef.current[grpCacheKey] || {
             lastSeq: 0,
             msgs: [],
@@ -1128,23 +1186,51 @@ export const Chat: React.FC<ChatProps> = ({
           };
           syncCacheRef.current[grpCacheKey] = grpEntry;
 
+          const secBefore = await getMlsGroupSecurityInfo(myUserId, targetGroupId);
+          const localEpoch = secBefore?.epoch ?? 0;
+
+          // Fetch incoming MLS commits and new group ciphertexts in parallel.
+          const [commitFeed, newGrpMessages] = await Promise.all([
+            fetchServerMlsCommits(targetGroupId, localEpoch),
+            (async () => {
+              let currentGrpSeq = grpEntry.lastSeq;
+              const out: any[] = [];
+              while (true) {
+                const grpMsgs = await fetchServerMlsGroupMessages(targetGroupId, currentGrpSeq, 100);
+                if (!grpMsgs.messages || grpMsgs.messages.length === 0) break;
+                out.push(...grpMsgs.messages);
+                const lastMsg = grpMsgs.messages[grpMsgs.messages.length - 1];
+                if (lastMsg.seq <= currentGrpSeq) break;
+                currentGrpSeq = lastMsg.seq;
+                if (grpMsgs.messages.length < 100) break;
+              }
+              return out;
+            })(),
+          ]);
+
+          if (commitFeed.commits.length > 0) {
+            const commitOutcome = await processIncomingMlsCommits(
+              myUserId,
+              targetGroupId,
+              commitFeed.commits
+            );
+            if (commitOutcome.selfRemoved) {
+              if (isStillCurrent()) setSelectedGroup(null);
+              await syncSidebarLists();
+              return;
+            }
+          }
+
           const resolveGrp = async (gm: any) => {
             if (gm.deleted) {
-              await deleteVaultRecord(`dec_msg:${e2eeProfile.user_id}:${gm.message_id}`).catch(() => { });
+              await deleteVaultRecord(`dec_msg:${myUserId}:${gm.message_id}`).catch(() => { });
               return null;
             }
-            let cached = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(
-              e2eeProfile.user_id,
-              gm.message_id
-            );
+            let cached = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(myUserId, gm.message_id);
             if (!cached) {
               try {
-                cached = await decryptMlsGroupMessage(
-                  e2eeProfile.user_id,
-                  selectedGroup.group_id,
-                  gm.mls_ciphertext_b64
-                );
-                await saveVaultDecryptedMessage(e2eeProfile.user_id, gm.message_id, cached);
+                cached = await decryptMlsGroupMessage(myUserId, targetGroupId, gm.mls_ciphertext_b64);
+                await saveVaultDecryptedMessage(myUserId, gm.message_id, cached);
               } catch {
                 cached = null;
               }
@@ -1154,7 +1240,8 @@ export const Chat: React.FC<ChatProps> = ({
           const grpToDisplay = (gm: any, cached: E2EEPlaintextEnvelope | null): RichDisplayMessage => ({
             id: gm.message_id,
             seq: gm.seq,
-            channel: selectedGroup.group_id,
+            channel: targetGroupId,
+            localScope: grpScope,
             sender: gm.sender_user_id,
             message: gm.deleted
               ? ''
@@ -1173,25 +1260,14 @@ export const Chat: React.FC<ChatProps> = ({
             expiresAt: gm.expires_at || null,
           });
 
+          let changed = false;
           for (const [mid, gm] of Object.entries(grpEntry.retry)) {
             const cached = await resolveGrp(gm);
             if (cached) {
               delete grpEntry.retry[mid];
               grpEntry.msgs = grpEntry.msgs.map((m) => (m.id === mid ? grpToDisplay(gm, cached) : m));
+              changed = true;
             }
-          }
-
-          // Fetch ONLY messages newer than what we already hold.
-          let currentGrpSeq = grpEntry.lastSeq;
-          const newGrpMessages: any[] = [];
-          while (true) {
-            const grpMsgs = await fetchServerMlsGroupMessages(selectedGroup.group_id, currentGrpSeq, 100);
-            if (!grpMsgs.messages || grpMsgs.messages.length === 0) break;
-            newGrpMessages.push(...grpMsgs.messages);
-            const lastMsg = grpMsgs.messages[grpMsgs.messages.length - 1];
-            if (lastMsg.seq <= currentGrpSeq) break;
-            currentGrpSeq = lastMsg.seq;
-            if (grpMsgs.messages.length < 100) break;
           }
 
           let grpMaxSeq = grpEntry.lastSeq;
@@ -1199,40 +1275,57 @@ export const Chat: React.FC<ChatProps> = ({
             if (gm.seq > grpMaxSeq) grpMaxSeq = gm.seq;
             const cached = await resolveGrp(gm);
             if (!cached && !gm.deleted) grpEntry.retry[gm.message_id] = gm;
-            grpEntry.msgs.push(grpToDisplay(gm, cached));
+            if (!grpEntry.msgs.some((m) => m.id === gm.message_id)) {
+              grpEntry.msgs.push(grpToDisplay(gm, cached));
+              changed = true;
+            }
           }
           grpEntry.lastSeq = grpMaxSeq;
-          const grpServerMsgs = [...grpEntry.msgs];
-          setMessages((prev) => mergeLocalEntries(grpServerMsgs, prev, grpScope));
-          conversationShown(`group:${selectedGroup.group_id}`, grpMaxSeq);
+
+          if (isStillCurrent()) {
+            if (changed || newGrpMessages.length > 0 || grpEntry.msgs.length === 0) {
+              const grpServerMsgs = [...grpEntry.msgs];
+              setMessages((prev) => mergeLocalEntries(grpServerMsgs, prev, grpScope));
+            }
+            setLoadedScopeKey(scopeAtStart);
+            conversationShown(`group:${targetGroupId}`, grpMaxSeq);
+          }
         }
-      } while (loadMsgsQueuedRef.current);
-    } catch (err) {
-      console.warn('Message sync error:', err);
-    } finally {
-      loadMsgsInFlightRef.current = false;
-      if (scopeAtStart) setLoadedScopeKey(scopeAtStart);
-    }
+      } catch (err) {
+        console.warn('Message sync error:', err);
+        if (isStillCurrent()) setLoadedScopeKey(scopeAtStart);
+      }
+    });
+    scopeSyncChainRef.current[scopeAtStart] = run;
+    await run;
   }, [
     activeTab,
     isVaultReadyForProfile,
-    e2eeProfile,
+    e2eeProfile?.user_id,
+    e2eeProfile?.send_read_receipts,
     localDeviceId,
-    selectedPeer,
-    selectedGroup,
+    selectedPeerId,
+    selectedGroupId,
     syncSidebarLists,
   ]);
 
   useEffect(() => {
     isFirstLoadRef.current = true;
-    loadActiveChannelMessages();
-    syncSidebarLists();
+    void loadActiveChannelMessages();
     const interval = setInterval(() => {
-      loadActiveChannelMessages();
-      syncSidebarLists();
+      void loadActiveChannelMessages();
     }, 4500);
     return () => clearInterval(interval);
-  }, [loadActiveChannelMessages, syncSidebarLists]);
+  }, [loadActiveChannelMessages]);
+
+  useEffect(() => {
+    if (!isVaultReadyForProfile) return;
+    void syncSidebarLists();
+    const interval = setInterval(() => {
+      void syncSidebarLists();
+    }, 4500);
+    return () => clearInterval(interval);
+  }, [isVaultReadyForProfile, syncSidebarLists]);
 
   useEffect(() => {
     if (!isVaultReadyForProfile) return;
@@ -1265,10 +1358,16 @@ export const Chat: React.FC<ChatProps> = ({
             by: (evt as any).invited_by_username ? String((evt as any).invited_by_username) : null,
           });
         }
-        loadActiveChannelMessages();
-        syncSidebarLists();
+        void loadActiveChannelMessages();
+        const needsSidebarRefresh =
+          evt.type !== 'dm_read_receipt' &&
+          evt.type !== 'group_ciphertext' &&
+          evt.type !== 'group_commit';
+        if (needsSidebarRefresh) {
+          void syncSidebarLists();
+        }
       } else if (evt.type === 'support_reply') {
-        // An admin answered a support conversation: update the badge and an open Concierge page now.
+        // An admin answered a support conversation: update the badge and an open Contact Admin page now.
         window.dispatchEvent(new CustomEvent('zyphra:support-reply', { detail: evt }));
       }
     });
@@ -1312,9 +1411,10 @@ export const Chat: React.FC<ChatProps> = ({
     }
     try {
       const st = await fetchConversationState(refFromKey(key));
+      convStateCacheRef.current[key] = st;
       if (convKeyRef.current === key) setConvState(st);
     } catch {
-      if (convKeyRef.current === key) setConvState(null);
+      if (convKeyRef.current === key && !convStateCacheRef.current[key]) setConvState(null);
     }
   }, [isVaultReadyForProfile]);
 
@@ -1330,7 +1430,7 @@ export const Chat: React.FC<ChatProps> = ({
   }, [isVaultReadyForProfile]);
 
   useEffect(() => {
-    setConvState(null);
+    setConvState(convKey ? convStateCacheRef.current[convKey] || null : null);
     setEditTarget(null);
     setSearchOpen(false);
     setSearchQuery('');
@@ -1400,16 +1500,17 @@ export const Chat: React.FC<ChatProps> = ({
   const isGroupAdminHere = activeTab === 'groups' && Boolean(e2eeProfile && groupAdminIds.has(e2eeProfile.user_id));
   const adminsOnlyHere = activeTab === 'groups' && Boolean(convState?.admins_only);
 
-  const displayMessages = React.useMemo(
-    () =>
-      foldChatEvents(messages as Array<RichDisplayMessage & FoldInput>, {
-        myUserId: e2eeProfile?.user_id || '',
-        nowMs: nowTick,
-        adminsOnly: adminsOnlyHere,
-        adminIds: groupAdminIds,
-      }),
-    [messages, e2eeProfile?.user_id, nowTick, adminsOnlyHere, groupAdminIds]
-  );
+  const displayMessages = React.useMemo(() => {
+    const scoped = activeScope
+      ? messages.filter((m) => !m.localScope || m.localScope === activeScope)
+      : [];
+    return foldChatEvents(scoped as Array<RichDisplayMessage & FoldInput>, {
+      myUserId: e2eeProfile?.user_id || '',
+      nowMs: nowTick,
+      adminsOnly: adminsOnlyHere,
+      adminIds: groupAdminIds,
+    });
+  }, [messages, activeScope, e2eeProfile?.user_id, nowTick, adminsOnlyHere, groupAdminIds]);
 
   const searchHits = React.useMemo(
     () => (searchOpen ? searchMessages(displayMessages, searchQuery) : []),
@@ -2707,22 +2808,32 @@ export const Chat: React.FC<ChatProps> = ({
                               key={peerItem.user_id}
                               type="button"
                               className={`rail-conv-item ${isPeerActive ? 'active' : ''}`}
-                              onClick={async () => {
+                              onClick={() => {
                                 setMobileRailOpen(false);
-                                const cachedOpened = openedPeers.find(
-                                  (p) => p.user_id === peerItem.user_id
-                                );
-                                if (cachedOpened) {
-                                  setSelectedPeer(cachedOpened);
-                                  handleSelectChannelTab('dm');
-                                }
-                                try {
-                                  const freshPeer = await resolveE2EEPeer(peerItem.user_id);
-                                  registerOpenedPeer(freshPeer);
-                                  setSelectedPeer(freshPeer);
-                                  handleSelectChannelTab('dm');
-                                } catch {
-                                  // keep cached peer if offline
+                                const cachedPeer =
+                                  resolvedPeerCacheRef.current[peerItem.user_id]?.peer ||
+                                  openedPeers.find((p) => p.user_id === peerItem.user_id) || {
+                                    user_id: peerItem.user_id,
+                                    username: peerItem.username,
+                                    primary_wallet: peerItem.primary_wallet,
+                                    identity_version: 0,
+                                    devices: [],
+                                  };
+                                setSelectedPeer(cachedPeer);
+                                handleSelectChannelTab('dm');
+
+                                const cachedMeta = resolvedPeerCacheRef.current[peerItem.user_id];
+                                if (!cachedMeta || cachedMeta.peer.devices.length === 0 || Date.now() - cachedMeta.at > 30000) {
+                                  resolveE2EEPeer(peerItem.user_id)
+                                    .then((freshPeer) => {
+                                      registerOpenedPeer(freshPeer);
+                                      setSelectedPeer((cur) =>
+                                        cur?.user_id === freshPeer.user_id ? freshPeer : cur
+                                      );
+                                    })
+                                    .catch(() => {
+                                      // keep cached peer if offline
+                                    });
                                 }
                               }}
                             >
