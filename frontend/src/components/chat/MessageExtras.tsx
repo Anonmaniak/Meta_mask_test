@@ -296,40 +296,98 @@ export const TypingLine: React.FC<{ names: string[] }> = ({ names }) => (
   <div className="chat-typing" aria-live="polite">{typingText(names)}</div>
 );
 
-/** In-chat search over the messages on this device. */
+/** In-chat search over the messages on this device (circular button that animates into a search bar). */
 export const ChatSearchBar: React.FC<{
+  open: boolean;
+  onOpen: () => void;
   query: string;
   onQuery: (q: string) => void;
   count: number;
   index: number;
   onStep: (dir: 1 | -1) => void;
   onClose: () => void;
-}> = ({ query, onQuery, count, index, onStep, onClose }) => (
-  <div className="chat-search" role="search">
-    <Search size={15} aria-hidden="true" />
-    <input
-      autoFocus
-      value={query}
-      onChange={(e) => onQuery(e.target.value)}
-      placeholder="Search this chat"
-      aria-label="Search this chat"
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') onStep(e.shiftKey ? -1 : 1);
-        if (e.key === 'Escape') onClose();
-      }}
-    />
-    <span className="count">{query.trim().length >= 2 ? (count ? `${index + 1} of ${count}` : 'No matches') : ''}</span>
-    <button type="button" className="chat-icon-btn" aria-label="Previous match" disabled={!count} onClick={() => onStep(-1)}>
-      <ChevronUp size={14} />
-    </button>
-    <button type="button" className="chat-icon-btn" aria-label="Next match" disabled={!count} onClick={() => onStep(1)}>
-      <ChevronDown size={14} />
-    </button>
-    <button type="button" className="chat-icon-btn" aria-label="Close search" onClick={onClose}>
-      <X size={14} />
-    </button>
-  </div>
-);
+  ariaLabel?: string;
+}> = ({ open, onOpen, query, onQuery, count, index, onStep, onClose, ariaLabel }) => {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const t = window.setTimeout(() => inputRef.current?.focus(), 60);
+    return () => window.clearTimeout(t);
+  }, [open]);
+
+  const label = ariaLabel || 'Search this chat';
+  return (
+    <div className="chat-header-search-slot">
+      <div
+        className={`chat-header-search ${open ? 'is-open' : ''}`}
+        role="search"
+        onKeyDown={(e) => {
+          if (open && e.key === 'Escape') {
+            e.stopPropagation();
+            onClose();
+          }
+        }}
+      >
+        <button
+          type="button"
+          className="chat-header-search-trigger"
+          aria-label={label}
+          aria-expanded={open}
+          title={label}
+          onClick={() => {
+            if (!open) onOpen();
+            else inputRef.current?.focus();
+          }}
+        >
+          <Search size={15} aria-hidden="true" />
+        </button>
+        <div className="chat-header-search-fields" aria-hidden={!open}>
+          <input
+            ref={inputRef}
+            tabIndex={open ? 0 : -1}
+            value={query}
+            onChange={(e) => onQuery(e.target.value)}
+            placeholder="Search this chat"
+            aria-label={label}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onStep(e.shiftKey ? -1 : 1);
+            }}
+          />
+          <span className="count">{query.trim().length >= 2 ? (count ? `${index + 1} of ${count}` : 'No matches') : ''}</span>
+          <button
+            type="button"
+            className="chat-header-search-step"
+            tabIndex={open ? 0 : -1}
+            aria-label="Previous match"
+            disabled={!open || !count}
+            onClick={() => onStep(-1)}
+          >
+            <ChevronUp size={14} />
+          </button>
+          <button
+            type="button"
+            className="chat-header-search-step"
+            tabIndex={open ? 0 : -1}
+            aria-label="Next match"
+            disabled={!open || !count}
+            onClick={() => onStep(1)}
+          >
+            <ChevronDown size={14} />
+          </button>
+          <button
+            type="button"
+            className="chat-header-search-close"
+            tabIndex={open ? 0 : -1}
+            aria-label="Close search"
+            onClick={onClose}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export type MuteChoice = 'off' | '8h' | '1w' | 'always';
 export const TIMER_CHOICES: Array<[number, string]> = [

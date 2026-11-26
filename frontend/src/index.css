@@ -409,7 +409,9 @@ select option {
   border-bottom-color: transparent;
   background: transparent;
   backdrop-filter: none;
-  height: clamp(50px, 7.2dvh, 68px);
+  padding: clamp(14px, 2.4dvh, 24px) 28px 6px;
+  height: auto;
+  min-height: clamp(68px, 10dvh, 88px);
 }
 
 .topbar-connect-btn {
@@ -1977,10 +1979,10 @@ select option {
   }
 
   .console-topbar--gated {
-    height: clamp(50px, 7.2dvh, 60px);
-    min-height: 50px;
+    height: auto;
+    min-height: 60px;
     flex-wrap: nowrap;
-    padding: 0 16px;
+    padding: 12px 16px 4px;
   }
 
   .brand-block {
@@ -2187,7 +2189,8 @@ select option {
   }
 
   .console-topbar--gated {
-    padding: 0 12px;
+    padding: 10px 12px 4px;
+    min-height: 54px;
     gap: 8px;
   }
 

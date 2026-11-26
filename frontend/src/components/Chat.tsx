@@ -2851,7 +2851,7 @@ export const Chat: React.FC<ChatProps> = ({
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', flexShrink: 0 }}>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', flexShrink: 0, marginLeft: 'auto' }}>
               {activeTab === 'dm' && selectedPeer && (
                 <button
                   type="button"
@@ -2936,6 +2936,43 @@ export const Chat: React.FC<ChatProps> = ({
                   <ShieldCheck size={14} />
                   <span>Group settings</span>
                 </button>
+              )}
+
+              {account && !needsE2EEAuth && ((activeTab === 'dm' && selectedPeer) || (activeTab === 'groups' && selectedGroup)) && (
+                <>
+                  <ChatSearchBar
+                    open={searchOpen}
+                    onOpen={() => {
+                      setSearchOpen(true);
+                      setSearchQuery('');
+                    }}
+                    query={searchQuery}
+                    onQuery={setSearchQuery}
+                    count={searchHits.length}
+                    index={searchIndex}
+                    onStep={stepSearch}
+                    onClose={() => {
+                      setSearchOpen(false);
+                      setSearchQuery('');
+                    }}
+                  />
+                  <ConversationMenu
+                    kind={activeTab === 'dm' ? 'dm' : 'group'}
+                    muted={Boolean(currentPref?.muted)}
+                    mutedForever={currentPref?.muted_forever}
+                    mutedUntil={currentPref?.muted_until}
+                    archived={currentPref?.archived}
+                    timer={convState?.disappearing_ttl || 0}
+                    adminsOnly={adminsOnlyHere}
+                    canManage={Boolean(convState?.can_manage)}
+                    onMute={(choice) => void updatePref({ mute: choice })}
+                    onArchive={(archived) => void updatePref({ archived })}
+                    onTimer={(ttl) => void changeTimer(ttl)}
+                    onAdminsOnly={(v) => void changeAdminsOnly(v)}
+                    onSearch={() => setSearchOpen(true)}
+                    onPoll={activeTab === 'groups' && (!adminsOnlyHere || isGroupAdminHere) ? () => setPollOpen(true) : undefined}
+                  />
+                </>
               )}
             </div>
           </div>
@@ -3240,53 +3277,18 @@ export const Chat: React.FC<ChatProps> = ({
               </div>
             ) : (
               <>
-                {/* Chat toolbar: timer / announcement / muted chips, search, options, pinned messages */}
-                {(activeTab === 'dm' ? selectedPeer : selectedGroup) && (
+                {/* Chat status chips, pinned messages, and notices (shown only when active) */}
+                {(activeTab === 'dm' ? selectedPeer : selectedGroup) &&
+                  (Boolean(convState?.disappearing_ttl) ||
+                    adminsOnlyHere ||
+                    Boolean(currentPref?.muted) ||
+                    Boolean(convState && convState.pins.length > 0) ||
+                    Boolean(featureNotice)) && (
                   <div className="chat-extras-bar">
-                    <div className="chat-extras-row">
-                      <ChatStatusChips timer={convState?.disappearing_ttl} adminsOnly={adminsOnlyHere} muted={Boolean(currentPref?.muted)} />
-                      <span style={{ flex: 1 }} />
-                      <button
-                        type="button"
-                        className="chat-icon-btn"
-                        aria-label="Search this chat"
-                        aria-pressed={searchOpen}
-                        onClick={() => {
-                          setSearchOpen((v) => !v);
-                          setSearchQuery('');
-                        }}
-                      >
-                        <Search size={15} />
-                      </button>
-                      <ConversationMenu
-                        kind={activeTab === 'dm' ? 'dm' : 'group'}
-                        muted={Boolean(currentPref?.muted)}
-                        mutedForever={currentPref?.muted_forever}
-                        mutedUntil={currentPref?.muted_until}
-                        archived={currentPref?.archived}
-                        timer={convState?.disappearing_ttl || 0}
-                        adminsOnly={adminsOnlyHere}
-                        canManage={Boolean(convState?.can_manage)}
-                        onMute={(choice) => void updatePref({ mute: choice })}
-                        onArchive={(archived) => void updatePref({ archived })}
-                        onTimer={(ttl) => void changeTimer(ttl)}
-                        onAdminsOnly={(v) => void changeAdminsOnly(v)}
-                        onSearch={() => setSearchOpen(true)}
-                        onPoll={activeTab === 'groups' && (!adminsOnlyHere || isGroupAdminHere) ? () => setPollOpen(true) : undefined}
-                      />
-                    </div>
-                    {searchOpen && (
-                      <ChatSearchBar
-                        query={searchQuery}
-                        onQuery={setSearchQuery}
-                        count={searchHits.length}
-                        index={searchIndex}
-                        onStep={stepSearch}
-                        onClose={() => {
-                          setSearchOpen(false);
-                          setSearchQuery('');
-                        }}
-                      />
+                    {(Boolean(convState?.disappearing_ttl) || adminsOnlyHere || Boolean(currentPref?.muted)) && (
+                      <div className="chat-extras-row">
+                        <ChatStatusChips timer={convState?.disappearing_ttl} adminsOnly={adminsOnlyHere} muted={Boolean(currentPref?.muted)} />
+                      </div>
                     )}
                     {convState && convState.pins.length > 0 && (
                       <PinnedBar

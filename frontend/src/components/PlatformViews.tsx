@@ -22,7 +22,6 @@ import {
   Reply,
   Pin,
   PinOff,
-  Search,
 } from 'lucide-react';
 import { formatAddress, formatEth } from '../services/web3';
 import { ChatMessagesSkeleton } from './Skeleton';
@@ -531,8 +530,8 @@ export const OpenPublicChatView: React.FC<{
             </div>
           </div>
 
-          {account && !e2eeProfile && (
-            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0, marginLeft: 'auto' }}>
+            {account && !e2eeProfile && (
               <button
                 type="button"
                 className="btn-solid"
@@ -543,8 +542,34 @@ export const OpenPublicChatView: React.FC<{
                 <KeyRound size={13} />
                 <span>{siweLoading ? 'Signing...' : 'Verify your wallet'}</span>
               </button>
-            </div>
-          )}
+            )}
+            <ChatSearchBar
+              open={roomSearchOpen}
+              onOpen={() => {
+                setRoomSearchOpen(true);
+                setRoomQuery('');
+              }}
+              query={roomQuery}
+              onQuery={(q) => {
+                setRoomQuery(q);
+                setRoomSearchIndex(Math.max(0, searchMessages(roomSearchItems, q).length - 1));
+              }}
+              count={roomHits.length}
+              index={roomSearchIndex}
+              onStep={(dir) => {
+                const n = roomHits.length;
+                if (!n) return;
+                const next = (roomSearchIndex + dir + n) % n;
+                setRoomSearchIndex(next);
+                jumpToMessage(roomHits[next]);
+              }}
+              onClose={() => {
+                setRoomSearchOpen(false);
+                setRoomQuery('');
+              }}
+              ariaLabel="Search the Members' room"
+            />
+          </div>
         </div>
 
         {/* Honest Security Disclosure Banner */}
@@ -619,46 +644,9 @@ export const OpenPublicChatView: React.FC<{
           </div>
         )}
 
-        {/* Room toolbar: search and pinned messages */}
-        <div className="chat-extras-bar">
-          <div className="chat-extras-row">
-            <span style={{ flex: 1 }} />
-            <button
-              type="button"
-              className="chat-icon-btn"
-              aria-label="Search the Members' room"
-              aria-pressed={roomSearchOpen}
-              onClick={() => {
-                setRoomSearchOpen((v) => !v);
-                setRoomQuery('');
-              }}
-            >
-              <Search size={15} />
-            </button>
-          </div>
-          {roomSearchOpen && (
-            <ChatSearchBar
-              query={roomQuery}
-              onQuery={(q) => {
-                setRoomQuery(q);
-                setRoomSearchIndex(Math.max(0, searchMessages(roomSearchItems, q).length - 1));
-              }}
-              count={roomHits.length}
-              index={roomSearchIndex}
-              onStep={(dir) => {
-                const n = roomHits.length;
-                if (!n) return;
-                const next = (roomSearchIndex + dir + n) % n;
-                setRoomSearchIndex(next);
-                jumpToMessage(roomHits[next]);
-              }}
-              onClose={() => {
-                setRoomSearchOpen(false);
-                setRoomQuery('');
-              }}
-            />
-          )}
-          {roomPins.length > 0 && (
+        {/* Room pinned messages */}
+        {roomPins.length > 0 && (
+          <div className="chat-extras-bar">
             <PinnedBar
               pins={roomPins}
               previewFor={(id) => {
@@ -670,8 +658,8 @@ export const OpenPublicChatView: React.FC<{
               }}
               onUnpin={isModerator ? (id) => void pinRoomMessage(id, false) : undefined}
             />
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Stream */}
         <div className="chat-stream-body" ref={streamRef} style={{ flex: 1, overflowY: 'auto' }}>

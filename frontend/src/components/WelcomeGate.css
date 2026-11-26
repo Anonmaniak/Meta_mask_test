@@ -15,11 +15,11 @@
 
 .wg__stage {
   width: 100%;
-  max-width: 1180px;
+  max-width: 1220px;
   max-height: 100%;
   margin: auto;
   display: grid;
-  grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.88fr);
+  grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr);
   align-items: center;
   gap: clamp(20px, 5vw, 96px);
 }
@@ -34,7 +34,7 @@
 
 .wg__headline {
   font-family: var(--font-display);
-  font-size: clamp(1.7rem, min(4.5vw, 5.8dvh), 3.9rem);
+  font-size: clamp(1.9rem, min(4.8vw, 6.8dvh), 4.15rem);
   font-weight: 600;
   line-height: 1.06;
   letter-spacing: -0.025em;
@@ -42,24 +42,24 @@
 }
 
 .wg__lede {
-  margin-top: clamp(8px, 1.8dvh, 22px);
-  max-width: 48ch;
-  font-size: clamp(0.88rem, min(1.35vw, 2dvh), 1.15rem);
-  line-height: 1.5;
+  margin-top: clamp(10px, 2.1dvh, 24px);
+  max-width: 50ch;
+  font-size: clamp(0.98rem, min(1.5vw, 2.45dvh), 1.24rem);
+  line-height: 1.52;
   color: var(--text-secondary);
 }
 
 .wg__actions {
-  margin-top: clamp(12px, 2.4dvh, 32px);
+  margin-top: clamp(14px, 2.7dvh, 34px);
   display: flex;
   flex-direction: column;
-  gap: clamp(6px, 1.1dvh, 12px);
+  gap: clamp(7px, 1.2dvh, 13px);
   align-items: flex-start;
 }
 
 .wg__connect {
-  padding: clamp(10px, 1.6dvh, 15px) clamp(22px, 2.5vw, 34px);
-  font-size: clamp(0.88rem, min(1.2vw, 1.65dvh), 1.02rem);
+  padding: clamp(11px, 1.8dvh, 16px) clamp(24px, 2.8vw, 38px);
+  font-size: clamp(0.96rem, min(1.3vw, 1.95dvh), 1.1rem);
   gap: 10px;
 }
 
@@ -69,10 +69,10 @@
 }
 
 .wg__hint {
-  font-size: clamp(0.76rem, min(1.05vw, 1.4dvh), 0.88rem);
-  line-height: 1.4;
+  font-size: clamp(0.84rem, min(1.15vw, 1.65dvh), 0.95rem);
+  line-height: 1.42;
   color: var(--text-muted);
-  max-width: 46ch;
+  max-width: 48ch;
 }
 
 .wg__status {
@@ -113,29 +113,29 @@
 
 .wg__points {
   list-style: none;
-  margin-top: clamp(12px, 2.8dvh, 42px);
-  padding-top: clamp(10px, 2dvh, 24px);
+  margin-top: clamp(14px, 3dvh, 42px);
+  padding-top: clamp(12px, 2.2dvh, 26px);
   border-top: 1px solid var(--border-subtle);
   display: grid;
-  gap: clamp(8px, 1.6dvh, 16px);
-  max-width: 56ch;
+  gap: clamp(10px, 1.8dvh, 18px);
+  max-width: 58ch;
 }
 
 .wg__points li {
   display: grid;
-  grid-template-columns: 20px 1fr;
-  gap: clamp(10px, 1.2vw, 14px);
+  grid-template-columns: 22px 1fr;
+  gap: clamp(10px, 1.3vw, 15px);
   align-items: start;
-  font-size: clamp(0.8rem, min(1.1vw, 1.65dvh), 0.95rem);
-  line-height: 1.45;
+  font-size: clamp(0.9rem, min(1.22vw, 1.95dvh), 1.04rem);
+  line-height: 1.48;
   color: var(--text-secondary);
 }
 
 .wg__points svg {
   color: var(--accent);
   margin-top: 2px;
-  width: 17px;
-  height: 17px;
+  width: 19px;
+  height: 19px;
 }
 
 .wg__points strong {
