@@ -183,8 +183,8 @@ sequenceDiagram
 
 ---
 
-## 8. "Talk to Admin" Support Conversation Workflow (`/support`)
+## 8. "Contact Admin" Support Conversation Workflow (`/support`)
 
-1. **Thread Creation (`SupportView.tsx`)**: Any signed-in user (paid or unpaid) opens **Support** (`/support`) and submits a subject + initial message (`POST /api/platform/support/threads`, up to `5` open threads per user).
+1. **Thread Creation (`SupportView.tsx`)**: Any signed-in user (paid or unpaid) opens **Contact Admin** (`/support`) and submits a subject + initial message (`POST /api/platform/support/threads`, up to `5` open threads per user).
 2. **Admin Triage (`AdminSupportInbox.tsx`)**: Moderators/admins view open or closed threads in `/Admin456` → **Support** (`GET /api/platform/admin/support/threads`), open a thread (`GET /api/platform/admin/support/threads/{thread_id}`, clearing `admin_unread`), and reply (`POST /api/platform/admin/support/threads/{thread_id}/reply`), which logs an audit entry and pushes a live `support_reply` event over `/ws/e2ee`.
 3. **Status & Reopen**: Admins can mark threads `open` or `closed` (`POST /api/platform/admin/support/threads/{thread_id}/status`). A member replying to a closed thread automatically reopens it.

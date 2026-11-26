@@ -53,8 +53,8 @@
    - **1-to-1 & Multi-Device Private Chat**: Matrix Foundation **Vodozemac** (`@towns-protocol/vodozemac@0.1.0`) Olm v2 Double Ratchet (`X25519` + `Ed25519`), integrated `@username` directory, infinite cursor pagination (`after_seq`), 60-digit Safety Numbers, interactive Short Authentication Strings (SAS), opt-in read receipts, and peer blocking.
    - **Encrypted Group Chat**: **IETF RFC 9420 MLS** (`ts-mls@1.6.4`) TreeKEM ratcheting with strict pre-join secrecy (`epoch >= joined_epoch`), post-removal rekeying, optimistic concurrency (`HTTP 409` epoch reconciliation), **Leave Group**, integrated public group discovery & invite-code redemption, join-request queues, and server-enforced **Paid Group / Minimum ETH** access policies.
    - **Encrypted File Attachments & Local Vault**: On-device `AES-256-GCM` + `SHA-256` encrypted attachments (`e2eeAttachmentCrypto.ts`) with 14 MB limit, and non-extractable WebCrypto IndexedDB key storage (`e2eeVault.ts`) with inflight promise deduplication. (The paperclip attachment icon is hidden across all chats in the current UI via `canAttach = false` to keep conversations streamlined).
-9. **"Talk to Admin" Support Conversations (`/support`)**
-   - Dedicated **Support** tab (`/support`, `SupportView.tsx` + `SupportConversation.tsx`) with unread reply badge in the top navigation bar, allowing signed-in users (paid or unpaid) to open up to 5 concurrent support threads (`support_threads`, `support_messages`) and receive live `support_reply` notifications.
+9. **"Contact Admin" Support Conversations (`/support`)**
+   - Dedicated **Contact Admin** tab (`/support`, `SupportView.tsx` + `SupportConversation.tsx`) with unread reply badge in the top navigation bar, allowing signed-in users (paid or unpaid) to open up to 5 concurrent support threads (`support_threads`, `support_messages`) and receive live `support_reply` notifications.
    - Admins manage and reply to threads in the **Support Inbox** tab (`AdminSupportInbox.tsx`) of `/Admin456`.
 10. **Member-Gated Settings & Profile**
     - **Settings (`/settings`)**: Visible and accessible strictly to MetaMask-connected members from the top-right **Settings** button. Covers **Wallet & Membership** (RPC balance verify, verified payment totals & platform admission status), **Privacy & Security** (read receipts, presence visibility, enclave device vault shortcut), and **Blocked Accounts** (with one-click unblocking).
@@ -88,10 +88,11 @@ MetaMask_chatonly/
 │   ├── run_migrations.py        # Idempotent PostgreSQL migration runner & default settings seeder
 │   └── test_*.py                # 125 automated backend unit & end-to-end security integration tests (+1 live Neon test)
 ├── frontend/                    # React 19 + TypeScript + Tailwind CSS v4 + Vite 8 SPA
-│   ├── src/components/          # Responsive UI: WelcomeGate/Splash, Header, Chats, Payments, Support, Settings & /Admin456
+│   ├── public/favicon.svg       # Circular brass "Z" browser tab favicon
+│   ├── src/components/          # Responsive UI: WelcomeGate/Splash, Header, Messages, Membership, Contact Admin, Settings & /Admin456
 │   ├── src/services/            # SIWE, Web3, Payments, Pricing, Olm v2, RFC 9420 MLS, Vault, resilientFetch & API clients
 │   ├── vercel.json              # SPA route rewrite rules (/, /settings, /payments, /support, /Admin456)
-│   └── tests/                   # 43 automated Node.js cryptographic, vault & sync tests
+│   └── tests/                   # 48 automated Node.js cryptographic, vault, CSP, notification & sync tests
 └── docs/                        # Threat model, system architecture, API reference, and workflows
 ```
 

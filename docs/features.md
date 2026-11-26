@@ -103,7 +103,7 @@
   6. **Platform Settings**: Completely redesigned into 3 structured cards with 42px inputs and `align-items: start`: (1) **Usernames & Identity** (`username_cooldown_hours`, `username_quarantine_days`), (2) **Members' Room** (`public_chat_max_message_chars`, `public_chat_edit_window_minutes`, and `public_chat_retention_days` which broadcasts `public_policy_updated` live over WebSocket to all active rooms), and (3) **Membership, Pricing & Payments** (network segmented toggle for Mainnet/Sepolia, authorized treasury destination, monthly/yearly USD prices, and live/fixed ETH price oracle toggles).
   7. **Audit Logs**: Immutable chronological trail (`audit_logs`) tracking administrative actions, treasury destination modifications, payment verification/rejections, support replies/status updates, and moderation events. Sensitive cryptographic keys and private transaction data are never logged.
 
-## 10. "Talk to Admin" Support & Connection Resilience
+## 10. "Contact Admin" Support & Connection Resilience
 - **Member Support Threads (`/support`)**: Any authenticated user (paid or unpaid, so payment issues can always be reported) can start support conversations (`POST /api/platform/support/threads`, capped at `5` open threads per user), exchange replies, and track unread admin responses from the header badge; user replies automatically reopen closed threads.
 - **Cold-Start & Stale-Connection Recovery (`resilientFetch.ts`)**: Safe `GET`/`HEAD`/`OPTIONS` requests automatically retry transient `500`/`502`/`503`/`504` and network errors with jittered exponential backoff (`onWake` reconnects WebSockets on online/tab focus), while non-idempotent writes (`POST`/`PUT`/`PATCH`/`DELETE`) are never auto-retried to prevent duplicate sends.
 
