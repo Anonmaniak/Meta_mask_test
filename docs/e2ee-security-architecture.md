@@ -42,53 +42,9 @@ No custom encryption algorithms, homemade Diffie-Hellman handshakes, or static s
 | **Private 1-to-1 & Multi-Device Chats** | **Olm v2** (Signal 3DH Extended Triple Diffie-Hellman + Double Ratchet, `SessionConfigVersion.V2`) | [`@towns-protocol/vodozemac@0.1.0`](https://github.com/matrix-org/vodozemac) (Matrix Foundation Rust/WASM implementation, audited by Least Authority) + Python [`cryptography>=43.0.0`](https://cryptography.io/) (OpenSSL `Ed25519PublicKey`) on backend | X25519 (Curve25519 ECDH), Ed25519 (device identity signatures), HKDF-SHA256 ratchet KDF, authenticated symmetric encryption per ratchet step, Curve25519 + HKDF Short Authentication Strings (SAS) |
 | **Encrypted Group Conversations** | **IETF RFC 9420 Messaging Layer Security (MLS)** (`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`) | [`ts-mls@1.6.4`](https://github.com/LukaJCB/ts-mls) + [`@hpke/core@1.9.0`](https://github.com/dajiaji/hpke-js) backed by native WebCrypto (`SubtleCrypto`) | TreeKEM asynchronous ratcheting tree, RFC 9180 HPKE (`DHKEM(X25519, HKDF-SHA256)`), `AES-128-GCM` content AEAD, `SHA-256` transcript & tree hashing, `Ed25519` leaf & `KeyPackage` signatures |
 | **Encrypted File Attachments** | **Per-File Ephemeral AEAD + Content-Addressed Digest** | Native W3C WebCrypto (`crypto.subtle`) in [`e2eeAttachmentCrypto.ts`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/frontend/src/services/e2eeAttachmentCrypto.ts) | 256-bit `AES-256-GCM` with 96-bit CSPRNG IV, AAD context binding, and `SHA-256` ciphertext verification prior to decryption; file keys travel exclusively inside Olm v2 or MLS `PrivateMessage` ciphertexts |
-| **Global Envelope Channel** | **Multi-Recipient Wrapped Key + Cryptographic Envelope Hash Binding** | [`chatCrypto.ts`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/frontend/src/services/chatCrypto.ts) & [`chat_routes.py`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/backend/chat_routes.py) | Pairwise ECDH-P256 + HKDF key wrapping for registered room participants with single random 256-bit AES-GCM content key. Wallet signature cryptographically binds the complete envelope via a canonical SHA-256 digest |
+| **Open Public Chat** | **None (server-readable by design)** | A members-only room served over HTTPS/WSS; messages are stored readable by the server (see Section 6). | n/a |
 
 ---
-
-### 2.1 Global Chat Signature Integrity Binding
-
-To prevent tampering with ciphertexts, IVs, or recipient wrappers in transit, the Global Envelope channel implements cryptographic binding over the complete message envelope:
-
-1. **Canonical Representation**: Security-relevant fields (`message_id`, `sender` [normalized lowercase], `channel` / `room`, `timestamp`, `version`, `algorithm`, `key_version`, `content_iv`, `content_ciphertext`, and `recipients`) are assembled into a deterministic canonical structure.
-2. **Deterministic Ordering & Duplicate Rejection**:
-   - Duplicate recipient addresses are strictly rejected (`HTTP 400`).
-   - Recipient wrappers are sorted deterministically in lexicographical order by normalized recipient EVM address.
-3. **Canonical SHA-256 Hashing**:
-   - The canonical dictionary is serialized using RFC 8785 / JCS sorting (`sort_keys=True, separators=(',', ':')`).
-   - A `SHA-256` hash is computed over the canonical UTF-8 bytes.
-4. **EIP-191 Wallet Signature**:
-   - The exact message verified by the wallet signature binds the hash:
-     ```
-     zyphra.in Chat Message
-     Sender: 0x...
-     Message ID: msg_...
-     Room: global
-     Timestamp: 2026-11-10T...
-     Envelope Hash: <sha256_hex>
-     ```
-5. **Fail-Closed Backend Verification**:
-   - The backend independently reconstructs the canonical dictionary and computes the SHA-256 hash.
-   - Any tampering with ciphertext, IV, recipient wrappers, or metadata invalidates the recovered wallet address (`HTTP 401 Unauthorized`).
-   - Old/unhashed envelopes are rejected with `HTTP 400 Bad Request` requiring a client upgrade.
-   - If verification or hashing fails, the message is never stored or broadcast.
-6. **Authoritative Server UTC Timestamp & Decoupled Storage**:
-   - The signed client timestamp is preserved in `client_timestamp` solely for cryptographic signature verification and clock-skew replay validation (5-minute window).
-   - The server independently generates the authoritative UTC timestamp upon insertion (`created_at` / `server_timestamp`).
-   - Database queries order messages strictly by the server's creation timestamp (`ORDER BY created_at DESC`), guaranteeing feed ordering is immune to client clock manipulation.
-7. **Database Row Creation Detection & Duplicate Handling**:
-   - The persistence layer verifies that an `INSERT` statement actually created a row (using `rowcount` in SQLite and `RETURNING message_id` in PostgreSQL).
-   - Duplicate message IDs return `HTTP 409 Conflict` (or safely return the original message if `?idempotent=true` and verified exactly identical). Messages are never silently overwritten or reported as delivered if storage failed.
-8. **Request Size Limits, Safe Error Handling & Fail-Closed Broadcast**:
-   - Chat endpoints enforce a strict 128 KB request body ceiling (`HTTP 413 Payload Too Large`) at the ASGI layer to prevent oversized payload abuse.
-   - Database exceptions, table names, and internal tracebacks are strictly suppressed from client responses (`HTTP 500: Unable to save encrypted message`), with detailed stack traces recorded securely in server logs.
-   - Storage failures fail closed: WebSocket broadcast (`schedule_public_ws_broadcast`) and success responses are prevented if storage fails.
-9. **Frontend Failed-Send Handling & Absolute Plaintext Prohibition**:
-   - Messages are never displayed as delivered until server confirmation succeeds.
-   - If server rejection or storage failure occurs, messages enter an explicit "message was not sent" UI state with retry capabilities.
-   - Retries reuse the original safe encrypted payload if within the 5-minute freshness window, or re-encrypt using fresh keys.
-   - If recipient encryption keys are outdated, revoked, or unavailable, transmission is immediately stopped and a key refresh is requested. Plaintext fallback is strictly prohibited.
-
 
 ---
 
@@ -156,10 +112,10 @@ To prevent tampering with ciphertexts, IVs, or recipient wrappers in transit, th
 
 ## 6. Public Room Security Model (Section F)
 
-- The **Global Public Room** (`channel = "global"`) is **intentionally public and non-confidential**.
-- Its transport uses HTTPS/WSS and storage encryption at rest, and `GET /api/chat/public-security-model` plus response header `X-Chat-Room-Model: public-non-confidential`, the **`PUBLIC`** room badge, and a persistent UI notice in [`OpenPublicChatView`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/frontend/src/components/PlatformViews.tsx) (embedded in [`Chat.tsx`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/frontend/src/components/Chat.tsx)) explicitly inform users that any participant or moderator in the public directory may read public messages and server-side moderation applies.
-- Even where legacy public-room multi-recipient P-256 key wrapping is used on `channel = "global"`, the UI and documentation explicitly clarify that wrapping keys to a public room directory does **not** make a public room confidential, and that genuine E2EE in public rooms limits server-side search, automated abuse detection, and content moderation.
-- Non-`global` channels are strictly blocked (`403 Forbidden`) on `/api/chat/messages`.
+- **Open Public Chat** is **intentionally not confidential**: it is a members-only room (paid members only) whose messages the server can read, moderate (delete) and retain for the admin-set retention period.
+- Its transport uses HTTPS/WSS and storage encryption at rest, and the UI marks the room with a **`PUBLIC`** badge so nobody mistakes it for a private chat.
+- Anything private must go through the end-to-end encrypted Private Chats (Olm) or Groups (MLS), whose plaintext the server never sees.
+- (The older multi-recipient "global envelope" channel and its `/api/chat/*` endpoints were removed.)
 
 ---
 
@@ -184,7 +140,7 @@ Because E2EE encrypts content rather than providing mixnet/onion anonymous routi
 ## 8. Secure Storage, Transport & XSS Controls (Section H)
 
 - **Transport**: Enforces HTTPS (`Strict-Transport-Security` when served over TLS) and authenticated WebSockets (`/ws/e2ee`). Session tokens are never sent in URL query parameters; WebSockets authenticate via `HttpOnly` cookie (`SameSite=Strict` on HTTPS) or a first-frame JSON `{ "type": "auth", "token": "..." }` message.
-- **Session Tokens at Rest**: Raw user session tokens (`zys_...`) are held only in client JS memory / `HttpOnly` cookie, and the database stores only `SHA-256(token)`. Standalone `/Admin456` admin console sessions ([`admin_auth.py`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/backend/admin_auth.py)) likewise store only `SHA-256(token)` in server memory (30-min idle / 4-hour absolute TTL) after constant-time credential verification and per-IP/global brute-force lockout checks, and never grant access to E2EE private keys or message plaintexts.
+- **Session Tokens at Rest**: Raw user session tokens (`zys_...`) are held only in client JS memory / `HttpOnly` cookie, and the database stores only `SHA-256(token)`. Standalone `/Admin456` admin console sessions ([`admin_auth.py`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/backend/admin_auth.py)) likewise store only `SHA-256(token)` in server memory (30-min idle / 4-hour absolute TTL) after constant-time credential verification and the global failed-login slowdown, and never grant access to E2EE private keys or message plaintexts.
 - **Database Encryption at Rest**: Neon PostgreSQL connections enforce TLS (`sslmode=require`) and cloud volume encryption at rest as defense-in-depth (never as a substitute for client-side E2EE).
 - **XSS & Browser Hardening**:
   - React JSX automatic escaping (zero `dangerouslySetInnerHTML` in chat views).
@@ -216,44 +172,3 @@ Because E2EE encrypts content rather than providing mixnet/onion anonymous routi
 - Conversely, holding a high ETH balance, paying the platform admission fee, or qualifying for a paid group **never** grants API or cryptographic access to another user's DMs or to an encrypted group without an explicit MLS `Add` Commit + `Welcome` from an active group member.
 
 ---
-
-## 12. Global Public Room Cryptographic Envelope & Strict Schema Validation
-
-Although the Global Public Room is explicitly non-confidential, it enforces strict cryptographic envelope integrity, authentication, and validation controls:
-
-1. **Protocol Version & Fallback**:
-   - `version: 1` is strictly enforced.
-   - Any message with an unsupported or future version is rejected with HTTP 400/422 and a clear `Client update required: protocol version X is not supported` error, preventing insecure compatibility fallbacks.
-2. **Exact Algorithm Identifier**:
-   - Strictly validates `algorithm == "ECDH-P256-HKDF-AES-GCM-256"`. Any unknown or mismatched algorithm is rejected.
-3. **Key Format Version**:
-   - Strictly validates `key_version == 1`.
-4. **Base64url Encoding & IV Length Validation**:
-   - `content_iv` and all recipient wrapper `iv` fields must be valid base64url strings decoding to **strictly 12 bytes** (96 bits) for AES-GCM.
-   - Malformed base64url characters (`+`, `/`, whitespace, newlines, illegal padding) and invalid lengths (`len % 4 == 1`) fail closed with validation errors.
-5. **Ciphertext Size Safeguards**:
-   - `content_ciphertext` must be valid base64url with a decoded byte length between 16 bytes (AES-GCM 128-bit authentication tag minimum) and 65,536 bytes (64 KB safe payload ceiling).
-   - Recipient `wrappedKey` must decode to between 32 and 256 bytes.
-6. **Recipient Wrapper & Key Directory Verification**:
-   - Recipient addresses must be valid, normalized EVM checksummed addresses.
-   - Duplicate recipient addresses are rejected (case-insensitive check).
-   - The sender address must be included in the recipient wrappers to guarantee self-decryption capability.
-   - For every recipient in the public room, the server queries `chat_db` to confirm:
-     - The recipient has an active registered encryption key in the directory (`status == "active"`).
-     - The submitted `keyFingerprint` matches the authoritative registered public key fingerprint in the database.
-     - Unknown, inactive, or mismatched recipient keys are rejected with HTTP 400.
-7. **Canonical Envelope Hashing & EIP-191 Wallet Signature**:
-   - Deterministic RFC 8785 canonical JSON serialization of 10 envelope fields sorted lexicographically.
-   - EIP-191 wallet signature cryptographically binds the SHA-256 envelope hash.
-   - Unhashed legacy envelopes are rejected with an explicit client upgrade error.
-8. **Duplicate Insertion & Safe Error Handling**:
-   - Database row-creation detection returns HTTP 409 Conflict for duplicate message IDs unless `idempotent=true` and the existing envelope is verified byte-for-byte identical.
-   - Database exceptions return a generic safe error (`HTTP 500: Unable to save encrypted message`) without exposing database connection strings, credentials, or internal schema details.
-
-
-1. **Web Application Asset Delivery Risk**: Unlike compiled mobile/desktop apps pinned via OS app stores and binary transparency logs, a web browser fetches HTML/JS/WASM on load. A compromised hosting origin or CDN could attempt to serve modified JS to exfiltrate keys upon next load. Production deployments should add **Subresource Integrity (SRI)** hashes, immutable CDN artifact signing, or packaged desktop/browser-extension builds.
-2. **Browser Same-Origin XSS Surface**: Although local keys use a non-extractable WebCrypto master wrapping key (`extractable: false`) and strict CSP, an active same-origin XSS vulnerability executing inside the unlocked app context could still invoke vault decryption APIs during that session. Strict CSP, dependency auditing, and zero unsafe DOM sinks must be continuously enforced.
-3. **Classical Elliptic-Curve Security (Pre-Post-Quantum)**: Both Olm v2 (`X25519` + `Ed25519`) and MLS ciphersuite `0x0001` (`DHKEM(X25519)`) rely on classical elliptic curves rather than hybrid post-quantum KEMs (such as Signal's PQXDH/SPQR or MLS `X-Wing` hybrid ciphersuites). Migrating to hybrid PQ ciphersuites is recommended as standardized browser/WASM support matures.
-4. **Group Metadata Visibility**: The server stores the MLS group membership roster (`user_id`s) to enforce delivery authorization and block unauthorized ciphertext scraping; anonymous/sealed-sender delivery and MLS `PublicMessage` metadata hiding (`PrivateMessage` is used for messages, while membership roster is server-tracked) remain subject to traffic analysis by a global network observer.
-5. **Independent Security Review Required**: Automated unit and integration tests (`frontend/tests/*.node.test.ts` — 43 tests; `backend/test_*.py` — 132 tests including `test_chat_e2ee.py`, `test_e2ee_security.py`, `test_platform_features.py`, and `test_admin_login.py`) verify protocol wiring and access controls, but **do not replace an independent cryptographic and penetration audit**. Do not advertise formal audit equivalence until such a review is completed and remediated.
-

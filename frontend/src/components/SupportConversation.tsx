@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { friendlyError } from '../services/friendlyError';
 import { Send, Loader2 } from 'lucide-react';
 import type { SupportMessage } from '../services/platformApi';
 
@@ -48,7 +49,7 @@ export const SupportConversation: React.FC<SupportConversationProps> = ({
       await onSend(trimmed);
       setText('');
     } catch (err: any) {
-      setError(err?.message || 'Could not send your message. Please try again.');
+      setError(friendlyError(err, 'Could not send your message. Please try again.'));
     } finally {
       setSending(false);
     }
@@ -90,7 +91,7 @@ export const SupportConversation: React.FC<SupportConversationProps> = ({
               <div
                 style={{
                   marginTop: 3,
-                  fontSize: '0.68rem',
+                  fontSize: '0.86rem',
                   color: 'var(--text-muted)',
                   textAlign: mine ? 'right' : 'left',
                 }}
@@ -105,7 +106,7 @@ export const SupportConversation: React.FC<SupportConversationProps> = ({
       </div>
 
       {error && (
-        <div role="alert" style={{ fontSize: '0.8rem', marginBottom: 6 }}>
+        <div role="alert" style={{ fontSize: '0.9rem', marginBottom: 6 }}>
           {error}
         </div>
       )}

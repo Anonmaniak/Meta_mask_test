@@ -1,6 +1,6 @@
 /* ==========================================================================
    Zyphra.in first-visit welcome splash
-   Always black / white (independent of the light/dark theme toggle).
+   Always deep green and brass (independent of the light/dark theme toggle).
    Timeline (ms):  300 point lights  ·  500 pulse starts  ·  1100 headline
                    2000 subline  ·  2700 caption  ·  4800 fade out
    ========================================================================== */
@@ -12,8 +12,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #000;
-  color: #fff;
+  background: radial-gradient(900px 600px at 50% 38%, #14302a 0%, #0a1814 62%, #07110e 100%);
+  color: #c9a86a;
+  /* the dot field reads this as its point colour */
   opacity: 1;
   transition: opacity 650ms cubic-bezier(0.4, 0, 0.2, 1);
   cursor: pointer;
@@ -46,24 +47,24 @@
 
 .zws__caption {
   margin: 14px 0 0;
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'Hanken Grotesk Variable', 'Hanken Grotesk', system-ui, sans-serif;
   font-size: 13px;
   font-weight: 400;
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
-  color: #8a8a8a;
+  color: #8fa196;
   opacity: 0;
   animation: zws-fade 700ms ease 2700ms forwards;
 }
 
 .zws__headline {
   margin: clamp(22px, 5vh, 40px) 0 0;
-  font-family: 'Outfit', 'Inter', system-ui, sans-serif;
-  font-size: clamp(30px, 7vw, 64px);
-  font-weight: 700;
+  font-family: 'Hanken Grotesk Variable', 'Hanken Grotesk', system-ui, sans-serif;
+  font-size: clamp(34px, 7vw, 72px);
+  font-weight: 600;
   line-height: 1.05;
-  letter-spacing: -0.035em;
-  color: #fff;
+  letter-spacing: -0.02em;
+  color: #f3ecd6;
 }
 
 /* left-to-right wipe: the single orchestrated reveal */
@@ -75,11 +76,11 @@
 
 .zws__subline {
   margin: 14px 0 0;
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'Hanken Grotesk Variable', 'Hanken Grotesk', system-ui, sans-serif;
   font-size: clamp(16px, 2.4vw, 22px);
   font-weight: 400;
   letter-spacing: 0.005em;
-  color: #fff;
+  color: #d9cfa8;
   opacity: 0;
   animation: zws-fade 800ms ease 2000ms forwards;
 }
@@ -90,10 +91,11 @@
   bottom: max(20px, env(safe-area-inset-bottom, 0px));
   appearance: none;
   background: transparent;
-  color: #9a9a9a;
-  border: 1px solid #2f2f2f;
-  padding: 8px 16px;
-  font-family: 'Inter', system-ui, sans-serif;
+  color: #a9b8ae;
+  border: 1px solid rgba(201, 168, 106, 0.3);
+  border-radius: 9999px;
+  padding: 9px 20px;
+  font-family: 'Hanken Grotesk Variable', 'Hanken Grotesk', system-ui, sans-serif;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -101,14 +103,14 @@
 }
 
 .zws__skip:hover {
-  color: #fff;
-  border-color: #fff;
+  color: #f3ecd6;
+  border-color: #c9a86a;
 }
 
 .zws__skip:focus-visible {
-  outline: 2px solid #fff;
+  outline: 2px solid #c9a86a;
   outline-offset: 2px;
-  color: #fff;
+  color: #f3ecd6;
 }
 
 @keyframes zws-wipe {

@@ -99,8 +99,8 @@ sequenceDiagram
    - Alice relays ciphertexts via `POST /api/e2ee/dm/messages`, which are delivered in real time over `/ws/e2ee`.
 4. **Infinite Message Cursor Pagination**:
    - Conversations fetch messages using cursor pagination (`after_seq`, `limit=100`) in a loop until the full backlog is loaded, ensuring conversations scale past 60 messages with zero truncation.
-5. **Safety Numbers & Read Receipts**:
-   - Alice and Bob verify their deterministic 60-digit Safety Number or interactive SAS emoji/digit check in `SafetyNumberModal`.
+5. **Read Receipts**:
+   - Key verification is not shown to members. Device changes are still recorded in the background (`evaluateAndRecordPeerTrust`).
    - When enabled, `POST /api/platform/dm/read-receipt` updates delivery watermarks (`last_read_seq`).
 
 ---
@@ -122,7 +122,12 @@ Groups are created and managed directly inside the **Chats** console.
 4. **1-Click MLS Onboarding**:
    - Group Admin reviews applicants in **Group Security & Policy → Join Requests** and clicks **Approve & Add**.
    - The admin's client claims the applicant's single-use MLS `KeyPackage`, executes an RFC 9420 `Add` Commit, and uploads the welcome bundle.
-5. **Member Removal or Self-Leave**:
+5. **Accept / Reject when an admin adds someone**:
+   - An admin's `Add` Commit for someone who did not ask to join saves them as `invited`; the server holds their Welcome and sends a `group_invitation` event.
+   - The invited member sees the invitation in the Groups list (and a pop-up) with **Accept** / **Reject**.
+   - Accept (`POST /api/e2ee/groups/{group_id}/invitation/accept`) makes them `active`; their device then picks up the Welcome and the group opens.
+   - Reject (`POST /api/e2ee/groups/{group_id}/invitation/decline`) marks them `declined` and deletes the Welcome. The admin can invite them again later, and can cancel an open invitation with **Cancel invite**.
+6. **Member Removal or Self-Leave**:
    - Group admin removal submits an MLS `Remove` Commit advancing TreeKEM path secrets to guarantee **post-removal secrecy**.
    - Members can leave at any time via `POST /api/platform/groups/{group_id}/leave`, which safely clears local vault state and purges unconsumed welcomes.
 
@@ -171,7 +176,7 @@ sequenceDiagram
 1. **Isolated Route Gate**: Navigating directly to `/Admin456` mounts `AdminPortal.tsx` (marked `noindex, nofollow` and unlinked from the public header). No admin dashboard UI or `/api/platform/admin/*` data requests are issued until authentication succeeds.
 2. **Hardened Server-Side Verification**:
    - Submitting the login form calls `POST /api/platform/admin/login` (`extra="forbid"`).
-   - `admin_auth.py` checks per-IP (`5` failures -> `15`-min `429` lockout) and brute-force limits, then compares `SHA-256` digests of both `login_id` and `password` in constant time (`hmac.compare_digest`) against `ADMIN_LOGIN_ID` and `ADMIN_LOGIN_PASSWORD` from `backend/.env` (`503` if unset; fixed delay + generic `"Invalid credentials"` on mismatch; zero SQL executed).
+   - `admin_auth.py` applies the global failure slowdown (no IPs, no lockout) and the cap on simultaneous attempts, then compares `SHA-256` digests of both `login_id` and `password` in constant time (`hmac.compare_digest`) against `ADMIN_LOGIN_ID` and `ADMIN_LOGIN_PASSWORD` from `backend/.env` (`503` if unset; fixed delay + generic `"Invalid credentials"` on mismatch; zero SQL executed).
 3. **Ephemeral Session & Sign Out**:
    - On success, the backend issues a 256-bit random token stored in server memory solely as `SHA-256(token)` with a `30`-minute idle timeout and `4`-hour absolute TTL.
    - The client keeps the token in `sessionStorage` (`zyphra_admin_session`, cleared on tab close), re-validates on reload via `GET /api/platform/admin/session`, attaches `X-Admin-Token` on admin API calls, and revokes immediately via `POST /api/platform/admin/logout` on **Sign Out**.

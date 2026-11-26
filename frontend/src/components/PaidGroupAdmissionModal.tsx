@@ -4,9 +4,11 @@ import {
   submitPaymentForVerification,
   requestJoinPublicGroup,
   type GroupPricing,
+  type BillingPeriod,
 } from '../services/platformApi';
 import { isMetaMaskInstalled } from '../services/web3';
 import { X, Users, Loader2, AlertCircle, CheckCircle2, Wallet } from 'lucide-react';
+import { PricingModalSkeleton } from './Skeleton';
 
 interface PaidGroupAdmissionModalProps {
   groupId: string | null;
@@ -15,6 +17,8 @@ interface PaidGroupAdmissionModalProps {
   onClose: () => void;
   walletAddress: string | null;
   onSuccess: () => void;
+  /** Opened from "Renew" for a group the member is already in. */
+  renewing?: boolean;
 }
 
 const CHAIN_NAMES: Record<number, string> = { 1: 'Ethereum Mainnet', 11155111: 'Sepolia (test network)' };
@@ -25,7 +29,8 @@ const QUOTE_REFRESH_MS = 30000;
 type Phase = 'quote' | 'wallet' | 'confirming' | 'success';
 
 const pendingKey = (addr: string, groupId: string) => `zyphra_pending_group_tx:${addr.toLowerCase()}:${groupId}`;
-function readPending(addr: string, groupId: string): { hash: string; chainId: number } | null {
+type PendingTx = { hash: string; chainId: number; period?: BillingPeriod };
+function readPending(addr: string, groupId: string): PendingTx | null {
   try {
     const raw = localStorage.getItem(pendingKey(addr, groupId));
     return raw ? JSON.parse(raw) : null;
@@ -33,7 +38,7 @@ function readPending(addr: string, groupId: string): { hash: string; chainId: nu
     return null;
   }
 }
-function writePending(addr: string, groupId: string, value: { hash: string; chainId: number } | null) {
+function writePending(addr: string, groupId: string, value: PendingTx | null) {
   try {
     if (value) localStorage.setItem(pendingKey(addr, groupId), JSON.stringify(value));
     else localStorage.removeItem(pendingKey(addr, groupId));
@@ -52,7 +57,9 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
   onClose,
   walletAddress,
   onSuccess,
+  renewing = false,
 }) => {
+  const [period, setPeriod] = useState<BillingPeriod>('monthly');
   const [pricing, setPricing] = useState<GroupPricing | null>(null);
   const [loading, setLoading] = useState(true);
   const [phase, setPhase] = useState<Phase>('quote');
@@ -75,7 +82,7 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
   }, [groupId]);
 
   const confirmPayment = useCallback(
-    async (hash: string, chainId: number) => {
+    async (hash: string, chainId: number, billingPeriod: BillingPeriod = 'monthly') => {
       if (!walletAddress || !groupId) return;
       setPhase('confirming');
       setTxHash(hash);
@@ -83,13 +90,15 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
       let lastReason = '';
       while (aliveRef.current && Date.now() - startedAt < POLL_FOR_MS) {
         try {
-          const res = await submitPaymentForVerification(hash, chainId, 'group_entry', groupId);
+          const res = await submitPaymentForVerification(hash, chainId, 'group_entry', groupId, billingPeriod);
           if (res.success && res.status === 'verified') {
             writePending(walletAddress, groupId, null);
             // Paid: ask to join straight away so the user does not have to hunt for another button.
             try {
-              await requestJoinPublicGroup(groupId);
-              if (aliveRef.current) setJoinNote('Your join request was sent to the group admins.');
+              const joined = await requestJoinPublicGroup(groupId);
+              if (joined.status === 'already_member') {
+                if (aliveRef.current) setJoinNote('Your subscription has been extended.');
+              } else if (aliveRef.current) setJoinNote('Your join request was sent to the group admins.');
             } catch (joinErr: any) {
               if (aliveRef.current) {
                 setJoinNote(
@@ -163,7 +172,10 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
     });
     if (walletAddress) {
       const pending = readPending(walletAddress, groupId);
-      if (pending) void confirmPayment(pending.hash, pending.chainId);
+      if (pending) {
+        setPeriod(pending.period || 'monthly');
+        void confirmPayment(pending.hash, pending.chainId, pending.period || 'monthly');
+      }
     }
     const refresh = setInterval(() => {
       if (!busyRef.current && aliveRef.current) void loadPricing();
@@ -194,8 +206,9 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
         throw new Error('The payment address is not configured yet. Please contact the administrator.');
       }
       if (!fresh.is_paid) throw new Error('This group is free now. Close this window and request to join.');
-      const valueWei = BigInt(fresh.entry_fee_wei || '0');
-      if (valueWei <= 0n) throw new Error('This group has no entry price set.');
+      const plan = fresh.plans?.[period];
+      const valueWei = BigInt(plan?.wei || fresh.entry_fee_wei || '0');
+      if (valueWei <= 0n) throw new Error('This group has no price set.');
 
       const ethereum = (window as any).ethereum;
       setPhase('wallet');
@@ -220,7 +233,7 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
         const balHex: string = await ethereum.request({ method: 'eth_getBalance', params: [walletAddress, 'latest'] });
         if (BigInt(balHex) < valueWei) {
           throw new Error(
-            `Not enough ETH on ${CHAIN_NAMES[chainId] || `chain ${chainId}`}: you need ${fresh.entry_fee_eth} ETH plus the network fee.`
+            `Not enough ETH on ${CHAIN_NAMES[chainId] || `chain ${chainId}`}: you need ${plan?.eth ?? fresh.entry_fee_eth} ETH plus the network fee.`
           );
         }
       } catch (balErr) {
@@ -231,8 +244,8 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
         method: 'eth_sendTransaction',
         params: [{ from: walletAddress, to: fresh.authorized_payment_destination, value: '0x' + valueWei.toString(16) }],
       });
-      writePending(walletAddress, groupId, { hash, chainId });
-      await confirmPayment(hash, chainId);
+      writePending(walletAddress, groupId, { hash, chainId, period });
+      await confirmPayment(hash, chainId, period);
     } catch (err: any) {
       setPhase('quote');
       if (err?.code === 4001) setError('You cancelled the payment in MetaMask.');
@@ -243,40 +256,40 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
   };
 
   const working = phase === 'wallet' || phase === 'confirming';
-  const feeUsd = pricing ? usd(pricing.entry_fee_usd) : null;
+  const plan = pricing?.plans?.[period];
+  const feeUsd = plan ? usd(plan.usd) : pricing ? usd(pricing.entry_fee_usd) : null;
+  const feeEth = plan?.eth ?? pricing?.entry_fee_eth ?? '';
+  const monthlyUsd = pricing?.plans?.monthly.usd ?? 0;
+  const yearlyUsd = pricing?.plans?.yearly.usd ?? 0;
+  const yearlySavingPct = monthlyUsd > 0 && yearlyUsd < monthlyUsd * 12
+    ? Math.round((1 - yearlyUsd / (monthlyUsd * 12)) * 100)
+    : 0;
 
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="group-admission-title"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        backgroundColor: 'rgba(0,0,0,0.78)',
-        backdropFilter: 'blur(6px)',
-        zIndex: 9999,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '1rem',
-      }}
+      className="chat-action-modal-backdrop"
+      style={{ zIndex: 9999 }}
     >
       <div
         style={{
           width: '100%',
-          maxWidth: '460px',
+          maxWidth: '500px',
           background: 'var(--bg-card)',
           color: 'var(--text-main)',
-          borderRadius: '16px',
+          borderRadius: '26px',
           border: '1px solid var(--border-strong)',
-          boxShadow: 'var(--shadow-console)',
+          boxShadow: 'var(--shadow-pop)',
           overflow: 'hidden',
+          maxHeight: '94dvh',
+          overflowY: 'auto',
         }}
       >
         <div
           style={{
-            padding: '1.1rem 1.4rem',
+            padding: '1.4rem 1.7rem',
             borderBottom: '1px solid var(--border-subtle)',
             display: 'flex',
             alignItems: 'center',
@@ -284,13 +297,13 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.7rem', minWidth: 0 }}>
-            <Users size={20} />
+            <Users size={24} style={{ color: 'var(--accent)' }} />
             <div style={{ minWidth: 0 }}>
-              <h3 id="group-admission-title" style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>
-                Join {groupName || 'this group'}
+              <h3 id="group-admission-title" style={{ margin: 0, fontSize: '1.55rem', fontWeight: 500, letterSpacing: '-0.015em' }}>
+                {renewing ? 'Renew' : 'Join'} {groupName || 'this group'}
               </h3>
-              <p style={{ margin: 0, fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                One-time entry fee, paid in ETH
+              <p style={{ margin: '2px 0 0', fontSize: '0.92rem', color: 'var(--text-secondary)' }}>
+                Group subscription paid in ETH: monthly or yearly
               </p>
             </div>
           </div>
@@ -311,18 +324,15 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
           </button>
         </div>
 
-        <div style={{ padding: '1.4rem', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+        <div style={{ padding: '1.7rem', display: 'flex', flexDirection: 'column', gap: '1.3rem' }}>
           {loading && !pricing ? (
-            <div style={{ textAlign: 'center', padding: '1.5rem 0' }}>
-              <Loader2 size={26} className="wg__spin" />
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>Getting today&apos;s price...</p>
-            </div>
+            <PricingModalSkeleton />
           ) : phase === 'success' ? (
             <div style={{ textAlign: 'center', padding: '1rem 0' }}>
-              <CheckCircle2 size={44} />
-              <h4 style={{ margin: '0.7rem 0 0.2rem', fontSize: '1.1rem' }}>Payment confirmed</h4>
+              <CheckCircle2 size={52} style={{ color: 'var(--ok)' }} />
+              <h4 style={{ margin: '0.8rem 0 0.3rem', fontSize: '1.5rem', fontWeight: 500 }}>Payment confirmed</h4>
               <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
-                {joinNote || 'Your entry fee is paid.'}
+                {joinNote || (renewing ? 'Your group subscription has been extended.' : 'Your group payment is confirmed.')}
               </p>
             </div>
           ) : (
@@ -330,24 +340,54 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
               {pricing && (
                 <div
                   style={{
-                    border: '1px solid var(--border-strong)',
-                    borderRadius: 12,
-                    padding: '1rem 1.1rem',
-                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 20,
+                    padding: '1.3rem',
+                    background: 'var(--bg-input)',
                   }}
                 >
-                  <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Entry fee</div>
+                  <div role="radiogroup" aria-label="Billing period" className="plan-grid" style={{ marginBottom: 18 }}>
+                    {(['monthly', 'yearly'] as BillingPeriod[]).map((p) => {
+                      const selected = period === p;
+                      const amount = p === 'monthly' ? monthlyUsd : yearlyUsd;
+                      return (
+                        <button
+                          key={p}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          disabled={working}
+                          className="plan-card"
+                          onClick={() => setPeriod(p)}
+                        >
+                          <span className="plan-card__name">
+                            {p === 'monthly' ? 'Monthly' : 'Yearly'}
+                            {p === 'yearly' && yearlySavingPct > 0 && (
+                              <span className="plan-card__save">Save {yearlySavingPct}%</span>
+                            )}
+                          </span>
+                          <span className="plan-card__price">
+                            ${usd(amount)}
+                            <small> / {p === 'monthly' ? 'month' : 'year'}</small>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                    You pay now ({period === 'monthly' ? '30 days' : '365 days'} in this group)
+                  </div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 4, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: '2rem', fontWeight: 700, fontFamily: "'Outfit', sans-serif" }}>
+                    <span style={{ fontSize: '2.7rem', fontWeight: 500, fontFamily: 'var(--font-display)', letterSpacing: '-0.02em', lineHeight: 1 }}>
                       ${feeUsd}
                     </span>
-                    <span style={{ fontSize: '1.05rem', fontFamily: 'ui-monospace, monospace' }}>
-                      = {pricing.entry_fee_eth} ETH
+                    <span style={{ fontSize: '1.15rem', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
+                      = {feeEth} ETH
                     </span>
                   </div>
-                  <div style={{ marginTop: 6, fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                  <div style={{ marginTop: 10, fontSize: '0.86rem', color: 'var(--text-muted)' }}>
                     1 ETH = ${usd(pricing.eth_usd_price)} ·{' '}
-                    {pricing.rate_source === 'admin_fixed' ? 'Fixed rate set by the admin' : 'Live market rate'}. The
+                    {pricing.rate_source === 'admin_fixed' ? 'Fixed rate' : 'Live market rate'}. The
                     price refreshes automatically.
                   </div>
                 </div>
@@ -363,7 +403,7 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
                         style={{
                           marginTop: 4,
                           fontFamily: 'ui-monospace, monospace',
-                          fontSize: '0.76rem',
+                          fontSize: '0.86rem',
                           color: 'var(--text-secondary)',
                         }}
                       >
@@ -381,10 +421,12 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
                     display: 'flex',
                     gap: 8,
                     alignItems: 'flex-start',
-                    border: '1px solid var(--border-focus)',
-                    borderRadius: 10,
-                    padding: '0.7rem 0.85rem',
-                    fontSize: '0.85rem',
+                    border: '1px solid color-mix(in srgb, var(--danger) 35%, transparent)',
+                    background: 'var(--danger-soft)',
+                    color: 'var(--danger)',
+                    borderRadius: 14,
+                    padding: '0.8rem 1rem',
+                    fontSize: '0.92rem',
                     lineHeight: 1.45,
                   }}
                 >
@@ -399,7 +441,7 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
                   className="btn-solid"
                   onClick={handlePay}
                   disabled={working || !pricing}
-                  style={{ justifyContent: 'center', padding: '0.8rem 1rem', borderRadius: 9999, gap: 8 }}
+                  style={{ justifyContent: 'center', padding: '1rem 1.2rem', fontSize: '1.02rem', gap: 10 }}
                 >
                   {phase === 'wallet' ? (
                     <>
@@ -407,7 +449,7 @@ export const PaidGroupAdmissionModal: React.FC<PaidGroupAdmissionModalProps> = (
                     </>
                   ) : (
                     <>
-                      <Wallet size={16} /> Pay {pricing ? `$${feeUsd} (${pricing.entry_fee_eth} ETH)` : ''}
+                      <Wallet size={16} /> Pay {pricing ? `$${feeUsd} (${feeEth} ETH)` : ''}
                     </>
                   )}
                 </button>

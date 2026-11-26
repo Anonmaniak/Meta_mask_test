@@ -1,0 +1,20 @@
+{
+  // Type settings for the unit tests in this folder (run with `npm test`, in Node).
+  // Without this file the editor checks tests with defaults that do not know Node's
+  // built-in modules such as 'node:test' and 'node:assert/strict'.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node", "vite/client"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["./**/*.ts"]
+}

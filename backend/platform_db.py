@@ -18,6 +18,7 @@ import sqlite3
 import logging
 import threading
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Optional, List, Dict, Any, Tuple, Union
 from web3 import Web3
 
@@ -45,22 +46,31 @@ DEFAULT_PLATFORM_SETTINGS: Dict[str, Any] = {
     "public_chat_retention_days": 90,
     "username_cooldown_hours": 24,
     "username_reservation_days": 30,
-    "balance_reeval_minutes": 30,
-    "default_balance_chain_id": int(os.getenv("EXPECTED_CHAIN_ID") or 11155111),
-    "authorized_payment_destination": os.getenv("AUTHORIZED_PAYMENT_DESTINATION") or "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+    # ---- Managed ONLY from the Admin console (/Admin456) -- no environment variables. ----
+    # These are first-boot defaults for a brand-new database; after that the database value rules.
+    # Active network: 1 = Ethereum Mainnet, 11155111 = Sepolia (testing). Payments are accepted
+    # ONLY on this network (see get_allowed_payment_chain_ids).
+    "default_balance_chain_id": 11155111,
+    # Where membership / group payments are sent. Deliberately EMPTY until the admin sets it:
+    # payments fail closed (nobody can pay) rather than going to a hardcoded address.
+    "authorized_payment_destination": None,
+    # Kept only so old databases/clients do not break; no longer used (the active network above decides).
     "allowed_payment_chain_ids": [1, 11155111],
-    # Membership price is set in USD by the admin and converted to ETH at the live rate.
-    # Production default is $10. Automated tests default to $0 (free) so they can focus on
-    # other features; paywall tests switch it on explicitly.
-    "platform_entry_fee_usd": os.getenv(
-        "PLATFORM_ENTRY_FEE_USD",
-        "0" if (os.getenv("TESTING") == "1" or "unittest" in sys.modules or "pytest" in sys.modules) else "10",
-    ),
+    # Membership price in USD, converted to ETH at the live rate. 0 = free until the admin sets a price.
+    "platform_entry_fee_usd": "0",   # MONTHLY membership price in USD
+    # YEARLY membership price in USD. "0" = automatic (12 x the monthly price). Members choose monthly or yearly.
+    "platform_yearly_fee_usd": "0",
     "use_live_eth_price": True,
     # Fixed ETH/USD rate: used when live pricing is off or every live source is unreachable.
     "eth_usd_price": float(os.getenv("ETH_USD_PRICE", "2500.0")),
     # Legacy (ETH-denominated) fee. Kept for old databases; no longer used for pricing.
     "platform_entry_fee_eth": os.getenv("PLATFORM_ENTRY_FEE_ETH", "0.01"),
+    # Banner at the top of the app for everyone ("Maintenance Sunday 10 pm"). Empty text = no banner.
+    # announcement_id changes whenever the text changes, so members who closed the old one see the new one.
+    "announcement_text": "",
+    "announcement_level": "info",  # 'info' | 'warning'
+    "announcement_id": "",
+    "announcement_ends_at": "",  # ISO time after which it is hidden; "" = until removed
 }
 
 
@@ -126,6 +136,11 @@ def ensure_platform_tables() -> None:
                     "006_paid_membership_and_groups.sql",
                     "007_group_entry_fee_usd.sql",
                     "008_support_threads.sql",
+                    "009_member_subscriptions.sql",
+                    "011_public_chat_attachments.sql",
+                    "013_public_chat_replies.sql",
+                    "014_access_grants.sql",
+                    "015_audit_entity_id_length.sql",
                 ):
                     mig_path = os.path.join(mig_dir, mig_file)
                     if os.path.exists(mig_path):
@@ -165,6 +180,7 @@ def ensure_platform_tables() -> None:
         _sqlite_add_col_safe(cur, "group_access_policies", "is_paid INTEGER NOT NULL DEFAULT 0")
         _sqlite_add_col_safe(cur, "group_access_policies", "entry_fee_eth TEXT NOT NULL DEFAULT '0'")
         _sqlite_add_col_safe(cur, "group_access_policies", "entry_fee_usd TEXT NOT NULL DEFAULT '0'")
+        _sqlite_add_col_safe(cur, "group_access_policies", "entry_fee_yearly_usd TEXT NOT NULL DEFAULT '0'")
         _sqlite_add_col_safe(cur, "group_access_policies", "entry_fee_wei TEXT NOT NULL DEFAULT '0'")
 
         cur.executescript("""
@@ -238,7 +254,8 @@ def ensure_platform_tables() -> None:
                 edited_at TEXT,
                 deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_by TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                reply_to_message_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS group_access_policies (
@@ -252,6 +269,7 @@ def ensure_platform_tables() -> None:
                 is_paid INTEGER NOT NULL DEFAULT 0,
                 entry_fee_eth TEXT NOT NULL DEFAULT '0',
                 entry_fee_usd TEXT NOT NULL DEFAULT '0',
+                entry_fee_yearly_usd TEXT NOT NULL DEFAULT '0',
                 entry_fee_wei TEXT NOT NULL DEFAULT '0',
                 updated_by TEXT,
                 updated_at TEXT NOT NULL
@@ -374,10 +392,37 @@ def ensure_platform_tables() -> None:
             CREATE INDEX IF NOT EXISTS idx_payment_records_recipient ON payment_records(recipient_address);
             CREATE INDEX IF NOT EXISTS idx_payment_records_purpose_target ON payment_records(purpose, target_id);
             CREATE INDEX IF NOT EXISTS idx_group_policies_is_paid ON group_access_policies(is_paid);
+
+            CREATE TABLE IF NOT EXISTS member_subscriptions (
+                user_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                paid_until TEXT NOT NULL,
+                last_period TEXT NOT NULL DEFAULT 'monthly',
+                updated_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (user_id, scope_type, scope_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_member_subs_scope ON member_subscriptions(scope_type, scope_id, paid_until);
+
+            CREATE TABLE IF NOT EXISTS access_grants (
+                user_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                granted_by TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked_at TEXT,
+                revoked_by TEXT,
+                PRIMARY KEY (user_id, scope_type, scope_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_access_grants_scope ON access_grants(scope_type, scope_id);
         """)
+        _sqlite_add_col_safe(cur, "group_access_policies", "entry_fee_yearly_usd TEXT NOT NULL DEFAULT '0'")
         _sqlite_add_col_safe(cur, "payment_records", "recipient_address TEXT")
         _sqlite_add_col_safe(cur, "payment_records", "purpose TEXT NOT NULL DEFAULT 'platform_entry'")
         _sqlite_add_col_safe(cur, "payment_records", "target_id TEXT")
+        _sqlite_add_col_safe(cur, "public_chat_messages", "reply_to_message_id TEXT")
         chat_db._sqlite_conn.commit()
         _platform_tables_initialized = True
 
@@ -622,6 +667,16 @@ def get_platform_settings() -> Dict[str, Any]:
     return merged
 
 
+def _pg_setting_value(val: Any) -> Any:
+    """A setting read from PostgreSQL. The column is JSONB, which psycopg2 already turns into the
+    Python value (a JSON string arrives as a plain str). It must NOT be JSON-decoded again: doing so
+    made every text setting (the authorized payout address above all) read as None on PostgreSQL,
+    so payment verification always failed closed. Only text from SQLite needs json.loads (_jload)."""
+    if isinstance(val, (bytes, bytearray, memoryview)):  # a driver that hands back raw JSON text
+        return _jload(bytes(val).decode("utf-8"), None)
+    return val
+
+
 def _get_platform_settings_uncached() -> Dict[str, Any]:
     _ready()
     merged = dict(DEFAULT_PLATFORM_SETTINGS)
@@ -631,7 +686,7 @@ def _get_platform_settings_uncached() -> Dict[str, Any]:
             with conn.cursor(cursor_factory=chat_db.RealDictCursor) as cur:
                 cur.execute("SELECT setting_key, setting_value_json FROM platform_settings;")
                 for r in cur.fetchall():
-                    merged[r["setting_key"]] = _jload(r["setting_value_json"], None)
+                    merged[r["setting_key"]] = _pg_setting_value(r["setting_value_json"])
             return merged
         finally:
             chat_db._pg_pool.putconn(conn)
@@ -674,16 +729,153 @@ def get_authorized_payment_destination() -> Optional[str]:
     return Web3.to_checksum_address(cleaned)
 
 
+SUPPORTED_PAYMENT_CHAIN_IDS = (1, 11155111)
+
+
+def get_active_chain_id() -> int:
+    """The network the admin selected in /Admin456 ("Active Ethereum Network")."""
+    try:
+        cid = int(get_platform_settings().get("default_balance_chain_id") or 11155111)
+    except (ValueError, TypeError):
+        cid = 11155111
+    return cid if cid in SUPPORTED_PAYMENT_CHAIN_IDS else 11155111
+
+
 def get_allowed_payment_chain_ids() -> List[int]:
-    """Returns the list of EVM chain IDs accepted for verified on-chain payments."""
-    settings = get_platform_settings()
-    raw = settings.get("allowed_payment_chain_ids")
-    if isinstance(raw, list) and raw:
+    """Chain IDs accepted for verified on-chain payments: ONLY the admin's active network.
+
+    Security: previously both Mainnet AND Sepolia were always accepted, so on a live Mainnet site a buyer
+    could pay with free testnet ETH. A payment is now valid only on the network chosen in /Admin456.
+    """
+    return [get_active_chain_id()]
+
+
+# ============================================================================
+# SUBSCRIPTIONS: monthly / yearly access (platform membership + each paid group)
+# ============================================================================
+BILLING_PERIODS = ("monthly", "yearly")
+PERIOD_DAYS = {"monthly": 30, "yearly": 365}
+
+
+def normalize_billing_period(period: Any) -> str:
+    p = str(period or "monthly").strip().lower()
+    if p not in BILLING_PERIODS:
+        raise ValueError("billing_period must be 'monthly' or 'yearly'")
+    return p
+
+
+def _to_dt(val: Any) -> Optional[datetime]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, datetime):
+        dt = val
+    else:
         try:
-            return [int(c) for c in raw if int(c) > 0]
-        except (ValueError, TypeError):
-            pass
-    return [1, 11155111]
+            dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _subscription_dict(scope_type: str, scope_id: str, paid_until: Any, last_period: Any) -> Dict[str, Any]:
+    until = _to_dt(paid_until)
+    return {
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "paid_until": until.isoformat() if until else None,
+        "last_period": str(last_period or "monthly"),
+        "active": bool(until and until > _now()),
+    }
+
+
+def get_subscription(user_id: str, scope_type: str, scope_id: str) -> Optional[Dict[str, Any]]:
+    """The member's subscription for 'platform' or one group (None if they never paid)."""
+    _ready()
+    q = "SELECT paid_until, last_period FROM member_subscriptions WHERE user_id = {p} AND scope_type = {p} AND scope_id = {p}"
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(q.format(p="%s"), (user_id, scope_type, scope_id))
+                row = cur.fetchone()
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(q.format(p="?"), (user_id, scope_type, scope_id))
+            row = cur.fetchone()
+    return _subscription_dict(scope_type, scope_id, row[0], row[1]) if row else None
+
+
+def has_active_subscription(user_id: str, scope_type: str, scope_id: str) -> bool:
+    sub = get_subscription(user_id, scope_type, scope_id)
+    return bool(sub and sub["active"])
+
+
+def list_user_subscriptions(user_id: str) -> List[Dict[str, Any]]:
+    """Every subscription of the member (platform + groups), soonest-to-expire first."""
+    _ready()
+    q = "SELECT scope_type, scope_id, paid_until, last_period FROM member_subscriptions WHERE user_id = {p}"
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(q.format(p="%s"), (user_id,))
+                rows = cur.fetchall()
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(q.format(p="?"), (user_id,))
+            rows = cur.fetchall()
+    out = [_subscription_dict(r[0], r[1], r[2], r[3]) for r in rows]
+    out.sort(key=lambda s: s["paid_until"] or "")
+    return out
+
+
+def _extend_subscription_cur(cur: Any, pg: bool, user_id: str, scope_type: str, scope_id: str, period: str) -> str:
+    """Extends (or starts) a subscription INSIDE the caller's transaction. Paying early never loses time:
+    the new period is added on top of whatever is left. Returns the new paid_until (ISO)."""
+    ph = "%s" if pg else "?"
+    cur.execute(
+        f"SELECT paid_until FROM member_subscriptions WHERE user_id = {ph} AND scope_type = {ph} AND scope_id = {ph}",
+        (user_id, scope_type, scope_id),
+    )
+    row = cur.fetchone()
+    now = _now()
+    current = _to_dt(row[0]) if row else None
+    base = current if (current and current > now) else now
+    new_until = (base + timedelta(days=PERIOD_DAYS[period])).isoformat()
+    cur.execute(
+        f"""
+        INSERT INTO member_subscriptions (user_id, scope_type, scope_id, paid_until, last_period, updated_at)
+        VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+        ON CONFLICT (user_id, scope_type, scope_id) DO UPDATE SET
+            paid_until = excluded.paid_until,
+            last_period = excluded.last_period,
+            updated_at = excluded.updated_at
+        """,
+        (user_id, scope_type, scope_id, new_until, period, now.isoformat()),
+    )
+    return new_until
+
+
+def _effective_yearly_usd(monthly_usd: float, yearly_cfg: Any) -> float:
+    """Yearly price: what the admin set, or automatically 12 x monthly when left at 0."""
+    if monthly_usd <= 0:
+        return 0.0
+    try:
+        y = float(yearly_cfg or 0)
+    except (TypeError, ValueError):
+        y = 0.0
+    return round(y, 2) if y > 0 else round(monthly_usd * 12, 2)
+
+
+def _plan_quote(usd: float, days: int) -> Dict[str, Any]:
+    q = usd_to_eth_quote(usd)
+    return {"usd": q["usd"], "eth": q["eth"], "wei": q["wei"], "days": days}
 
 
 def usd_to_eth_quote(fee_usd: Any) -> Dict[str, Any]:
@@ -724,23 +916,28 @@ def usd_to_eth_quote(fee_usd: Any) -> Dict[str, Any]:
 
 
 def get_group_pricing(group_id: str) -> Dict[str, Any]:
-    """Authoritative entry price of a paid group.
+    """Authoritative price of a paid group: a MONTHLY and a YEARLY plan.
 
-    New groups are priced in USD (`entry_fee_usd`) and converted at the live rate. Groups
-    created before USD pricing existed keep their fixed ETH fee."""
+    The admin sets the monthly price in USD (`entry_fee_usd`) and optionally a yearly price
+    (`entry_fee_yearly_usd`; 0 = automatic, 12 x monthly). Both are converted to ETH at the live rate.
+    `entry_fee_*` keys describe the monthly plan (kept for older clients); `plans` has both.
+    Groups created before USD pricing keep their fixed ETH fee as the monthly price."""
     pol = get_group_access_policy(group_id)
     is_paid = bool(pol.get("is_paid"))
-    fee_usd = 0.0
     try:
         fee_usd = float(pol.get("entry_fee_usd") or 0)
     except Exception:
         fee_usd = 0.0
 
     if is_paid and fee_usd > 0:
+        yearly_usd = _effective_yearly_usd(fee_usd, pol.get("entry_fee_yearly_usd"))
+        monthly = _plan_quote(fee_usd, PERIOD_DAYS["monthly"])
+        yearly = _plan_quote(yearly_usd, PERIOD_DAYS["yearly"])
         q = usd_to_eth_quote(fee_usd)
-        return {"is_paid": True, "entry_fee_usd": q["usd"], "entry_fee_eth": q["eth"],
-                "entry_fee_wei": q["wei"], "eth_usd_price": q["eth_usd_price"],
-                "rate_source": q["rate_source"], "pricing_mode": "usd"}
+        return {"is_paid": True, "entry_fee_usd": monthly["usd"], "entry_fee_eth": monthly["eth"],
+                "entry_fee_wei": monthly["wei"], "entry_fee_yearly_usd": yearly["usd"],
+                "plans": {"monthly": monthly, "yearly": yearly},
+                "eth_usd_price": q["eth_usd_price"], "rate_source": q["rate_source"], "pricing_mode": "usd"}
 
     # Legacy fixed-ETH group (or free group)
     fee_wei = str(pol.get("entry_fee_wei") or "0") if is_paid else "0"
@@ -750,9 +947,15 @@ def get_group_pricing(group_id: str) -> Dict[str, Any]:
         usd_equiv = round(float(fee_eth) * q["eth_usd_price"], 2) if is_paid else 0.0
     except Exception:
         usd_equiv = 0.0
+    yearly_wei = str(int(fee_wei or 0) * 12)
+    yearly_eth = format(Decimal(yearly_wei) / Decimal(10**18), "f").rstrip("0").rstrip(".") if int(yearly_wei) else "0"
+    plans = {
+        "monthly": {"usd": usd_equiv, "eth": fee_eth, "wei": fee_wei, "days": PERIOD_DAYS["monthly"]},
+        "yearly": {"usd": round(usd_equiv * 12, 2), "eth": yearly_eth or "0", "wei": yearly_wei, "days": PERIOD_DAYS["yearly"]},
+    }
     return {"is_paid": is_paid, "entry_fee_usd": usd_equiv, "entry_fee_eth": fee_eth,
-            "entry_fee_wei": fee_wei, "eth_usd_price": q["eth_usd_price"],
-            "rate_source": q["rate_source"], "pricing_mode": "fixed_eth"}
+            "entry_fee_wei": fee_wei, "entry_fee_yearly_usd": plans["yearly"]["usd"], "plans": plans,
+            "eth_usd_price": q["eth_usd_price"], "rate_source": q["rate_source"], "pricing_mode": "fixed_eth"}
 
 
 def get_platform_pricing() -> Dict[str, Any]:
@@ -798,10 +1001,27 @@ def get_platform_pricing() -> Dict[str, Any]:
     if "." in fee_eth_str:
         fee_eth_str = fee_eth_str.rstrip("0").rstrip(".") or "0"
 
+    monthly_usd = float(fee_usd)
+    yearly_cfg = settings.get("platform_yearly_fee_usd")
+    yearly_usd = _effective_yearly_usd(monthly_usd, yearly_cfg)
+    try:
+        yearly_is_auto = float(yearly_cfg or 0) <= 0
+    except (TypeError, ValueError):
+        yearly_is_auto = True
+
     return {
-        "platform_entry_fee_usd": float(fee_usd),
+        # Monthly plan (these three keys are what older clients read)
+        "platform_entry_fee_usd": monthly_usd,
         "platform_entry_fee_eth": fee_eth_str,
         "platform_entry_fee_wei": str(fee_wei_int),
+        # Monthly + yearly plans: members pick one, access lasts 30 / 365 days from payment
+        "platform_monthly_fee_usd": monthly_usd,
+        "platform_yearly_fee_usd": yearly_usd,
+        "yearly_is_auto": yearly_is_auto,
+        "plans": {
+            "monthly": _plan_quote(monthly_usd, PERIOD_DAYS["monthly"]),
+            "yearly": _plan_quote(yearly_usd, PERIOD_DAYS["yearly"]),
+        },
         "eth_usd_price": float(rate_dec),
         "rate_source": rate_source,
         "quoted_at": _now_iso(),
@@ -810,113 +1030,405 @@ def get_platform_pricing() -> Dict[str, Any]:
     }
 
 
-def has_user_paid_platform_entry(user_id: str) -> bool:
+# ----------------------------------------------------------------------------
+# Free access granted by an admin (no payment needed)
+# ----------------------------------------------------------------------------
+GRANT_SCOPES = ("platform", "group")
+MAX_GRANT_DAYS = 3650  # 10 years; leave the duration empty for "no end date"
+MAX_GRANT_NOTE_LEN = 200
+_CONTROL_CHARS = {c: None for c in list(range(0, 9)) + [11, 12] + list(range(14, 32)) + [127]}
+
+
+def _grant_run(sql: str, params: tuple = (), fetch: Optional[str] = None, write: bool = False) -> Tuple[Any, int]:
+    """Runs ONE statement on PostgreSQL or SQLite. `sql` uses {p} for placeholders.
+    Returns (rows, rows_affected); rows is a list ('all'), one row ('one') or None."""
+    _ready()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql.format(p="%s"), params)
+                rows = cur.fetchall() if fetch == "all" else (cur.fetchone() if fetch == "one" else None)
+                affected = int(cur.rowcount or 0)
+            if write:
+                conn.commit()
+            return rows, affected
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        try:
+            cur.execute(sql.format(p="?"), params)
+            rows = cur.fetchall() if fetch == "all" else (cur.fetchone() if fetch == "one" else None)
+            affected = int(cur.rowcount or 0)
+            if write:
+                chat_db._sqlite_conn.commit()
+            return rows, affected
+        except Exception:
+            chat_db._sqlite_conn.rollback()
+            raise
+
+
+def _grant_dict(row: Any) -> Dict[str, Any]:
+    """row = (user_id, scope_type, scope_id, granted_by, note, created_at, expires_at, revoked_at, revoked_by)"""
+    expires = _to_dt(row[6])
+    revoked = _to_dt(row[7])
+    return {
+        "user_id": row[0],
+        "scope_type": row[1],
+        "scope_id": row[2],
+        "granted_by": row[3],
+        "note": row[4] or "",
+        "created_at": _iso(row[5]),
+        "expires_at": expires.isoformat() if expires else None,
+        "lifetime": expires is None,
+        "revoked_at": revoked.isoformat() if revoked else None,
+        "revoked_by": row[8],
+        "active": bool(revoked is None and (expires is None or expires > _now())),
+    }
+
+
+_GRANT_COLS = "user_id, scope_type, scope_id, granted_by, note, created_at, expires_at, revoked_at, revoked_by"
+
+
+def get_access_grant(user_id: str, scope_type: str, scope_id: str) -> Optional[Dict[str, Any]]:
+    """The admin grant for 'platform' or one group (None when the member never had one)."""
+    row, _ = _grant_run(
+        f"SELECT {_GRANT_COLS} FROM access_grants WHERE user_id = {{p}} AND scope_type = {{p}} AND scope_id = {{p}}",
+        ((user_id or "").strip(), scope_type, scope_id),
+        fetch="one",
+    )
+    return _grant_dict(row) if row else None
+
+
+def has_active_access_grant(user_id: str, scope_type: str, scope_id: str) -> bool:
+    """True while the admin's free access for this scope is switched on and has not run out."""
+    uid = (user_id or "").strip()
+    if not uid or not scope_id:
+        return False
+    g = get_access_grant(uid, scope_type, scope_id)
+    return bool(g and g["active"])
+
+
+def active_group_grant_ids(user_id: str) -> set:
+    """Ids of every group the member currently has free access to (one query, for list screens)."""
+    uid = (user_id or "").strip()
+    if not uid:
+        return set()
+    rows, _ = _grant_run(
+        f"SELECT {_GRANT_COLS} FROM access_grants WHERE user_id = {{p}} AND scope_type = 'group' AND revoked_at IS NULL",
+        (uid,),
+        fetch="all",
+    )
+    return {g["scope_id"] for g in (_grant_dict(r) for r in rows) if g["active"]}
+
+
+def list_user_access_grants(user_id: str) -> List[Dict[str, Any]]:
+    """The member's own ACTIVE grants (platform + groups). The admin's private note is not included."""
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+    rows, _ = _grant_run(
+        f"SELECT {_GRANT_COLS} FROM access_grants WHERE user_id = {{p}} AND revoked_at IS NULL",
+        (uid,),
+        fetch="all",
+    )
+    out = []
+    for g in (_grant_dict(r) for r in rows):
+        if g["active"]:
+            out.append({k: g[k] for k in ("scope_type", "scope_id", "expires_at", "lifetime", "active")})
+    return out
+
+
+def admin_list_access_grants(
+    scope_type: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    include_inactive: bool = False,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """Grants for the admin screen, newest first, with the member's @username and the group's name."""
+    where, params = [], []
+    if scope_type:
+        where.append("a.scope_type = {p}")
+        params.append(scope_type)
+    if scope_id:
+        where.append("a.scope_id = {p}")
+        params.append(scope_id)
+    if user_id:
+        where.append("a.user_id = {p}")
+        params.append(user_id)
+    if not include_inactive:
+        where.append("a.revoked_at IS NULL")
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    cols = ", ".join(f"a.{c.strip()}" for c in _GRANT_COLS.split(","))
+    rows, _ = _grant_run(
+        f"""
+        SELECT {cols}, u.username, g.name
+        FROM access_grants a
+        LEFT JOIN chat_users u ON u.user_id = a.user_id
+        LEFT JOIN chat_groups g ON a.scope_type = 'group' AND g.group_id = a.scope_id
+        {where_sql}
+        ORDER BY a.created_at DESC
+        LIMIT {{p}}
+        """,
+        tuple(params) + (max(1, min(int(limit), 500)),),
+        fetch="all",
+    )
+    out = []
+    for r in rows:
+        g = _grant_dict(r[:9])
+        g["username"] = r[9]
+        g["group_name"] = r[10] if g["scope_type"] == "group" else None
+        if include_inactive or g["active"]:
+            out.append(g)
+    return out
+
+
+@auth_cache.invalidates_auth_cache(namespaces=("paid", "user"))
+def grant_access(
+    user_id: str,
+    scope_type: str,
+    scope_id: Optional[str],
+    actor_user_id: str,
+    days: Optional[int] = None,
+    note: str = "",
+) -> Dict[str, Any]:
+    """Gives a member free access, no payment needed.
+
+    scope_type 'platform' = the membership. scope_type 'group' = that one group: its fee AND its
+    minimum-balance rule are waived for this member (a suspended account is still blocked).
+    `days` None = no end date. Granting again replaces the old grant (new length, new note).
+    Raises ValueError for bad input (unknown member / group, wrong duration)."""
+    uid = (user_id or "").strip()
+    if scope_type not in GRANT_SCOPES:
+        raise ValueError("scope_type must be 'platform' or 'group'")
+    if not uid or not e2ee_db.get_user_by_id(uid):
+        raise ValueError("Member not found")
+    if scope_type == "platform":
+        sid = "platform"
+    else:
+        sid = (scope_id or "").strip()
+        if not sid:
+            raise ValueError("group_id is required for a group grant")
+        if not e2ee_db.get_mls_group(sid):
+            raise ValueError("Group not found")
+    if days is not None:
+        if isinstance(days, bool) or not isinstance(days, int) or not (1 <= days <= MAX_GRANT_DAYS):
+            raise ValueError(f"days must be a whole number from 1 to {MAX_GRANT_DAYS}, or empty for no end date")
+    clean_note = (note or "").translate(_CONTROL_CHARS).strip()[:MAX_GRANT_NOTE_LEN]
+
+    now = _now()
+    expires = (now + timedelta(days=days)).isoformat() if days else None
+    _grant_run(
+        """
+        INSERT INTO access_grants (user_id, scope_type, scope_id, granted_by, note, created_at, expires_at, revoked_at, revoked_by)
+        VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, NULL, NULL)
+        ON CONFLICT (user_id, scope_type, scope_id) DO UPDATE SET
+            granted_by = excluded.granted_by,
+            note = excluded.note,
+            created_at = excluded.created_at,
+            expires_at = excluded.expires_at,
+            revoked_at = NULL,
+            revoked_by = NULL
+        """,
+        (uid, scope_type, sid, actor_user_id, clean_note, now.isoformat(), expires),
+        write=True,
+    )
+    record_audit_log(
+        actor_user_id,
+        "access_granted",
+        "user",
+        uid,
+        {"scope_type": scope_type, "scope_id": sid, "days": days, "expires_at": expires, "note": clean_note},
+    )
+    grant = get_access_grant(uid, scope_type, sid)
+    assert grant is not None
+    return grant
+
+
+@auth_cache.invalidates_auth_cache(namespaces=("paid", "user"))
+def revoke_access(user_id: str, scope_type: str, scope_id: Optional[str], actor_user_id: str) -> bool:
+    """Switches a grant off. False when there was nothing switched on to revoke."""
+    uid = (user_id or "").strip()
+    if scope_type not in GRANT_SCOPES:
+        raise ValueError("scope_type must be 'platform' or 'group'")
+    sid = "platform" if scope_type == "platform" else (scope_id or "").strip()
+    if not uid or not sid:
+        return False
+    _, affected = _grant_run(
+        "UPDATE access_grants SET revoked_at = {p}, revoked_by = {p} "
+        "WHERE user_id = {p} AND scope_type = {p} AND scope_id = {p} AND revoked_at IS NULL",
+        (_now_iso(), actor_user_id, uid, scope_type, sid),
+        write=True,
+    )
+    if affected:
+        record_audit_log(actor_user_id, "access_revoked", "user", uid, {"scope_type": scope_type, "scope_id": sid})
+    return bool(affected)
+
+
+MAX_ANNOUNCEMENT_LEN = 280
+
+
+def get_active_announcement() -> Optional[Dict[str, Any]]:
+    """The admin's banner for everyone, or None (no text, or its end time has passed)."""
+    s = get_platform_settings()
+    text = (s.get("announcement_text") or "").strip()
+    if not text:
+        return None
+    ends = _to_dt(s.get("announcement_ends_at") or None)
+    if ends and ends <= _now():
+        return None
+    return {
+        "id": s.get("announcement_id") or "ann_default",
+        "text": text,
+        "level": s.get("announcement_level") if s.get("announcement_level") in ("info", "warning") else "info",
+        "ends_at": ends.isoformat() if ends else None,
+    }
+
+
+REMINDER_EXPIRED_DAYS = 14  # keep reminding this long after something ran out
+
+
+def _reminder_stage(until: datetime, now: datetime) -> Optional[str]:
+    left = (until - now).total_seconds()
+    if left <= 0:
+        return "expired" if now - until <= timedelta(days=REMINDER_EXPIRED_DAYS) else None
+    if left <= 86400:
+        return "1d"
+    if left <= 7 * 86400:
+        return "7d"
+    return None
+
+
+def _access_end(sub: Optional[Dict[str, Any]], grant: Optional[Dict[str, Any]], now: datetime) -> Tuple[Optional[datetime], bool]:
+    """When access ends: the later of the paid period and an admin grant. (None, True) = no end date."""
+    if grant and grant["active"] and grant["lifetime"]:
+        return None, True
+    ends: List[datetime] = []
+    if sub and sub.get("paid_until"):
+        d = _to_dt(sub["paid_until"])
+        if d:
+            ends.append(d)
+    if grant and grant.get("expires_at") and not grant.get("revoked_at"):
+        d = _to_dt(grant["expires_at"])
+        if d:
+            ends.append(d)
+    if not ends:
+        return None, False
+    future = [d for d in ends if d > now]
+    return (max(future) if future else max(ends)), False
+
+
+def list_renewal_reminders(user_id: str) -> List[Dict[str, Any]]:
+    """Membership / paid-group access ending within 7 days, within a day, or ended in the last 14 days.
+    Each item has a `key` that changes per stage, so the app notifies once per stage."""
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+    now = _now()
+    out: List[Dict[str, Any]] = []
+
+    def add(scope_type: str, scope_id: str, name: str, until: datetime, free_access: bool) -> None:
+        stage = _reminder_stage(until, now)
+        if not stage:
+            return
+        out.append({
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "name": name,
+            "expires_at": until.isoformat(),
+            "stage": stage,
+            "free_access": free_access,
+            "key": f"{scope_type}:{scope_id}:{stage}:{until.date().isoformat()}",
+        })
+
+    is_admin = get_admin_role(uid) in ("superadmin", "moderator")
+    if not is_admin and not _membership_is_free():
+        grant = get_access_grant(uid, "platform", "platform")
+        until, forever = _access_end(get_subscription(uid, "platform", "platform"), grant, now)
+        if until and not forever:
+            add("platform", "platform", "Membership", until, bool(grant and grant.get("expires_at") == until.isoformat()))
+
+    group_ids = {s["scope_id"] for s in list_user_subscriptions(uid) if s["scope_type"] == "group"}
+    group_ids |= {g["scope_id"] for g in admin_list_access_grants(scope_type="group", user_id=uid, include_inactive=True)}
+    for gid in sorted(group_ids):
+        grp = e2ee_db.get_mls_group(gid)
+        if not grp or not get_group_access_policy(gid).get("is_paid"):
+            continue
+        if is_admin or is_group_admin(gid, uid) or not e2ee_db.get_member_record(gid, uid):
+            continue
+        if not e2ee_db.is_active_group_member(gid, uid):
+            continue
+        grant = get_access_grant(uid, "group", gid)
+        until, forever = _access_end(get_subscription(uid, "group", gid), grant, now)
+        if until and not forever:
+            add("group", gid, grp.get("name") or "Group", until, bool(grant and grant.get("expires_at") == until.isoformat()))
+
+    order = {"expired": 0, "1d": 1, "7d": 2}
+    out.sort(key=lambda r: (order[r["stage"]], r["expires_at"]))
+    return out
+
+
+def has_user_paid_platform_entry(user_id: str, *, fresh: bool = False) -> bool:
     """Membership check used on every chat request, so a positive answer is cached briefly
     (30 s, cleared on payments, role changes and price changes). Negative answers are never
-    cached, so a user who has just paid is recognised immediately."""
+    cached, so a user who has just paid is recognised immediately.
+
+    Pass `fresh=True` (used on login and /membership/status) to bypass the cache and verify
+    directly against the database."""
     uid = (user_id or "").strip()
     if not uid:
         return False
-    if auth_cache.get("paid", uid) is True:
+    if not fresh and auth_cache.get("paid", uid) is True:
         return True
     gen = auth_cache.generation()
     result = _has_user_paid_platform_entry_uncached(uid)
     if result:
         auth_cache.put("paid", uid, True, gen)
+    elif fresh and auth_cache.get("paid", uid) is True:
+        auth_cache.invalidate(("paid", "user"))
     return result
 
 
 def _has_user_paid_platform_entry_uncached(user_id: str) -> bool:
-    """Checks if a user has paid the platform entry fee or is an admin."""
+    """True for admins, when membership is free (monthly price $0), while a paid subscription is active,
+    or while an admin has given the member free access."""
     _ready()
     clean_uid = (user_id or "").strip()
     if not clean_uid:
         return False
-    # Check if admin (superadmins/moderators bypass fee)
     role = get_admin_role(clean_uid)
     if role in ("superadmin", "moderator"):
         return True
-    ext = get_extended_user_fields(clean_uid)
-    if ext.get("is_platform_paid"):
-        return True
-    # Admin set the membership price to $0: membership is free for everyone.
     try:
         if float(get_platform_settings().get("platform_entry_fee_usd") or 0) <= 0:
-            return True
+            return True  # admin set the monthly price to $0: membership is free for everyone
     except Exception:
         pass
-    # Fallback: check verified payment records with purpose = 'platform_entry'
-    if _is_pg():
-        conn = chat_db._pg_pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT 1 FROM payment_records
-                    WHERE user_id = %s AND status = 'verified' AND purpose = 'platform_entry'
-                    LIMIT 1;
-                    """,
-                    (clean_uid,)
-                )
-                return cur.fetchone() is not None
-        finally:
-            chat_db._pg_pool.putconn(conn)
-    else:
-        with chat_db._sqlite_lock:
-            cur = chat_db._sqlite_conn.cursor()
-            cur.execute(
-                """
-                SELECT 1 FROM payment_records
-                WHERE user_id = ? AND status = 'verified' AND purpose = 'platform_entry'
-                LIMIT 1
-                """,
-                (clean_uid,)
-            )
-            return cur.fetchone() is not None
+    if has_active_subscription(clean_uid, "platform", "platform"):
+        return True
+    return has_active_access_grant(clean_uid, "platform", "platform")  # free access from an admin
 
 
 def has_user_paid_group_entry(user_id: str, group_id: str) -> bool:
-    """Checks if a user has paid the specific group entry fee or is an admin / group admin."""
+    """True while the member's subscription to this group is active, an admin gave them free access,
+    or they are a platform/group admin."""
     _ready()
     clean_uid = (user_id or "").strip()
     clean_gid = (group_id or "").strip()
     if not clean_uid or not clean_gid:
         return False
-    # Check if platform admin or group admin
-    role = get_admin_role(clean_uid)
-    if role in ("superadmin", "moderator"):
+    if get_admin_role(clean_uid) in ("superadmin", "moderator"):
         return True
     if is_group_admin(clean_gid, clean_uid):
         return True
-
-    # Check verified payment record with purpose = 'group_entry' and target_id = clean_gid
-    if _is_pg():
-        conn = chat_db._pg_pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT 1 FROM payment_records
-                    WHERE user_id = %s AND status = 'verified' AND purpose = 'group_entry' AND target_id = %s
-                    LIMIT 1;
-                    """,
-                    (clean_uid, clean_gid)
-                )
-                return cur.fetchone() is not None
-        finally:
-            chat_db._pg_pool.putconn(conn)
-    else:
-        with chat_db._sqlite_lock:
-            cur = chat_db._sqlite_conn.cursor()
-            cur.execute(
-                """
-                SELECT 1 FROM payment_records
-                WHERE user_id = ? AND status = 'verified' AND purpose = 'group_entry' AND target_id = ?
-                LIMIT 1
-                """,
-                (clean_uid, clean_gid)
-            )
-            return cur.fetchone() is not None
+    if has_active_subscription(clean_uid, "group", clean_gid):
+        return True
+    return has_active_access_grant(clean_uid, "group", clean_gid)  # free access from an admin
 
 
 @auth_cache.invalidates_auth_cache(namespaces=('settings', 'user', 'paid'))
@@ -936,8 +1448,45 @@ def update_platform_settings(updates: Dict[str, Any], actor_user_id: str) -> Dic
         except (ValueError, TypeError) as exc:
             raise ValueError(f"Invalid platform entry fee (USD): {exc}")
 
+    if "platform_yearly_fee_usd" in updates:
+        try:
+            y_flt = float(updates["platform_yearly_fee_usd"] or 0)
+            if y_flt < 0 or y_flt > 1000000:
+                raise ValueError("must be between 0 and 1000000")
+            updates["platform_yearly_fee_usd"] = str(round(y_flt, 2))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid yearly membership price (USD): {exc}")
+
     if "use_live_eth_price" in updates:
         updates["use_live_eth_price"] = bool(updates["use_live_eth_price"])
+
+    if "announcement_text" in updates:
+        txt = " ".join(str(updates["announcement_text"] or "").translate(_CONTROL_CHARS).split())
+        if len(txt) > MAX_ANNOUNCEMENT_LEN:
+            raise ValueError(f"The banner can be at most {MAX_ANNOUNCEMENT_LEN} characters")
+        updates["announcement_text"] = txt
+        if txt != (get_platform_settings().get("announcement_text") or ""):
+            updates["announcement_id"] = f"ann_{secrets.token_hex(6)}" if txt else ""
+    if "announcement_level" in updates:
+        if updates["announcement_level"] not in ("info", "warning"):
+            raise ValueError("Banner style must be 'info' or 'warning'")
+    if "announcement_ends_at" in updates:
+        raw_end = str(updates["announcement_ends_at"] or "").strip()
+        if raw_end:
+            end_dt = _to_dt(raw_end)
+            if not end_dt:
+                raise ValueError("Banner end time must be a date and time (ISO 8601)")
+            raw_end = end_dt.isoformat()
+        updates["announcement_ends_at"] = raw_end
+
+    if "default_balance_chain_id" in updates:
+        try:
+            chain_val = int(updates["default_balance_chain_id"])
+        except (ValueError, TypeError):
+            raise ValueError("Active network must be a chain id number")
+        if chain_val not in SUPPORTED_PAYMENT_CHAIN_IDS:
+            raise ValueError("Active network must be Ethereum Mainnet (1) or Sepolia (11155111)")
+        updates["default_balance_chain_id"] = chain_val
 
     # Normalize & validate platform_entry_fee_eth if present
     if "platform_entry_fee_eth" in updates:
@@ -1078,6 +1627,24 @@ def update_authorized_payment_destination(new_destination: str, actor_user_id: s
 # EXTENDED USER PROFILE, USERNAME COOLDOWN/HISTORY & WALLET HISTORY
 # ============================================================================
 
+def list_admin_user_ids() -> set:
+    """User ids that hold an admin or moderator role (a tiny table). Used by the live-connection code."""
+    _ready()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id FROM admin_roles WHERE role IN ('superadmin', 'moderator');")
+                return {r[0] for r in cur.fetchall()}
+        finally:
+            chat_db._pg_pool.putconn(conn)
+
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute("SELECT user_id FROM admin_roles WHERE role IN ('superadmin', 'moderator')")
+        return {r[0] for r in cur.fetchall()}
+
+
 def get_admin_role(user_id: str) -> Optional[str]:
     _ready()
     if _is_pg():
@@ -1196,7 +1763,6 @@ def get_extended_user_fields(user_id: str) -> Dict[str, Any]:
     return {
         "display_name": row["display_name"],
         "bio": row["bio"],
-        "avatar_url": row["avatar_url"],
         "username_changed_at": _iso(row["username_changed_at"]),
         "current_level": int(row["current_level"] or 7),
         "highest_level": int(row["highest_level"] or 7),
@@ -1210,11 +1776,8 @@ def get_extended_user_fields(user_id: str) -> Dict[str, Any]:
         "show_online_presence": bool(row["show_online_presence"]),
         "send_read_receipts": bool(row["send_read_receipts"]),
         # Paid for real, OR membership is free right now (admin set the price to $0), OR an admin.
-        "is_platform_paid": (
-            (bool(row["is_platform_paid"]) if "is_platform_paid" in row.keys() else False)
-            or _membership_is_free()
-            or get_admin_role(user_id) in ("superadmin", "moderator")
-        ),
+        # True only while a subscription is active (or membership is free right now, or an admin).
+        "is_platform_paid": has_user_paid_platform_entry(user_id),
         "platform_paid_at": _iso(row["platform_paid_at"]) if "platform_paid_at" in row.keys() else None,
         "admin_role": get_admin_role(user_id),
     }
@@ -1557,7 +2120,6 @@ def update_user_profile(
     user_id: str,
     display_name: Optional[str] = None,
     bio: Optional[str] = None,
-    avatar_url: Optional[str] = None,
     show_online_presence: Optional[bool] = None,
     send_read_receipts: Optional[bool] = None,
 ) -> Dict[str, Any]:
@@ -1568,7 +2130,7 @@ def update_user_profile(
 
     new_dn = ext["display_name"] if display_name is None else (display_name.strip() or None)
     new_bio = ext["bio"] if bio is None else (bio.strip() or None)
-    new_av = ext["avatar_url"] if avatar_url is None else (avatar_url.strip() or None)
+    new_av = ext.get("avatar_url")  # legacy column, preserved as is (avatars are no longer settable or shown)
     new_pres = ext["show_online_presence"] if show_online_presence is None else bool(show_online_presence)
     new_rcpt = ext["send_read_receipts"] if send_read_receipts is None else bool(send_read_receipts)
     ts = _now_iso()
@@ -2013,6 +2575,39 @@ def create_or_submit_payment_record(
             return get_payment_by_tx_ref(clean_ref), False  # type: ignore[return-value]
 
 
+def set_payment_requirement(payment_id: str, required_wei: int, billing_period: str) -> None:
+    """Stores, on a not-yet-verified payment, the minimum amount and the period it must cover.
+    Every verification path (user submit AND admin retry) enforces this stored amount."""
+    _ready()
+    rec = get_payment_record(payment_id)
+    if not rec or rec["status"] == "verified":
+        return
+    meta = dict(rec.get("metadata") or {})
+    meta["required_wei"] = str(int(required_wei))
+    meta["billing_period"] = normalize_billing_period(billing_period)
+    meta_json = json.dumps(meta)
+    ts = _now_iso()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE payment_records SET metadata_json = %s::jsonb, updated_at = %s WHERE payment_id = %s AND status <> 'verified';",
+                    (meta_json, ts, payment_id),
+                )
+            conn.commit()
+        finally:
+            chat_db._pg_pool.putconn(conn)
+        return
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute(
+            "UPDATE payment_records SET metadata_json = ?, updated_at = ? WHERE payment_id = ? AND status <> 'verified'",
+            (meta_json, ts, payment_id),
+        )
+        chat_db._sqlite_conn.commit()
+
+
 @auth_cache.invalidates_auth_cache
 def record_verified_payment(
     payment_id: str,
@@ -2055,6 +2650,17 @@ def record_verified_payment(
         meta["target_id"] = p_target
 
     meta_json = json.dumps(meta)
+
+    # What this payment buys: platform membership, or one paid group; for a monthly or yearly period.
+    sub_scope: Optional[Tuple[str, str]] = None
+    if p_purpose == "platform_entry":
+        sub_scope = ("platform", "platform")
+    elif p_purpose == "group_entry" and p_target:
+        sub_scope = ("group", str(p_target))
+    try:
+        sub_period = normalize_billing_period(meta.get("billing_period"))
+    except ValueError:
+        sub_period = "monthly"
     w_addr = (wallet_address or existing.get("wallet_address") or "").strip() or None
     r_addr = (recipient_address or existing.get("recipient_address") or meta.get("recipient_address") or "").strip() or None
     cid = chain_id if chain_id is not None else existing.get("chain_id")
@@ -2082,7 +2688,7 @@ def record_verified_payment(
                         purpose = %s,
                         target_id = %s,
                         updated_at = %s
-                    WHERE payment_id = %s;
+                    WHERE payment_id = %s AND status <> 'verified';
                     """,
                     (
                         w_addr,
@@ -2102,6 +2708,11 @@ def record_verified_payment(
                         payment_id,
                     ),
                 )
+                if cur.rowcount == 0:
+                    conn.rollback()  # a concurrent request already verified (and credited) this payment
+                    return get_payment_record(payment_id)  # type: ignore[return-value]
+                if sub_scope:
+                    _extend_subscription_cur(cur, True, user_id, sub_scope[0], sub_scope[1], sub_period)
                 if p_purpose == "platform_entry":
                     cur.execute(
                         """
@@ -2136,7 +2747,7 @@ def record_verified_payment(
                     purpose = ?,
                     target_id = ?,
                     updated_at = ?
-                WHERE payment_id = ?
+                WHERE payment_id = ? AND status <> 'verified'
                 """,
                 (
                     w_addr,
@@ -2156,6 +2767,11 @@ def record_verified_payment(
                     payment_id,
                 ),
             )
+            if cur.rowcount == 0:
+                chat_db._sqlite_conn.rollback()  # a concurrent request already verified this payment
+                return get_payment_record(payment_id)  # type: ignore[return-value]
+            if sub_scope:
+                _extend_subscription_cur(cur, False, user_id, sub_scope[0], sub_scope[1], sub_period)
             if p_purpose == "platform_entry":
                 cur.execute(
                     """
@@ -2167,11 +2783,8 @@ def record_verified_payment(
                 )
             chat_db._sqlite_conn.commit()
 
-    if p_purpose == "group_entry" and p_target:
-        try:
-            e2ee_db.add_group_member(p_target, user_id, role="member")
-        except Exception as add_err:
-            logger.warning("Auto-adding member to paid group %s failed: %s", p_target, add_err)
+    # (Group access is granted by the subscription row written above. Becoming a member of the encrypted group
+    #  still goes through the normal join request, which now passes the paid-group check.)
 
     audit_details = {
         "event_type": "payment_verified",
@@ -2182,6 +2795,8 @@ def record_verified_payment(
         "network": network,
         "chain_id": cid,
         "verification_source": verification_source,
+        "purpose": p_purpose,
+        "billing_period": sub_period,
     }
     if r_addr:
         audit_details["recipient_address"] = r_addr
@@ -2423,6 +3038,7 @@ def insert_public_chat_message(
     display_name: str,
     author_level: int = 7,
     is_guest: bool = False,
+    reply_to_message_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     _ready()
     message_id = f"pub_{secrets.token_hex(12)}"
@@ -2446,9 +3062,9 @@ def insert_public_chat_message(
                     f"""
                     INSERT INTO public_chat_messages (
                         message_id, author_user_id, guest_id, display_name,
-                        author_level, is_guest, content, deleted, created_at
+                        author_level, is_guest, content, deleted, created_at, reply_to_message_id
                     )
-                    SELECT %s, %s, %s, %s, %s, %s, %s, FALSE, %s
+                    SELECT %s, %s, %s, %s, %s, %s, %s, FALSE, %s, %s
                     WHERE NOT EXISTS (
                         SELECT 1 FROM public_chat_messages
                         WHERE {dup_col} = %s AND content = %s AND created_at >= %s AND deleted = FALSE
@@ -2456,7 +3072,7 @@ def insert_public_chat_message(
                     RETURNING seq;
                     """,
                     (message_id, author_user_id, guest_id, display_name, author_level, is_guest, content, ts,
-                     dup_val, content, recent_cutoff),
+                     reply_to_message_id, dup_val, content, recent_cutoff),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -2475,16 +3091,16 @@ def insert_public_chat_message(
                 f"""
                 INSERT INTO public_chat_messages (
                     message_id, author_user_id, guest_id, display_name,
-                    author_level, is_guest, content, deleted, created_at
+                    author_level, is_guest, content, deleted, created_at, reply_to_message_id
                 )
-                SELECT ?, ?, ?, ?, ?, ?, ?, 0, ?
+                SELECT ?, ?, ?, ?, ?, ?, ?, 0, ?, ?
                 WHERE NOT EXISTS (
                     SELECT 1 FROM public_chat_messages
                     WHERE {dup_col} = ? AND content = ? AND created_at >= ? AND deleted = 0
                 )
                 """,
                 (message_id, author_user_id, guest_id, display_name, author_level, 1 if is_guest else 0, content, ts,
-                 dup_val, content, recent_cutoff),
+                 reply_to_message_id, dup_val, content, recent_cutoff),
             )
             if cur.rowcount == 0:
                 chat_db._sqlite_conn.rollback()
@@ -2503,6 +3119,7 @@ def insert_public_chat_message(
         "edited_at": None,
         "deleted": False,
         "created_at": ts,
+        "reply_to_message_id": reply_to_message_id,
     }
 
 
@@ -2526,7 +3143,7 @@ def list_public_chat_messages(
                     cur.execute(
                         """
                         SELECT seq, message_id, author_user_id, display_name, author_level,
-                               is_guest, content, edited_at, deleted, created_at
+                               is_guest, content, edited_at, deleted, created_at, reply_to_message_id
                         FROM public_chat_messages
                         WHERE deleted = FALSE AND created_at >= %s AND seq < %s
                         ORDER BY seq DESC LIMIT %s;
@@ -2537,7 +3154,7 @@ def list_public_chat_messages(
                     cur.execute(
                         """
                         SELECT seq, message_id, author_user_id, display_name, author_level,
-                               is_guest, content, edited_at, deleted, created_at
+                               is_guest, content, edited_at, deleted, created_at, reply_to_message_id
                         FROM public_chat_messages
                         WHERE deleted = FALSE AND created_at >= %s
                         ORDER BY seq DESC LIMIT %s;
@@ -2554,7 +3171,7 @@ def list_public_chat_messages(
                 cur.execute(
                     """
                     SELECT seq, message_id, author_user_id, display_name, author_level,
-                           is_guest, content, edited_at, deleted, created_at
+                           is_guest, content, edited_at, deleted, created_at, reply_to_message_id
                     FROM public_chat_messages
                     WHERE deleted = 0 AND created_at >= ? AND seq < ?
                     ORDER BY seq DESC LIMIT ?
@@ -2565,7 +3182,7 @@ def list_public_chat_messages(
                 cur.execute(
                     """
                     SELECT seq, message_id, author_user_id, display_name, author_level,
-                           is_guest, content, edited_at, deleted, created_at
+                           is_guest, content, edited_at, deleted, created_at, reply_to_message_id
                     FROM public_chat_messages
                     WHERE deleted = 0 AND created_at >= ?
                     ORDER BY seq DESC LIMIT ?
@@ -2588,10 +3205,94 @@ def list_public_chat_messages(
             "content": r["content"],
             "edited_at": _iso(r["edited_at"]),
             "created_at": _iso(r["created_at"]),
+            "reply_to_message_id": r["reply_to_message_id"],
         })
 
     next_cursor = int(rows[-1]["seq"]) if len(rows) == limit else None
     return {"messages": items, "next_before_seq": next_cursor}
+
+
+def get_public_chat_message_brief(message_id: str) -> Optional[Dict[str, Any]]:
+    """A Members' room message by id (author, text, deleted flag), or None."""
+    rows = _public_chat_rows_by_ids([message_id])
+    return rows.get(message_id)
+
+
+def _public_chat_rows_by_ids(message_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    ids = [m for m in dict.fromkeys(message_ids) if m]
+    if not ids:
+        return {}
+    _ready()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=chat_db.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT message_id, author_user_id, display_name, content, deleted
+                    FROM public_chat_messages WHERE message_id = ANY(%s);
+                    """,
+                    (ids,),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        marks = ",".join("?" for _ in ids)
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(
+                f"""
+                SELECT message_id, author_user_id, display_name, content, deleted
+                FROM public_chat_messages WHERE message_id IN ({marks})
+                """,
+                ids,
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    return {r["message_id"]: r for r in rows}
+
+
+def build_public_reply_quotes(
+    reply_ids: List[str],
+    viewer_blocked_ids: Optional[set] = None,
+    file_names: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Quote shown on top of a Members' room reply: who wrote the original and a short excerpt.
+    Built from the original at read time, so deleted (moderated) originals and originals from
+    members the viewer blocked show no text.
+    """
+    rows = _public_chat_rows_by_ids(reply_ids)
+    blocked = viewer_blocked_ids or set()
+    out: Dict[str, Dict[str, Any]] = {}
+    for mid in dict.fromkeys(reply_ids):
+        if not mid:
+            continue
+        r = rows.get(mid)
+        if not r or bool(r["deleted"]):
+            out[mid] = {"message_id": mid, "author_user_id": None, "display_name": None, "preview": None, "available": False}
+            continue
+        if r["author_user_id"] and r["author_user_id"] in blocked:
+            out[mid] = {"message_id": mid, "author_user_id": None, "display_name": None, "preview": None, "available": False}
+            continue
+        text = " ".join((r["content"] or "").split())
+        if not text:
+            files = (file_names or {}).get(mid) or []
+            if files:
+                first = files[0]
+                text = "Photo" if first.get("kind") == "image" else f"File: {first.get('file_name') or 'file'}"
+            else:
+                text = "Message"
+        if len(text) > 120:
+            text = text[:117] + "\u2026"
+        out[mid] = {
+            "message_id": mid,
+            "author_user_id": r["author_user_id"],
+            "display_name": r["display_name"],
+            "preview": text,
+            "available": True,
+        }
+    return out
 
 
 def edit_public_chat_message(
@@ -3173,14 +3874,13 @@ def _policy_from_row(group_id: str, row: Optional[Any]) -> Dict[str, Any]:
         return {
             "group_id": group_id,
             "description": "",
-            "avatar_url": None,
             "visibility": "invite_only",
-            "min_level": 7,
             "min_eth_balance_wei": "0",
             "require_invitation": True,
             "is_paid": False,
             "entry_fee_eth": "0",
             "entry_fee_usd": "0",
+            "entry_fee_yearly_usd": "0",
             "entry_fee_wei": "0",
         }
 
@@ -3212,17 +3912,23 @@ def _policy_from_row(group_id: str, row: Optional[Any]) -> Dict[str, Any]:
     except Exception:
         pass
 
+    fee_yearly_str = "0"
+    try:
+        if "entry_fee_yearly_usd" in row.keys() and row["entry_fee_yearly_usd"]:
+            fee_yearly_str = str(row["entry_fee_yearly_usd"])
+    except Exception:
+        pass
+
     return {
         "group_id": row["group_id"],
         "description": row["description"] or "",
-        "avatar_url": row["avatar_url"],
         "visibility": row["visibility"] or "invite_only",
-        "min_level": int(row["min_level"] or 7),
         "min_eth_balance_wei": str(row["min_eth_balance_wei"] or "0"),
         "require_invitation": bool(row["require_invitation"]),
         "is_paid": is_paid,
         "entry_fee_eth": fee_eth,
         "entry_fee_usd": fee_usd_str,
+        "entry_fee_yearly_usd": fee_yearly_str,
         "entry_fee_wei": fee_wei,
         "updated_at": _iso(row["updated_at"]),
     }
@@ -3255,19 +3961,20 @@ def get_group_access_policies_batch(group_ids: List[str]) -> Dict[str, Dict[str,
 def upsert_group_access_policy(
     group_id: str,
     description: str,
-    avatar_url: Optional[str],
     visibility: str,
-    min_level: int = 7,
     min_eth_balance_wei: str = "0",
     require_invitation: bool = True,
     actor_user_id: str = "system",
     is_paid: bool = False,
     entry_fee_eth: str = "0",
     entry_fee_usd: Optional[Any] = None,
+    entry_fee_yearly_usd: Optional[Any] = None,
 ) -> Dict[str, Any]:
     _ready()
-    if min_level < 7:
-        raise ValueError("Group min_level must be >= 7")
+    # Old columns that no longer mean anything (levels / group avatars were removed): kept so old databases
+    # keep working, always written with these constants.
+    min_level = 7
+    avatar_url = None
     if int(min_eth_balance_wei) < 0:
         raise ValueError("min_eth_balance_wei cannot be negative")
 
@@ -3304,6 +4011,23 @@ def upsert_group_access_policy(
     if clean_entry_fee_usd is None:
         clean_entry_fee_usd = "0"
 
+    # Yearly price (USD). None = keep the current value; 0 = automatic (12 x monthly). Free groups have none.
+    if entry_fee_yearly_usd is None:
+        try:
+            clean_yearly_usd = str(get_group_access_policy(group_id).get("entry_fee_yearly_usd") or "0")
+        except Exception:
+            clean_yearly_usd = "0"
+    else:
+        try:
+            y_flt = float(entry_fee_yearly_usd or 0)
+            if y_flt < 0 or y_flt > 1000000:
+                raise ValueError("out of range")
+        except (TypeError, ValueError):
+            raise ValueError("Group yearly price (USD) must be between 0 and 1000000")
+        clean_yearly_usd = str(round(y_flt, 2))
+    if not is_paid:
+        clean_yearly_usd = "0"
+
     ts = _now_iso()
     if _is_pg():
         conn = chat_db._pg_pool.getconn()
@@ -3315,9 +4039,9 @@ def upsert_group_access_policy(
                     INSERT INTO group_access_policies (
                         group_id, description, avatar_url, visibility,
                         min_level, min_eth_balance_wei, require_invitation,
-                        is_paid, entry_fee_eth, entry_fee_wei, entry_fee_usd,
+                        is_paid, entry_fee_eth, entry_fee_wei, entry_fee_usd, entry_fee_yearly_usd,
                         updated_by, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (group_id) DO UPDATE SET
                         description = EXCLUDED.description,
                         avatar_url = EXCLUDED.avatar_url,
@@ -3329,6 +4053,7 @@ def upsert_group_access_policy(
                         entry_fee_eth = EXCLUDED.entry_fee_eth,
                         entry_fee_wei = EXCLUDED.entry_fee_wei,
                         entry_fee_usd = EXCLUDED.entry_fee_usd,
+                        entry_fee_yearly_usd = EXCLUDED.entry_fee_yearly_usd,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at;
                     """,
@@ -3344,6 +4069,7 @@ def upsert_group_access_policy(
                         clean_entry_fee_eth,
                         clean_entry_fee_wei,
                         clean_entry_fee_usd,
+                        clean_yearly_usd,
                         actor_user_id,
                         ts,
                     ),
@@ -3362,9 +4088,9 @@ def upsert_group_access_policy(
                 INSERT INTO group_access_policies (
                     group_id, description, avatar_url, visibility,
                     min_level, min_eth_balance_wei, require_invitation,
-                    is_paid, entry_fee_eth, entry_fee_wei, entry_fee_usd,
+                    is_paid, entry_fee_eth, entry_fee_wei, entry_fee_usd, entry_fee_yearly_usd,
                     updated_by, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(group_id) DO UPDATE SET
                     description = excluded.description,
                     avatar_url = excluded.avatar_url,
@@ -3376,6 +4102,7 @@ def upsert_group_access_policy(
                     entry_fee_eth = excluded.entry_fee_eth,
                     entry_fee_wei = excluded.entry_fee_wei,
                     entry_fee_usd = excluded.entry_fee_usd,
+                    entry_fee_yearly_usd = excluded.entry_fee_yearly_usd,
                     updated_by = excluded.updated_by,
                     updated_at = excluded.updated_at
                 """,
@@ -3391,6 +4118,7 @@ def upsert_group_access_policy(
                     clean_entry_fee_eth,
                     clean_entry_fee_wei,
                     clean_entry_fee_usd,
+                    clean_yearly_usd,
                     actor_user_id,
                     ts,
                 ),
@@ -3404,11 +4132,11 @@ def upsert_group_access_policy(
         group_id,
         {
             "visibility": visibility,
-            "min_level": min_level,
             "min_eth_balance_wei": str(int(min_eth_balance_wei)),
             "is_paid": bool(is_paid),
             "entry_fee_eth": clean_entry_fee_eth,
             "entry_fee_usd": clean_entry_fee_usd,
+            "entry_fee_yearly_usd": clean_yearly_usd,
         },
     )
     return get_group_access_policy(group_id)
@@ -3420,6 +4148,7 @@ def verify_user_meets_group_policy(group_id: str, candidate_user_id: str) -> Tup
     1. Active non-suspended account
     2. Minimum verified ETH balance check (`policy.min_eth_balance_wei`)
     3. Paid group status: If group is marked `is_paid`, candidate must have paid group entry fee
+    An admin's free-access grant for this group waives rules 2 and 3 (never rule 1).
     """
     ext = get_extended_user_fields(candidate_user_id)
     if not ext:
@@ -3431,21 +4160,27 @@ def verify_user_meets_group_policy(group_id: str, candidate_user_id: str) -> Tup
     req_bal = int(pol.get("min_eth_balance_wei") or "0")
     user_bal = int(ext.get("qualifying_balance_wei") or "0")
 
-    if user_bal < req_bal:
+    balance_ok = user_bal >= req_bal
+    # Paid group: joining AND staying require an active subscription (monthly or yearly).
+    paid_ok = (not pol.get("is_paid")) or has_user_paid_group_entry(candidate_user_id, group_id)
+    if balance_ok and paid_ok:
+        return True, "ok"
+
+    # Something is missing. Free access from an admin for THIS group waives both the balance
+    # rule and the fee (the account must still be in good standing, checked above).
+    if has_active_access_grant(candidate_user_id, "group", group_id):
+        return True, "ok"
+
+    if not balance_ok:
         return (
             False,
             f"Requires verified ETH balance >= {req_bal} Wei (verify your wallet balance in Settings)",
         )
-
-    if pol.get("is_paid"):
-        # People already inside when a group becomes paid keep their place; the fee applies to newcomers.
-        if e2ee_db.is_active_group_member(group_id, candidate_user_id):
-            return True, "ok"
-        if not has_user_paid_group_entry(candidate_user_id, group_id):
-            gp = get_group_pricing(group_id)
-            return False, f"Paid group: requires an entry fee of ${gp['entry_fee_usd']:.2f} ({gp['entry_fee_eth']} ETH)"
-
-    return True, "ok"
+    gp = get_group_pricing(group_id)
+    return False, (
+        f"Paid group: requires a subscription (${gp['plans']['monthly']['usd']:.2f}/month "
+        f"or ${gp['plans']['yearly']['usd']:.2f}/year)"
+    )
 
 
 def list_discoverable_groups(viewer_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -3457,14 +4192,15 @@ def list_discoverable_groups(viewer_user_id: Optional[str] = None) -> List[Dict[
                 cur.execute(
                     """
                     SELECT g.group_id, g.name, g.creator_user_id, g.current_epoch,
-                           p.description, p.avatar_url, p.visibility, p.min_level,
+                           p.description, p.visibility,
                            p.min_eth_balance_wei, p.require_invitation,
-                           p.is_paid, p.entry_fee_eth, p.entry_fee_wei,
+                           p.is_paid, p.entry_fee_eth, p.entry_fee_wei, p.entry_fee_yearly_usd, p.entry_fee_usd,
                            (SELECT COUNT(DISTINCT m.user_id) FROM chat_group_members m WHERE m.group_id = g.group_id AND m.status = 'active') AS member_count
                     FROM chat_groups g
                     JOIN group_access_policies p ON p.group_id = g.group_id
                     WHERE p.visibility = 'public'
-                    ORDER BY g.created_bucket DESC;
+                    ORDER BY g.created_bucket DESC
+                    LIMIT 200;
                     """
                 )
                 rows = cur.fetchall()
@@ -3476,46 +4212,81 @@ def list_discoverable_groups(viewer_user_id: Optional[str] = None) -> List[Dict[
             cur.execute(
                 """
                 SELECT g.group_id, g.name, g.creator_user_id, g.current_epoch,
-                       p.description, p.avatar_url, p.visibility, p.min_level,
+                       p.description, p.visibility,
                        p.min_eth_balance_wei, p.require_invitation,
-                       p.is_paid, p.entry_fee_eth, p.entry_fee_wei,
+                       p.is_paid, p.entry_fee_eth, p.entry_fee_wei, p.entry_fee_yearly_usd, p.entry_fee_usd,
                        (SELECT COUNT(DISTINCT m.user_id) FROM chat_group_members m WHERE m.group_id = g.group_id AND m.status = 'active') AS member_count
                 FROM chat_groups g
                 JOIN group_access_policies p ON p.group_id = g.group_id
                 WHERE p.visibility = 'public'
                 ORDER BY g.created_bucket DESC
+                LIMIT 200
                 """
             )
             rows = cur.fetchall()
 
+    # Viewer facts are loaded ONCE (this used to cost ~5 database queries per group, so the page
+    # got slower with every public group). The eligibility rules below mirror
+    # verify_user_meets_group_policy exactly.
+    viewer_ext: Dict[str, Any] = {}
+    member_gids: set = set()
+    granted_gids: set = set()  # groups the admin gave this viewer free access to
+    if viewer_user_id:
+        viewer_ext = get_extended_user_fields(viewer_user_id)
+        member_gids = {g["group_id"] for g in e2ee_db.list_groups_for_user(viewer_user_id)}
+        granted_gids = active_group_grant_ids(viewer_user_id)
+
     out = []
     for r in rows:
         gid = r["group_id"]
-        is_member = e2ee_db.is_active_group_member(gid, viewer_user_id) if viewer_user_id else False
-        eligible, reason = (
-            verify_user_meets_group_policy(gid, viewer_user_id)
-            if viewer_user_id
-            else (False, "Sign in with MetaMask to check eligibility")
-        )
+        is_member = gid in member_gids
         cnt = int(r["member_count"] or 0)
         is_paid = bool(r["is_paid"] if "is_paid" in r.keys() else False)
         fee_eth = str(r["entry_fee_eth"] if "entry_fee_eth" in r.keys() else "0")
         fee_wei = str(r["entry_fee_wei"] if "entry_fee_wei" in r.keys() else "0")
-        has_paid = has_user_paid_group_entry(viewer_user_id, gid) if (viewer_user_id and is_paid) else True
+        has_paid = (
+            (gid in granted_gids or has_user_paid_group_entry(viewer_user_id, gid)) if (viewer_user_id and is_paid) else True
+        )
+
+        if not viewer_user_id:
+            eligible, reason = False, "Sign in with MetaMask to check eligibility"
+        elif not viewer_ext:
+            eligible, reason = False, "Candidate user account not found"
+        elif viewer_ext.get("account_status") == "suspended":
+            eligible, reason = False, "Account is currently suspended"
+        else:
+            req_bal = int(r["min_eth_balance_wei"] or "0")
+            user_bal = int(viewer_ext.get("qualifying_balance_wei") or "0")
+            if gid in granted_gids:
+                eligible, reason = True, "ok"  # admin gave this member free access to this group
+            elif user_bal < req_bal:
+                eligible, reason = (
+                    False,
+                    f"Requires verified ETH balance >= {req_bal} Wei (verify your wallet balance in Settings)",
+                )
+            elif is_paid and not has_paid:
+                gp = get_group_pricing(gid)
+                eligible, reason = (
+                    False,
+                    f"Paid group: requires a subscription (${gp['plans']['monthly']['usd']:.2f}/month "
+                    f"or ${gp['plans']['yearly']['usd']:.2f}/year)",
+                )
+            else:
+                eligible, reason = True, "ok"
 
         out.append({
             "group_id": gid,
             "name": r["name"],
             "description": r["description"] or "",
-            "avatar_url": r["avatar_url"],
             "visibility": r["visibility"],
-            "min_level": int(r["min_level"] or 7),
             "min_eth_balance_wei": str(r["min_eth_balance_wei"] or "0"),
             "require_invitation": bool(r["require_invitation"]),
             "is_paid": is_paid,
             "entry_fee_eth": fee_eth,
             "entry_fee_wei": fee_wei,
             "has_paid": has_paid,
+            "entry_fee_usd": str(r["entry_fee_usd"] if "entry_fee_usd" in r.keys() else "0"),
+            "entry_fee_yearly_usd": str(r["entry_fee_yearly_usd"] if "entry_fee_yearly_usd" in r.keys() else "0"),
             "member_count": cnt,
             "active_member_count": cnt,
             "is_member": is_member,
@@ -3643,6 +4414,15 @@ def revoke_group_invite_link(group_id: str, invite_code: str) -> None:
             chat_db._sqlite_conn.commit()
 
 
+class GroupPaymentRequired(PermissionError):
+    """A paid group the member has no active subscription for (the app opens its payment window)."""
+
+    def __init__(self, message: str, group_id: str, group_name: str):
+        super().__init__(message)
+        self.group_id = group_id
+        self.group_name = group_name
+
+
 def create_group_join_request(
     user_id: str,
     group_id: Optional[str] = None,
@@ -3687,11 +4467,17 @@ def create_group_join_request(
         return {"status": "already_member", "group_id": group_id}
 
     pol = get_group_access_policy(group_id)
-    if not invite_code and pol["visibility"] != "public":
+    if (
+        not invite_code
+        and pol["visibility"] != "public"
+        and not has_active_access_grant(user_id, "group", group_id)  # an admin let this member in
+    ):
         raise PermissionError("This group is invite-only; a valid invite link or admin invite is required")
 
     ok, reason = verify_user_meets_group_policy(group_id, user_id)
     if not ok:
+        if pol.get("is_paid") and not has_user_paid_group_entry(user_id, group_id):
+            raise GroupPaymentRequired(reason, group_id, grp.get("name") or "Group")
         raise PermissionError(reason)
 
     req_id = f"greq_{secrets.token_hex(10)}"
@@ -3815,6 +4601,39 @@ def list_pending_group_join_requests(group_id: str) -> List[Dict[str, Any]]:
         ]
 
 
+def decline_group_join_request(group_id: str, request_id: str) -> bool:
+    """Marks one PENDING join request declined. Returns False when there was nothing pending to decline."""
+    _ready()
+    ts = _now_iso()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_join_requests SET status = 'declined', reviewed_at = %s
+                    WHERE group_id = %s AND request_id = %s AND status = 'pending';
+                    """,
+                    (ts, group_id, request_id),
+                )
+                changed = cur.rowcount
+            conn.commit()
+        finally:
+            chat_db._pg_pool.putconn(conn)
+        return changed > 0
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute(
+            """
+            UPDATE group_join_requests SET status = 'declined', reviewed_at = ?
+            WHERE group_id = ? AND request_id = ? AND status = 'pending'
+            """,
+            (ts, group_id, request_id),
+        )
+        chat_db._sqlite_conn.commit()
+        return cur.rowcount > 0
+
+
 def mark_group_join_requests_approved(group_id: str, user_ids: List[str]) -> None:
     if not user_ids:
         return
@@ -3848,6 +4667,25 @@ def mark_group_join_requests_approved(group_id: str, user_ids: List[str]) -> Non
                 [ts, group_id, *user_ids],
             )
             chat_db._sqlite_conn.commit()
+
+
+def has_pending_join_request(group_id: str, user_id: str) -> bool:
+    """True when the user asked to join this group themselves (join request or invite code), so an
+    admin approving them adds them straight in, with no separate Accept step."""
+    _ready()
+    sql = "SELECT 1 FROM group_join_requests WHERE group_id = {ph} AND user_id = {ph} AND status = 'pending' LIMIT 1"
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql.format(ph="%s"), (group_id, user_id))
+                return cur.fetchone() is not None
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute(sql.format(ph="?"), (group_id, user_id))
+        return cur.fetchone() is not None
 
 
 @auth_cache.invalidates_auth_cache(namespaces=('group', 'user_groups'))
@@ -3968,6 +4806,8 @@ def admin_list_users(query: str = "", limit: int = 50) -> List[Dict[str, Any]]:
                            u.username,
                            u.qualifying_balance_wei,
                            u.account_status,
+                           u.suspended_until,
+                           u.suspension_reason,
                            ar.role AS admin_role,
                            (
                                SELECT w2.wallet_address
@@ -4005,6 +4845,8 @@ def admin_list_users(query: str = "", limit: int = 50) -> List[Dict[str, Any]]:
                        u.username,
                        u.qualifying_balance_wei,
                        u.account_status,
+                       u.suspended_until,
+                       u.suspension_reason,
                        ar.role AS admin_role,
                        (
                            SELECT w2.wallet_address
@@ -4039,6 +4881,8 @@ def admin_list_users(query: str = "", limit: int = 50) -> List[Dict[str, Any]]:
             "primary_wallet": r["primary_wallet"],
             "qualifying_balance_wei": str(r["qualifying_balance_wei"] or "0"),
             "account_status": r["account_status"] or "active",
+            "suspended_until": _iso(r["suspended_until"]),
+            "suspension_reason": r["suspension_reason"],
             "admin_role": r["admin_role"],
         }
         for r in rows
@@ -4130,22 +4974,138 @@ def admin_moderate_user_account(
     return enrich_user_dict(e2ee_db.get_user_by_id(target_user_id))  # type: ignore[return-value]
 
 
+# Children first (foreign keys), the group itself last.
+_GROUP_DELETE_STEPS = (
+    ("files", "DELETE FROM chat_encrypted_attachments WHERE scope_type = 'group' AND scope_id = {p}"),
+    ("join_requests", "DELETE FROM group_join_requests WHERE group_id = {p}"),
+    ("invites", "DELETE FROM group_invite_links WHERE group_id = {p}"),
+    ("policy", "DELETE FROM group_access_policies WHERE group_id = {p}"),
+    ("subscriptions", "DELETE FROM member_subscriptions WHERE scope_type = 'group' AND scope_id = {p}"),
+    ("access_grants", "DELETE FROM access_grants WHERE scope_type = 'group' AND scope_id = {p}"),
+    ("welcomes", "DELETE FROM chat_group_welcomes WHERE group_id = {p}"),
+    ("commits", "DELETE FROM chat_group_commits WHERE group_id = {p}"),
+    ("messages", "DELETE FROM chat_group_messages WHERE group_id = {p}"),
+    ("members", "DELETE FROM chat_group_members WHERE group_id = {p}"),
+    ("group", "DELETE FROM chat_groups WHERE group_id = {p}"),
+)
+
+
+@auth_cache.invalidates_auth_cache
+def delete_group(group_id: str, actor_user_id: str) -> Optional[Dict[str, Any]]:
+    """Permanently deletes a group with its messages, files, invites, join requests, policy and members,
+    in ONE transaction (all or nothing). Returns None when the group does not exist.
+    Payment records are kept (they are the receipt for what members paid)."""
+    _ready()
+    gid = (group_id or "").strip()
+    if not gid:
+        return None
+    counts: Dict[str, int] = {}
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM chat_groups WHERE group_id = %s;", (gid,))
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    return None
+                name = row[0]
+                cur.execute(
+                    "SELECT DISTINCT user_id FROM chat_group_members WHERE group_id = %s AND status = 'active';",
+                    (gid,),
+                )
+                member_ids = [r[0] for r in cur.fetchall()]
+                for key, sql in _GROUP_DELETE_STEPS:
+                    cur.execute(sql.format(p="%s") + ";", (gid,))
+                    counts[key] = int(cur.rowcount or 0)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            try:
+                cur.execute("SELECT name FROM chat_groups WHERE group_id = ?", (gid,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                name = row[0]
+                cur.execute(
+                    "SELECT DISTINCT user_id FROM chat_group_members WHERE group_id = ? AND status = 'active'",
+                    (gid,),
+                )
+                member_ids = [r[0] for r in cur.fetchall()]
+                for key, sql in _GROUP_DELETE_STEPS:
+                    cur.execute(sql.format(p="?"), (gid,))
+                    counts[key] = int(cur.rowcount or 0)
+                chat_db._sqlite_conn.commit()
+            except Exception:
+                chat_db._sqlite_conn.rollback()
+                raise
+
+    record_audit_log(
+        actor_user_id,
+        "group_deleted",
+        "group",
+        gid,
+        {"name": name, "members": len(member_ids), "messages": counts.get("messages", 0), "files": counts.get("files", 0)},
+    )
+    return {
+        "group_id": gid,
+        "name": name,
+        "member_user_ids": member_ids,
+        "removed_messages": counts.get("messages", 0),
+        "removed_files": counts.get("files", 0),
+    }
+
+
 def admin_get_overview_stats() -> Dict[str, Any]:
+    """Numbers for the Admin456 overview cards.
+
+    - total_users: every wallet that ever signed in (registered), paying or not.
+    - paid_members: people whose platform subscription is active right now.
+    - active_sessions: DISTINCT people holding a valid login (a login lasts 24 h), not live connections.
+    - public_messages: only messages members can still see (inside the retention window, not deleted).
+    - total_groups: groups that still exist AND still have at least one active member.
+    """
     _ready()
     now_iso = _now_iso()
+    settings = get_platform_settings()
+    try:
+        retention_days = int(settings.get("public_chat_retention_days") or 90)
+    except Exception:
+        retention_days = 90
+    retention_cutoff = (_now() - timedelta(days=retention_days)).isoformat()
+    try:
+        membership_free = float(settings.get("platform_entry_fee_usd") or 0) <= 0
+    except Exception:
+        membership_free = False
+
+    live_groups_sql = (
+        "SELECT COUNT(*) FROM chat_groups g WHERE EXISTS ("
+        "SELECT 1 FROM chat_group_members m WHERE m.group_id = g.group_id AND m.status = 'active')"
+    )
     if _is_pg():
         conn = chat_db._pg_pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM chat_users;")
                 total_users = int(cur.fetchone()[0])
-                cur.execute("SELECT COUNT(*) FROM chat_auth_sessions WHERE revoked = FALSE AND expires_at > CURRENT_TIMESTAMP;")
+                cur.execute(
+                    "SELECT COUNT(DISTINCT user_id) FROM member_subscriptions "
+                    "WHERE scope_type = 'platform' AND scope_id = 'platform' AND paid_until > CURRENT_TIMESTAMP;"
+                )
+                paid_members = int(cur.fetchone()[0])
+                cur.execute("SELECT COUNT(DISTINCT user_id) FROM chat_auth_sessions WHERE revoked = FALSE AND expires_at > CURRENT_TIMESTAMP;")
                 active_sessions = int(cur.fetchone()[0])
                 cur.execute("SELECT COUNT(*) FROM chat_devices WHERE status = 'active';")
                 active_devices = int(cur.fetchone()[0])
-                cur.execute("SELECT COUNT(*) FROM public_chat_messages WHERE deleted = FALSE;")
+                cur.execute("SELECT COUNT(*) FROM public_chat_messages WHERE deleted = FALSE AND created_at >= %s;", (retention_cutoff,))
                 public_messages = int(cur.fetchone()[0])
-                cur.execute("SELECT COUNT(*) FROM chat_groups;")
+                cur.execute(live_groups_sql + ";")
                 encrypted_groups = int(cur.fetchone()[0])
                 cur.execute("SELECT COUNT(*) FROM chat_dm_messages;")
                 encrypted_dm_messages = int(cur.fetchone()[0])
@@ -4162,13 +5122,19 @@ def admin_get_overview_stats() -> Dict[str, Any]:
             cur = chat_db._sqlite_conn.cursor()
             cur.execute("SELECT COUNT(*) FROM chat_users")
             total_users = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM chat_auth_sessions WHERE revoked = 0 AND expires_at > ?", (now_iso,))
+            cur.execute(
+                "SELECT COUNT(DISTINCT user_id) FROM member_subscriptions "
+                "WHERE scope_type = 'platform' AND scope_id = 'platform' AND paid_until > ?",
+                (now_iso,),
+            )
+            paid_members = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(DISTINCT user_id) FROM chat_auth_sessions WHERE revoked = 0 AND expires_at > ?", (now_iso,))
             active_sessions = int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM chat_devices WHERE status = 'active'")
             active_devices = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM public_chat_messages WHERE deleted = 0")
+            cur.execute("SELECT COUNT(*) FROM public_chat_messages WHERE deleted = 0 AND created_at >= ?", (retention_cutoff,))
             public_messages = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM chat_groups")
+            cur.execute(live_groups_sql)
             encrypted_groups = int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM chat_dm_messages")
             encrypted_dm_messages = int(cur.fetchone()[0])
@@ -4181,6 +5147,8 @@ def admin_get_overview_stats() -> Dict[str, Any]:
 
     return {
         "total_users": total_users,
+        "paid_members": paid_members,
+        "membership_free": membership_free,
         "active_sessions": active_sessions,
         "active_devices": active_devices,
         "total_groups": encrypted_groups,
@@ -4190,6 +5158,7 @@ def admin_get_overview_stats() -> Dict[str, Any]:
         "encrypted_group_messages": encrypted_group_messages,
         "open_reports": open_reports,
         "moderation_actions": mod_actions,
+        "generated_at": now_iso,
     }
 
 
@@ -4202,8 +5171,13 @@ def admin_list_all_groups(limit: int = 100) -> List[Dict[str, Any]]:
                 cur.execute(
                     """
                     SELECT g.group_id, g.name, g.creator_user_id, g.current_epoch, g.created_bucket,
-                           (SELECT COUNT(DISTINCT m.user_id) FROM chat_group_members m WHERE m.group_id = g.group_id AND m.status = 'active') AS member_count
+                           (SELECT COUNT(DISTINCT m.user_id) FROM chat_group_members m WHERE m.group_id = g.group_id AND m.status = 'active') AS member_count,
+                           u.username AS creator_username,
+                           (SELECT w.wallet_address FROM chat_user_wallets w
+                             WHERE w.user_id = g.creator_user_id AND w.status = 'active'
+                             ORDER BY w.is_primary DESC LIMIT 1) AS creator_wallet
                     FROM chat_groups g
+                    LEFT JOIN chat_users u ON u.user_id = g.creator_user_id
                     ORDER BY g.created_bucket DESC
                     LIMIT %s;
                     """,
@@ -4218,8 +5192,13 @@ def admin_list_all_groups(limit: int = 100) -> List[Dict[str, Any]]:
             cur.execute(
                 """
                 SELECT g.group_id, g.name, g.creator_user_id, g.current_epoch, g.created_bucket,
-                       (SELECT COUNT(DISTINCT m.user_id) FROM chat_group_members m WHERE m.group_id = g.group_id AND m.status = 'active') AS member_count
+                       (SELECT COUNT(DISTINCT m.user_id) FROM chat_group_members m WHERE m.group_id = g.group_id AND m.status = 'active') AS member_count,
+                       u.username AS creator_username,
+                       (SELECT w.wallet_address FROM chat_user_wallets w
+                         WHERE w.user_id = g.creator_user_id AND w.status = 'active'
+                         ORDER BY w.is_primary DESC LIMIT 1) AS creator_wallet
                 FROM chat_groups g
+                LEFT JOIN chat_users u ON u.user_id = g.creator_user_id
                 ORDER BY g.created_bucket DESC
                 LIMIT ?
                 """,
@@ -4235,8 +5214,13 @@ def admin_list_all_groups(limit: int = 100) -> List[Dict[str, Any]]:
             "group_id": gid,
             "name": r["name"],
             "creator_user_id": r["creator_user_id"],
+            "creator_username": r["creator_username"],
+            "creator_wallet": r["creator_wallet"],
             "current_epoch": int(r["current_epoch"]),
             "member_count": int(r["member_count"] or 0),
+            # The Admin456 Groups tab reads `active_member_count` (it used to show a blank number).
+            "active_member_count": int(r["member_count"] or 0),
+            "empty": int(r["member_count"] or 0) == 0,
             "created_at": r["created_bucket"],
             "policy": pol,
         })

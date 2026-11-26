@@ -17,9 +17,7 @@ This document details all environment variables used by the **Zyphra.in** Chat P
 | `RPC_URL_MAINNET` | Recommended | None | Primary read-only Ethereum Mainnet JSON-RPC endpoint (`chain_id = 1`, `eth_getBalance` + `eth_blockNumber`), used when Admin `Active Ethereum Network` (`default_balance_chain_id`) is `1`. |
 | `RPC_URL_MAINNET_FALLBACK` | Optional | None | Automatic failover Ethereum Mainnet JSON-RPC endpoint (e.g., `https://ethereum-rpc.publicnode.com`). |
 | `RPC_URL_SEPOLIA` | Recommended | None | Read-only Ethereum Sepolia Testnet JSON-RPC endpoint (`chain_id = 11155111`), used when Admin `Active Ethereum Network` (`default_balance_chain_id`) is `11155111`. |
-| `EXPECTED_CHAIN_ID` | No | `11155111` | Initial default EVM chain ID (`11155111` Sepolia or `1` Mainnet) used before or unless overridden by Admin `/Admin456` `Active Ethereum Network` (`default_balance_chain_id`). |
-| `AUTHORIZED_PAYMENT_DESTINATION` | Recommended | `0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed` | Server-controlled authorized treasury address. On-chain payments sent to any other destination are permanently rejected. |
-| `PLATFORM_ENTRY_FEE_USD` | Optional | `10` (`0` in tests) | Default platform admission fee in US Dollars, converted to ETH at quote time. Editable in `/Admin456`. |
+| _(removed)_ `EXPECTED_CHAIN_ID`, `AUTHORIZED_PAYMENT_DESTINATION`, `PLATFORM_ENTRY_FEE_USD` | - | - | No longer environment variables. Active network, treasury wallet and membership price are managed only in Admin `/Admin456` -> Platform Settings (stored in the database, audit-logged). Payments are accepted only on the active network. |
 | `PAYMENT_PRICE_TOLERANCE_PCT` | Optional | `5` | Allowed ETH/USD price movement (%) between quote and on-chain payment confirmation. |
 | `ETH_USD_PRICE` | Optional | `2500.0` | Fixed/fallback 1 ETH to USD rate used when live pricing is disabled or all live sources fail. Editable in `/Admin456`. |
 | `ETH_PRICE_CACHE_SECS` | Optional | `60` | Cache TTL (seconds) for live Coinbase/Kraken ETH/USD spot quotes in `price_oracle.py`. |
@@ -53,9 +51,6 @@ RPC_URL_MAINNET=https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY
 RPC_URL_MAINNET_FALLBACK=https://ethereum-rpc.publicnode.com
 RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/YOUR_API_KEY
 
-# Default EVM Chain ID for balance verification (1 = Mainnet, 11155111 = Sepolia)
-EXPECTED_CHAIN_ID=11155111
-
 # Application Domain & Allowed Frontend Origins (comma-separated)
 APP_DOMAIN=zyphra.in
 FRONTEND_URL=http://localhost:5173
@@ -69,10 +64,6 @@ ADMIN_TOKEN=replace_with_high_entropy_random_secret_min_24_chars
 # Admin Console login for the /Admin456 page (server-side only; leave unset to disable the login)
 ADMIN_LOGIN_ID=replace_with_admin_login_id
 ADMIN_LOGIN_PASSWORD=replace_with_strong_admin_password
-
-# Authorized payment recipient destination (checksummed EVM address for qualifying level payments)
-# Server-controlled, never accepted from client; editable at runtime via Superadmin settings.
-AUTHORIZED_PAYMENT_DESTINATION=0x0000000000000000000000000000000000000000
 
 # Platform Admission Fee in ETH (default: 0.01 ETH) and ETH USD Valuation Rate (default: $2,500)
 PLATFORM_ENTRY_FEE_ETH=0.01

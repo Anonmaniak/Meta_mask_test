@@ -40,7 +40,7 @@ Server-side wallet balance and payment verification (`eth_rpc.py`) queries Ether
    ```
 3. **Start Command**:
    ```bash
-   uvicorn app:app --host 0.0.0.0 --port $PORT
+   uvicorn app:app --host 0.0.0.0 --port $PORT --no-access-log
    ```
 4. **Environment Variables**:
 
@@ -52,8 +52,6 @@ Server-side wallet balance and payment verification (`eth_rpc.py`) queries Ether
    | `RPC_URL_MAINNET` | Primary Ethereum Mainnet HTTPS JSON-RPC URL (`chain_id = 1`) |
    | `RPC_URL_MAINNET_FALLBACK` | Fallback Ethereum Mainnet HTTPS JSON-RPC URL (e.g., `https://ethereum-rpc.publicnode.com`) |
    | `RPC_URL_SEPOLIA` | Ethereum Sepolia HTTPS JSON-RPC URL (`chain_id = 11155111`) |
-   | `EXPECTED_CHAIN_ID` | `1` (Mainnet) or `11155111` (Sepolia) |
-   | `PLATFORM_ENTRY_FEE_USD` | Optional USD membership price (default `10`, also editable in `/Admin456`) |
    | `PAYMENT_PRICE_TOLERANCE_PCT` | Optional quote-to-payment tolerance `%` (default `5`) |
    | `DB_POOL_MIN` / `DB_POOL_MAX` | Optional PostgreSQL pool bounds (default `3` / `10`) |
    | `RENDER_EXTERNAL_URL` | Optional `https://<your-render-service>.onrender.com` for periodic `/api/health` keep-alive |
@@ -79,15 +77,30 @@ Server-side wallet balance and payment verification (`eth_rpc.py`) queries Ether
 
 ---
 
-## 4. Deploy Frontend to Vercel
+## 4. Deploy Frontend to Render (Static Site)
 
-1. Import the repository into [Vercel](https://vercel.com) and set **Root Directory** to `frontend`.
-2. **Framework Preset**: `Vite`
-3. **Build Command**: `npm run build`
-4. **Output Directory**: `dist`
-5. **Environment Variable**:
-   - `VITE_BACKEND_URL` = `https://<your-render-service>.onrender.com/api`
-6. Deploy and attach your custom domain (e.g., `zyphra.in`), ensuring `FRONTEND_URL` and `APP_DOMAIN` on Render match your frontend domain. (`frontend/vercel.json` is already included so direct loads/refreshes on `/settings`, `/payments`, `/support`, and `/Admin456` rewrite cleanly to `/index.html`.)
+1. In Render: **New → Static Site**, connect the repository, set **Root Directory** to `frontend`.
+2. **Build Command**: `npm ci && npm run build`
+3. **Publish Directory**: `dist`
+4. **Environment Variable**: `VITE_BACKEND_URL` = `https://<your-render-backend>.onrender.com/api`
+   - It must start with `https://`. The build stops with a clear error otherwise, because the page's
+     security policy (written into `index.html` at build time, see `frontend/csp.config.ts`) only lets
+     the app talk to this backend.
+   - After changing this value, redeploy the static site so the policy is rebuilt.
+5. **Redirects/Rewrites** (Settings → Redirects/Rewrites): add a **Rewrite** from `/*` to `/index.html`, so
+   direct loads and refreshes of `/settings`, `/payments`, `/support` and `/Admin456` work.
+6. **Headers** (Settings → Headers), path `/*` (a page cannot set these itself):
+   - `X-Frame-Options: DENY`
+   - `Content-Security-Policy: frame-ancestors 'none'`
+   - `Strict-Transport-Security: max-age=63072000; includeSubDomains`
+   - `X-Content-Type-Options: nosniff`
+   - `Referrer-Policy: no-referrer`
+   - `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=()`
+   And for path `/assets/*`: `Cache-Control: public, max-age=31536000, immutable`
+7. Attach your custom domain (e.g. `zyphra.in`) and make sure `FRONTEND_URL` and `APP_DOMAIN` on the backend
+   service match it exactly.
+
+(`frontend/vercel.json` is only used if you ever host the frontend on Vercel instead.)
 
 ---
 
@@ -96,6 +109,6 @@ Server-side wallet balance and payment verification (`eth_rpc.py`) queries Ether
 1. **Welcome Gate, Splash & Open Public Chat**: Load `/` in a fresh incognito window; confirm the one-time `WelcomeSplash` (`1 in 10,000` / `For 1% of 1%`) plays, `WelcomeGate` renders with zero scrollbar until connected & paid, and after admission **Chats → Open Chat** opens with the **`PUBLIC`** badge and streams messages over HTTPS/WSS.
 2. **SIWE & Admission Paywall**: Click **Connect MetaMask**, complete the 1-click SIWE signature, and verify `PlatformAdmissionModal` displays the USD fee converted to ETH via the live oracle. After verifying payment, confirm your account pill (`@username`, `Paid Member`) and click `View & Edit Profile →` in its dropdown to open **Profile**.
 3. **Sepolia / Mainnet Verification & Support**: Open **Settings** (`/settings`) to verify balance/membership, and open **Support** (`/support`) to submit a "Talk to admin" thread (works both pre- and post-payment when signed in).
-4. **Private Chats & Safety Number**: Open **Private Chats**, search a peer in `Browse Directory`, exchange encrypted messages and a file attachment, and verify identical 60-digit Safety Numbers.
+4. **Private Chats**: Open **Private Chats**, find a member, and exchange encrypted messages and a file attachment.
 5. **Encrypted Groups & Paid Group Gate**: Open **Encrypted Groups**, create a Paid or policy-gated group, verify `PaidGroupAdmissionModal` USD-to-ETH conversion on join, approve an eligible member via `Browse Groups & Invites` / Group Security, and test **Leave Group**.
 6. **Admin RBAC Console (`/Admin456`)**: Open `/Admin456`, verify unauthenticated requests show only the login gate, sign in with `ADMIN_LOGIN_ID` / `ADMIN_LOGIN_PASSWORD` (rotate any local test password to a strong secret in production!), verify automatic 5-second polling, `Active Ethereum Network` (`1` / `11155111`) switching, live pricing, **Support Inbox** replies, moderation actions, and `audit_logs`, and test **Sign Out**.

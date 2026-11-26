@@ -9,6 +9,7 @@ import {
   type SupportThread,
 } from '../services/platformApi';
 import { SupportConversation, formatSupportTime } from './SupportConversation';
+import { ChatMessagesSkeleton, ListRowsSkeleton } from './Skeleton';
 
 interface AdminSupportInboxProps {
   adminToken: string;
@@ -25,6 +26,7 @@ export const AdminSupportInbox: React.FC<AdminSupportInboxProps> = ({ adminToken
   const [selected, setSelected] = useState<SupportThread | null>(null);
   const [messages, setMessages] = useState<SupportMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [listLoadedOnce, setListLoadedOnce] = useState(false);
   const aliveRef = useRef(true);
 
   const loadList = useCallback(async () => {
@@ -36,6 +38,8 @@ export const AdminSupportInbox: React.FC<AdminSupportInboxProps> = ({ adminToken
       setError(null);
     } catch (err: any) {
       if (aliveRef.current) setError(err?.message || 'Could not load the support inbox.');
+    } finally {
+      if (aliveRef.current) setListLoadedOnce(true);
     }
   }, [filter, adminToken]);
 
@@ -89,7 +93,7 @@ export const AdminSupportInbox: React.FC<AdminSupportInboxProps> = ({ adminToken
               key={f}
               type="button"
               className={filter === f ? 'btn-solid' : 'btn-outline'}
-              style={{ padding: '4px 10px', fontSize: '0.74rem' }}
+              style={{ padding: '4px 10px', fontSize: '0.9rem' }}
               onClick={() => {
                 setFilter(f);
                 setSelectedId(null);
@@ -105,18 +109,20 @@ export const AdminSupportInbox: React.FC<AdminSupportInboxProps> = ({ adminToken
       </div>
 
       {error && (
-        <div role="alert" style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+        <div role="alert" style={{ fontSize: '0.9rem', fontWeight: 600 }}>
           {error}
         </div>
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 18, alignItems: 'start' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {threads.length === 0 && (
+          {!listLoadedOnce && threads.length === 0 ? (
+            <ListRowsSkeleton count={3} compact />
+          ) : threads.length === 0 ? (
             <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
               {filter === 'open' ? 'No open conversations.' : 'Nothing here.'}
             </div>
-          )}
+          ) : null}
           {threads.map((t) => {
             const active = t.thread_id === selectedId;
             return (
@@ -146,7 +152,7 @@ export const AdminSupportInbox: React.FC<AdminSupportInboxProps> = ({ adminToken
                         display: 'inline-flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        fontSize: '0.7rem',
+                        fontSize: '0.9rem',
                         fontWeight: 700,
                         background: 'var(--bg-pill-active)',
                         color: 'var(--text-inverse)',
@@ -156,7 +162,7 @@ export const AdminSupportInbox: React.FC<AdminSupportInboxProps> = ({ adminToken
                     </span>
                   )}
                 </div>
-                <div style={{ marginTop: 3, fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                <div style={{ marginTop: 3, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
                   {who(t)} · {t.status === 'closed' ? 'Closed' : t.last_sender_role === 'user' ? 'Needs reply' : 'Replied'} ·{' '}
                   {formatSupportTime(t.last_message_at)}
                 </div>
@@ -166,19 +172,21 @@ export const AdminSupportInbox: React.FC<AdminSupportInboxProps> = ({ adminToken
         </div>
 
         <div>
-          {selectedId && selected ? (
+          {selectedId && (!selected || selected.thread_id !== selectedId) ? (
+            <ChatMessagesSkeleton count={3} />
+          ) : selectedId && selected ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{selected.subject}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'ui-monospace, monospace' }}>
+                  <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)', fontFamily: 'ui-monospace, monospace' }}>
                     {who(selected)} · {selected.user_id}
                   </div>
                 </div>
                 <button
                   type="button"
                   className="btn-outline"
-                  style={{ padding: '5px 12px', fontSize: '0.76rem' }}
+                  style={{ padding: '5px 12px', fontSize: '0.86rem' }}
                   onClick={async () => {
                     try {
                       await adminSetSupportThreadStatus(selectedId, selected.status === 'open' ? 'closed' : 'open', adminToken);

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { friendlyError } from '../services/friendlyError';
 import {
-  Send,
   MessageSquare,
   Users,
   UserPlus,
@@ -9,24 +9,25 @@ import {
   Copy,
   Check,
   Wallet,
-  Radio,
   ShieldCheck,
-  ShieldAlert,
   KeyRound,
   Plus,
-  Paperclip,
-  Download,
   Globe,
   Ban,
   Flag,
-  CheckCheck,
   Menu,
   X,
   Search,
-  Link2,
   Compass,
   AlertCircle,
-  RotateCcw,
+  BellRing,
+  Reply,
+  Pencil,
+  Trash2,
+  Pin,
+  PinOff,
+  BellOff,
+  Archive,
 } from 'lucide-react';
 import type { ChatMessage } from '../types';
 import { formatAddress } from '../services/web3';
@@ -34,19 +35,19 @@ import { formatAddress } from '../services/web3';
 import {
   loadVaultDecryptedMessage,
   saveVaultDecryptedMessage,
+  saveDeviceVaultRecord,
   wipeUserDeviceVault,
+  deleteVaultRecord,
 } from '../services/e2eeVault';
 import {
   OLM_PROTOCOL_ID,
   getOrCreateLocalOlmDevice,
+  generateFreshLocalOlmDevice,
   markLocalPrekeysPublished,
   generateMoreOlmPrekeys,
   encryptOlmMultiDevicePayload,
   decryptOlmDeviceCiphertext,
-  resetOlmSessionWithPeerDevice,
-  computeSafetyNumber,
   evaluateAndRecordPeerTrust,
-  markPeerDevicesVerified,
   type E2EEPlaintextEnvelope,
   type PeerActiveDeviceDescriptor,
 } from '../services/olmService';
@@ -56,7 +57,6 @@ import {
   initializeNewMlsGroupLocal,
   buildMlsAddMembersCommit,
   buildMlsRemoveMemberCommit,
-  buildMlsSelfKeyRotationCommit,
   joinMlsGroupFromWelcomeB64,
   processIncomingMlsCommits,
   encryptMlsGroupMessage,
@@ -96,9 +96,27 @@ import {
   fetchServerMlsGroupMessages,
   uploadEncryptedAttachmentBlob,
   downloadEncryptedAttachmentBlob,
-  connectE2EEWebSocket,
+  revokeEncryptedAttachment,
+  fetchDevicePrekeyCounts,
+  fetchMyGroupInvitations,
+  acceptGroupInvitation,
+  declineGroupInvitation,
+  type GroupInvitationRecord,
   type E2EEAccountProfile,
   type E2EEGroupRecord,
+  deleteDmMessageForEveryone,
+  deleteGroupMessageForEveryone,
+  sendTypingSignal,
+  fetchConversationState,
+  setMessagePinned,
+  setDisappearingTimer,
+  setGroupAdminsOnly,
+  fetchConversationPrefs,
+  setConversationPref,
+  type ConversationRef,
+  type ConversationState,
+  type ConversationPref,
+  type MuteChoice,
 } from '../services/e2eeApi';
 import {
   blockUser,
@@ -106,21 +124,61 @@ import {
   fetchDmReadReceipts,
   submitAbuseReport,
   leaveEncryptedGroup,
+  deleteGroup,
   searchUsers,
   discoverPublicGroups,
-  joinGroupByInviteCode,
   requestJoinPublicGroup,
+  isGroupPaymentRequired,
   type DirectoryUserRecord,
   type DiscoverableGroupRecord,
   formatGroupFee,
 } from '../services/platformApi';
 import {
-  SafetyNumberModal,
   MlsGroupSecurityModal,
   AccountDevicesVaultModal,
 } from './E2EESecurityModals';
 import { OpenPublicChatView } from './PlatformViews';
+import { ChatMessagesSkeleton, ListRowsSkeleton, SidebarListSkeleton } from './Skeleton';
 import { mergeLocalEntries } from '../services/chatSync';
+import { ChatTimeline, TextBubble, initialsFor, QuotedReply } from './chat/ChatTimeline';
+import { jumpToMessage } from './chat/jumpToMessage';
+import {
+  foldChatEvents,
+  searchMessages,
+  canEditMessage,
+  canDeleteForEveryone,
+  findMentionedIds,
+  type EventEnvelopeFields,
+  type FoldInput,
+  type FoldedFields,
+} from '../services/chatEvents';
+import {
+  ReactionChips,
+  ReactButton,
+  DeletedBubble,
+  PollCard,
+  PollComposer,
+  PinnedBar,
+  TypingLine,
+  ChatSearchBar,
+  ConversationMenu,
+  ChatStatusChips,
+} from './chat/MessageExtras';
+import { setNotificationMutedScopes } from '../services/notificationStore';
+import { subscribeE2EERealtime } from '../services/e2eeRealtime';
+import {
+  useNotifications,
+  setActiveConversation,
+  conversationShown,
+  rememberNames,
+} from '../services/notificationStore';
+import { ChatComposer } from './chat/ChatComposer';
+import { AttachmentTile } from './chat/AttachmentTile';
+import {
+  DAILY_LIMIT_TEXT_ENCRYPTED,
+  MAX_ENCRYPTED_FILE_BYTES,
+  MAX_FILES_PER_MESSAGE,
+} from '../services/attachmentLimits';
 
 export type ChatChannelMode = 'open_chat' | 'dm' | 'groups';
 
@@ -135,6 +193,9 @@ interface ChatProps {
   onStartPrivateChat?: (identifier: string) => void;
   initialPeerIdentifier?: string | null;
   onConsumedInitialPeer?: () => void;
+  /** Group to open (from a notification). '' opens the Groups page. */
+  initialGroupId?: string | null;
+  onConsumedInitialGroup?: () => void;
   externalProfile?: E2EEAccountProfile | null;
   onProfileChange?: (profile: E2EEAccountProfile | null) => void;
   initialOpenVault?: boolean;
@@ -159,6 +220,8 @@ interface FailedSendPayload {
   plainEnvelope: E2EEPlaintextEnvelope;
   cipherPayload?: any;
   createdAt: number;
+  /** Encrypted files already uploaded for this message (re-used on Retry). */
+  attachmentIds?: string[];
 }
 
 interface RichDisplayMessage extends ChatMessage {
@@ -172,7 +235,21 @@ interface RichDisplayMessage extends ChatMessage {
   failedPayload?: FailedSendPayload;
   /** Local-only: which conversation an optimistic/failed entry belongs to (e.g. `dm|<userId>`). */
   localScope?: string;
+  /** Local-only: files being encrypted/uploaded, previewed from the device while sending. */
+  localFiles?: File[];
+  /** The message this one replies to. */
+  replyTo?: ReplyRef;
+  /** Decrypted event fields (reaction / edit / poll / vote / mentions), see services/chatEvents.ts */
+  env?: EventEnvelopeFields;
+  /** Deleted for everyone */
+  deleted?: boolean;
+  /** Disappeared (hidden) */
+  expired?: boolean;
+  expiresAt?: string | null;
 }
+
+/** A message as the timeline shows it: reactions, edits, votes and deletes already applied. */
+type DisplayMsg = RichDisplayMessage & FoldedFields;
 
 /** Per-conversation sync state so polls / live events fetch only NEW messages. */
 interface ConversationSyncEntry {
@@ -185,9 +262,45 @@ interface ConversationSyncEntry {
 
 interface PeerSecuritySnapshot {
   at: number;
-  warnings: any;
-  verified: boolean;
-  safetyNumber: any | null;
+}
+
+type ReplyRef = NonNullable<E2EEPlaintextEnvelope['reply_to']>;
+
+/** Short one-line excerpt of a message for a reply quote. */
+function replyPreviewFor(msg: { message: string; attachments?: Array<{ file_name: string; mime_type: string }>; localFiles?: File[] }): string {
+  const text = (msg.message || '').replace(/\s+/g, ' ').trim();
+  if (text) return text.length > 120 ? `${text.slice(0, 117)}…` : text;
+  const file = msg.attachments?.[0] || (msg.localFiles?.[0] ? { file_name: msg.localFiles[0].name, mime_type: msg.localFiles[0].type } : null);
+  if (file) return file.mime_type?.startsWith('image/') ? 'Photo' : `File: ${file.file_name}`;
+  return 'Message';
+}
+
+/** Reply details arrive inside other people's encrypted messages: accept only well-formed, short values. */
+function cleanReplyRef(raw: unknown): ReplyRef | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.message_id !== 'string' || typeof r.sender_user_id !== 'string') return undefined;
+  const preview = typeof r.preview === 'string' ? r.preview.replace(/\s+/g, ' ').trim().slice(0, 160) : '';
+  return {
+    message_id: r.message_id.slice(0, 96),
+    sender_user_id: r.sender_user_id.slice(0, 64),
+    preview: preview || 'Message',
+    has_files: r.has_files === true,
+  };
+}
+
+/** The event fields of a decrypted envelope (other people's input: only well-formed values). */
+function envFields(env: E2EEPlaintextEnvelope): EventEnvelopeFields {
+  const kind = env.kind === 'reaction' || env.kind === 'edit' || env.kind === 'poll_vote' ? env.kind : 'message';
+  return {
+    kind,
+    target_id: typeof env.target_id === 'string' ? env.target_id.slice(0, 96) : undefined,
+    emoji: typeof env.emoji === 'string' ? env.emoji : undefined,
+    text: typeof env.text === 'string' ? env.text : undefined,
+    poll: env.poll,
+    vote: Array.isArray(env.vote) ? env.vote.slice(0, 10) : undefined,
+    mentions: Array.isArray(env.mentions) ? env.mentions.filter((m) => typeof m === 'string').slice(0, 50) : undefined,
+  };
 }
 
 function parseEthStringToWeiString(ethVal: string): string {
@@ -213,6 +326,8 @@ export const Chat: React.FC<ChatProps> = ({
   onStartPrivateChat,
   initialPeerIdentifier,
   onConsumedInitialPeer,
+  initialGroupId = null,
+  onConsumedInitialGroup,
   externalProfile,
   onProfileChange,
   initialOpenVault = false,
@@ -246,8 +361,6 @@ export const Chat: React.FC<ChatProps> = ({
   const [myDevices, setMyDevices] = useState<PeerActiveDeviceDescriptor[]>([]);
   const [localDeviceId, setLocalDeviceId] = useState<string | null>(null);
   const [vaultBoundUserId, setVaultBoundUserId] = useState<string | null>(null);
-  const [localEd25519Key, setLocalEd25519Key] = useState<string>('');
-  const [localCurve25519Key, setLocalCurve25519Key] = useState<string>('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const vaultInitInFlightRef = useRef<string | null>(null);
@@ -289,18 +402,12 @@ export const Chat: React.FC<ChatProps> = ({
   const [chatIndividualModalOpen, setChatIndividualModalOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
 
-  // User Directory State (fallback view & modal live search)
-  const [directoryQuery, setDirectoryQuery] = useState('');
-  const [directoryUsers, setDirectoryUsers] = useState<DirectoryUserRecord[]>([]);
-  const [directoryLoading, setDirectoryLoading] = useState(false);
-  const [directoryStatusMsg, setDirectoryStatusMsg] = useState<string | null>(null);
-
   // Group Discovery & Invites State
   const [discoverableGroups, setDiscoverableGroups] = useState<DiscoverableGroupRecord[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
-  const [inviteCodeInput, setInviteCodeInput] = useState('');
+  const [sidebarLoadedUserId, setSidebarLoadedUserId] = useState<string | null>(null);
+  const [loadedScopeKey, setLoadedScopeKey] = useState<string | null>(null);
   const [inviteStatusMsg, setInviteStatusMsg] = useState<string | null>(null);
-  const [inviteRedeeming, setInviteRedeeming] = useState(false);
 
   // Private DM state (Olm v2 Double Ratchet)
   const [individualIdInput, setIndividualIdInput] = useState('');
@@ -317,9 +424,6 @@ export const Chat: React.FC<ChatProps> = ({
       peer_primary_wallet: string | null;
     }>
   >([]);
-  const [peerSecurityWarnings, setPeerSecurityWarnings] = useState<string[]>([]);
-  const [peerIsVerified, setPeerIsVerified] = useState(false);
-  const [safetyNumber, setSafetyNumber] = useState('');
   const [peerLastReadSeq, setPeerLastReadSeq] = useState<number>(0);
 
   // Encrypted MLS Group state (RFC 9420)
@@ -337,22 +441,50 @@ export const Chat: React.FC<ChatProps> = ({
   // Platform superadmin only: create the group as a paid group (price in USD)
   const [newGroupPaid, setNewGroupPaid] = useState(false);
   const [newGroupFeeUsd, setNewGroupFeeUsd] = useState<string>('10');
+  const [newGroupYearlyFeeUsd, setNewGroupYearlyFeeUsd] = useState<string>('0');
   const [showGroupOpts, setShowGroupOpts] = useState(false);
-  const [groupSecurityInfo, setGroupSecurityInfo] = useState<{
-    epoch: number;
-    epochAuthenticatorHex: string;
-    exportedContextVerifyCode: string;
-  } | null>(null);
 
   // Composer, attachments, & modals
   const [messages, setMessages] = useState<RichDisplayMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  // Files picked for the next message (up to MAX_FILES_PER_MESSAGE, each encrypted on this device)
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // Message being replied to in the composer
+  const [replyState, setReplyState] = useState<{ scope: string; ref: ReplyRef } | null>(null);
+  const notifications = useNotifications();
+  // Briefly shows "The original message is not loaded here." under a reply whose quote was tapped
+  const [replyJumpMissId, setReplyJumpMissId] = useState<string | null>(null);
 
-  const [safetyModalOpen, setSafetyModalOpen] = useState(false);
+  /** Display name for a member in the open conversation ("You", "@name", or a short fallback). */
+  const nameForSender = (userId: string): string => {
+    if (e2eeProfile && userId === e2eeProfile.user_id) return 'You';
+    if (selectedPeer && selectedPeer.user_id === userId && selectedPeer.username) return `@${selectedPeer.username}`;
+    const gm = selectedGroup?.members.find((m) => m.user_id === userId && m.username);
+    if (gm?.username) return `@${gm.username}`;
+    const op = openedPeers.find((p) => p.user_id === userId && p.username);
+    if (op?.username) return `@${op.username}`;
+    return 'Member';
+  };
+
   const [groupModalOpen, setGroupModalOpen] = useState(false);
+  // Live "someone asked to join your group" alert for group admins (from the `group_join_request` event)
+  const [joinRequestAlertGroupId, setJoinRequestAlertGroupId] = useState<string | null>(null);
+  // Groups an admin added me to, waiting for my Accept / Reject (like Instagram group invites)
+  const [groupInvitations, setGroupInvitations] = useState<GroupInvitationRecord[]>([]);
+  const [invitationBusyId, setInvitationBusyId] = useState<string | null>(null);
+  const [invitationNotice, setInvitationNotice] = useState<string | null>(null);
+  // Pop-up shown when a new invitation arrives while the app is open
+  const [invitationAlert, setInvitationAlert] = useState<{ group_id: string; group_name: string; by: string | null } | null>(null);
+  // After Accept: open the group as soon as it appears in my group list (its keys are ready by then)
+  const openGroupWhenReadyRef = useRef<{ id: string; at: number } | null>(null);
+  // Counts list refreshes, so a waiting "open this group" is only dropped by a refresh started after it.
+  const syncIterationRef = useRef(0);
+  // Files this member removed in this session (the server already refuses downloads for them)
+  const [revokedAttachmentIds, setRevokedAttachmentIds] = useState<Set<string>>(() => new Set());
+  const prekeyTopUpInFlightRef = useRef(false);
+  const [groupModalInitialTab, setGroupModalInitialTab] = useState<'members' | 'invites' | undefined>(undefined);
   const [vaultModalOpen, setVaultModalOpen] = useState(false);
 
   useEffect(() => {
@@ -362,7 +494,6 @@ export const Chat: React.FC<ChatProps> = ({
   }, [initialOpenVault]);
 
   const chatBodyRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const isFirstLoadRef = useRef(true);
   const syncInFlightRef = useRef(false);
   const syncQueuedRef = useRef(false);
@@ -453,8 +584,6 @@ export const Chat: React.FC<ChatProps> = ({
       vaultInitInFlightRef.current = null;
       setVaultBoundUserId(null);
       setLocalDeviceId(null);
-      setLocalEd25519Key('');
-      setLocalCurve25519Key('');
       setMyDevices([]);
       setDmConversations([]);
       setOpenedPeers([]);
@@ -462,9 +591,6 @@ export const Chat: React.FC<ChatProps> = ({
       setSelectedPeer(null);
       setSelectedGroup(null);
       setMessages([]);
-      setPeerSecurityWarnings([]);
-      setPeerIsVerified(false);
-      setSafetyNumber('');
       if (!account) {
         setAddMenuOpen(false);
         setCreateGroupModalOpen(false);
@@ -478,8 +604,6 @@ export const Chat: React.FC<ChatProps> = ({
     }
     if (vaultBoundUserId && vaultBoundUserId !== e2eeProfile.user_id) {
       setLocalDeviceId(null);
-      setLocalEd25519Key('');
-      setLocalCurve25519Key('');
       setMyDevices([]);
       setDmConversations([]);
       setOpenedPeers([]);
@@ -487,9 +611,6 @@ export const Chat: React.FC<ChatProps> = ({
       setSelectedPeer(null);
       setSelectedGroup(null);
       setMessages([]);
-      setPeerSecurityWarnings([]);
-      setPeerIsVerified(false);
-      setSafetyNumber('');
     }
   }, [e2eeProfile, vaultBoundUserId, account, activeTab, onModeChange]);
 
@@ -500,15 +621,31 @@ export const Chat: React.FC<ChatProps> = ({
       if (vaultInitInFlightRef.current === userId) return;
       vaultInitInFlightRef.current = userId;
       try {
-        const localDev = await getOrCreateLocalOlmDevice(userId, 'Browser E2EE Vault');
-        const mlsPackages = localDev.isNewDevice
+        let localDev = await getOrCreateLocalOlmDevice(userId, 'Web browser');
+        let mlsPackages = localDev.isNewDevice
           ? await generateMlsKeyPackagesForDevice(userId, localDev.record.deviceId, 8)
           : [];
 
-        const regRes = await registerE2EEDeviceBundle({
-          ...localDev.registrationBundle,
-          mls_key_packages: mlsPackages,
-        });
+        let regRes;
+        try {
+          regRes = await registerE2EEDeviceBundle({
+            ...localDev.registrationBundle,
+            mls_key_packages: mlsPackages,
+          });
+        } catch (regErr: any) {
+          if (regErr?.status === 403) {
+            // Local device was revoked on the server: wipe stale vault and provision a new device.
+            await wipeUserDeviceVault(userId);
+            localDev = await getOrCreateLocalOlmDevice(userId, 'Web browser');
+            mlsPackages = await generateMlsKeyPackagesForDevice(userId, localDev.record.deviceId, 8);
+            regRes = await registerE2EEDeviceBundle({
+              ...localDev.registrationBundle,
+              mls_key_packages: mlsPackages,
+            });
+          } else {
+            throw regErr;
+          }
+        }
         await markLocalPrekeysPublished(userId);
 
         if (
@@ -533,8 +670,6 @@ export const Chat: React.FC<ChatProps> = ({
         setMyDevices(freshMe.devices);
         setLocalDeviceId(localDev.record.deviceId);
         setVaultBoundUserId(userId);
-        setLocalEd25519Key(localDev.record.ed25519Key);
-        setLocalCurve25519Key(localDev.record.curve25519Key);
       } finally {
         if (vaultInitInFlightRef.current === userId) {
           vaultInitInFlightRef.current = null;
@@ -570,9 +705,9 @@ export const Chat: React.FC<ChatProps> = ({
       await ensureLocalDeviceVaultReady(verified.user);
     } catch (err: any) {
       if (err?.code === 4001) {
-        setAuthError('SIWE wallet authentication signature declined.');
+        setAuthError('Sign-in was cancelled in MetaMask. Please try again.');
       } else {
-        setAuthError(err?.message || 'Failed to initialize SIWE + E2EE session');
+        setAuthError(friendlyError(err, 'Could not sign you in. Please try again.'));
       }
     } finally {
       setAuthLoading(false);
@@ -606,7 +741,7 @@ export const Chat: React.FC<ChatProps> = ({
         if (peer.devices.length === 0) {
           setIndividualIdInput(initialPeerIdentifier);
           setChatIndividualError(
-            'This user has not unlocked an E2EE Vault yet. Ask them to Sign In once.'
+            'This member has not signed in to chats yet. Ask them to sign in once.'
           );
           setChatIndividualModalOpen(true);
           return;
@@ -619,7 +754,7 @@ export const Chat: React.FC<ChatProps> = ({
         if (!cancelled) {
           setIndividualIdInput(initialPeerIdentifier);
           setChatIndividualError(
-            err?.message || 'Selected user has not unlocked an E2EE device vault yet.'
+            friendlyError(err, 'This member has not signed in to chats yet.')
           );
           setChatIndividualModalOpen(true);
         }
@@ -639,19 +774,6 @@ export const Chat: React.FC<ChatProps> = ({
     handleSelectChannelTab,
   ]);
 
-  const handleSearchDirectory = useCallback(async (q: string) => {
-    setDirectoryLoading(true);
-    setDirectoryStatusMsg(null);
-    try {
-      const res = await searchUsers(q, 30);
-      setDirectoryUsers(res.users);
-    } catch (err: any) {
-      setDirectoryStatusMsg(err?.message || 'Directory search failed');
-    } finally {
-      setDirectoryLoading(false);
-    }
-  }, []);
-
   const handleLoadDiscoverableGroups = useCallback(async () => {
     setGroupsLoading(true);
     try {
@@ -665,15 +787,10 @@ export const Chat: React.FC<ChatProps> = ({
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'dm' && !selectedPeer) {
-      const timer = setTimeout(() => {
-        handleSearchDirectory(directoryQuery);
-      }, 250);
-      return () => clearTimeout(timer);
-    } else if (activeTab === 'groups' && !selectedGroup) {
+    if (activeTab === 'groups' && !selectedGroup) {
       handleLoadDiscoverableGroups();
     }
-  }, [activeTab, selectedPeer, selectedGroup, directoryQuery, handleSearchDirectory, handleLoadDiscoverableGroups]);
+  }, [activeTab, selectedGroup, handleLoadDiscoverableGroups]);
 
   // A group payment finished: refresh the list so "Pay & Join" turns into "Request Join".
   useEffect(() => {
@@ -692,14 +809,14 @@ export const Chat: React.FC<ChatProps> = ({
           return;
         }
         if (resolved.devices.length === 0) {
-          alert('This user has not unlocked their E2EE Vault yet.');
+          alert('This member has not signed in to chats yet.');
           return;
         }
         registerOpenedPeer(resolved);
         setSelectedPeer(resolved);
         handleSelectChannelTab('dm');
       } catch (err: any) {
-        alert(err?.message || `Could not resolve peer ${peerIdentifier}`);
+        alert(friendlyError(err, `Could not resolve peer ${peerIdentifier}`));
       }
     },
     [e2eeProfile, registerOpenedPeer, handleSelectChannelTab]
@@ -716,11 +833,14 @@ export const Chat: React.FC<ChatProps> = ({
     try {
       do {
         syncQueuedRef.current = false;
-        const [dmRes, welcomeRes] = await Promise.all([
+        const iterationNo = ++syncIterationRef.current;
+        const [dmRes, welcomeRes, invRes] = await Promise.all([
           fetchMyDmConversations(),
           fetchPendingServerMlsWelcomes(localDeviceId, false),
+          fetchMyGroupInvitations().catch(() => null),
         ]);
         setDmConversations(dmRes.conversations);
+        if (invRes) setGroupInvitations(invRes.invitations);
 
         for (const w of welcomeRes.welcomes) {
           try {
@@ -737,48 +857,35 @@ export const Chat: React.FC<ChatProps> = ({
 
         const grpRes = await fetchMyServerMlsGroups();
         setGroups(grpRes.groups);
-        if (selectedGroup) {
+        const pendingOpen = openGroupWhenReadyRef.current;
+        const justAccepted = pendingOpen ? grpRes.groups.find((g) => g.group_id === pendingOpen.id) : undefined;
+        // Not in a list fetched after the request (left or deleted): stop waiting for it.
+        if (pendingOpen && !justAccepted && pendingOpen.at < iterationNo) openGroupWhenReadyRef.current = null;
+        if (justAccepted) {
+          openGroupWhenReadyRef.current = null;
+          setSelectedGroup(justAccepted);
+          handleSelectChannelTab('groups');
+        } else if (selectedGroup) {
           const updatedSel =
             grpRes.groups.find((g) => g.group_id === selectedGroup.group_id) || null;
           setSelectedGroup(updatedSel);
         }
       } while (syncQueuedRef.current);
-    } catch {
-      // Non-fatal background sync error
+    } catch (err: any) {
+      if (err?.status === 403 && e2eeProfile) {
+        // Active device was revoked on the server: clear stale local device so vault re-initializes cleanly.
+        wipeUserDeviceVault(e2eeProfile.user_id)
+          .then(() => {
+            setLocalDeviceId(null);
+            setVaultBoundUserId(null);
+          })
+          .catch(() => { });
+      }
     } finally {
       syncInFlightRef.current = false;
+      if (e2eeProfile) setSidebarLoadedUserId(e2eeProfile.user_id);
     }
-  }, [isVaultReadyForProfile, e2eeProfile, localDeviceId, selectedGroup]);
-
-  const handleRedeemInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inviteCodeInput.trim()) return;
-    if (!account) {
-      onConnectWallet();
-      return;
-    }
-    if (needsE2EEAuth) {
-      (onAuthenticateSiwe || authenticateE2EESession)();
-      return;
-    }
-    setInviteRedeeming(true);
-    setInviteStatusMsg(null);
-    try {
-      const res = await joinGroupByInviteCode(inviteCodeInput.trim());
-      setInviteCodeInput('');
-      setInviteStatusMsg(
-        res.status === 'already_member'
-          ? 'You are already an active member of this group.'
-          : `Eligibility verified! Join request (${(res.request_id || '').slice(0, 10)}) queued for group admin MLS Welcome encryption.`
-      );
-      await syncSidebarLists();
-      await handleLoadDiscoverableGroups();
-    } catch (err: any) {
-      setInviteStatusMsg(err?.message || 'Invite redemption failed');
-    } finally {
-      setInviteRedeeming(false);
-    }
-  };
+  }, [isVaultReadyForProfile, e2eeProfile, localDeviceId, selectedGroup, handleSelectChannelTab]);
 
   const handleRequestJoinGroup = async (g: DiscoverableGroupRecord) => {
     if (!account) {
@@ -792,10 +899,15 @@ export const Chat: React.FC<ChatProps> = ({
     try {
       await requestJoinPublicGroup(g.group_id);
       setInviteStatusMsg(
-        `Join request submitted for "${g.name}"! Group admins can now approve your MLS Welcome.`
+        `Request sent to join "${g.name}". A group admin will add you soon.`
       );
     } catch (err: any) {
-      setInviteStatusMsg(err?.message || 'Join request denied by group policy');
+      if (isGroupPaymentRequired(err) && onOpenPaidGroupModal) {
+        onOpenPaidGroupModal(err.detail.group_id, err.detail.group_name);
+        setInviteStatusMsg(`"${err.detail.group_name}" is a paid group. Choose a plan to continue.`);
+      } else {
+        setInviteStatusMsg(friendlyError(err, 'Join request denied by group policy'));
+      }
     }
   };
 
@@ -822,6 +934,12 @@ export const Chat: React.FC<ChatProps> = ({
       return;
     }
     loadMsgsInFlightRef.current = true;
+    const scopeAtStart =
+      activeTab === 'dm' && selectedPeer
+        ? `dm|${selectedPeer.user_id}`
+        : activeTab === 'groups' && selectedGroup
+          ? `groups|${selectedGroup.group_id}`
+          : null;
     try {
       do {
         loadMsgsQueuedRef.current = false;
@@ -849,50 +967,37 @@ export const Chat: React.FC<ChatProps> = ({
           // Show what we already have instantly (also on channel switch); network only adds the new part.
           setMessages((prev) => mergeLocalEntries([...dmEntry.msgs], prev, dmScope));
 
-          // Peer trust + safety number only need recomputing on first open, identity events, or every 30s.
+          // Peer device record is refreshed in the background on first open, device changes, or every 30s.
           const secKey = `${e2eeProfile.user_id}|${selectedPeer.user_id}`;
           const cachedSec = peerSecCacheRef.current[secKey];
           if (!cachedSec || forceSecurityRefreshRef.current || Date.now() - cachedSec.at > 30000) {
             forceSecurityRefreshRef.current = false;
             const latestPeer = await fetchPeerActiveDevices(selectedPeer.user_id);
-            const trust = await evaluateAndRecordPeerTrust(
+            await evaluateAndRecordPeerTrust(
               e2eeProfile.user_id,
               selectedPeer.user_id,
               latestPeer.identity_version,
               latestPeer.devices
             );
-            const allVerified =
-              latestPeer.devices.length > 0 &&
-              latestPeer.devices.every((d) => trust.devices[d.device_id]?.verified);
-            let sn: any = null;
-            if (latestPeer.devices.length > 0 && localEd25519Key && localCurve25519Key) {
-              const primaryDev = latestPeer.devices[0];
-              sn = await computeSafetyNumber(
-                {
-                  userId: e2eeProfile.user_id,
-                  ed25519Key: localEd25519Key,
-                  curve25519Key: localCurve25519Key,
-                },
-                {
-                  userId: selectedPeer.user_id,
-                  ed25519Key: primaryDev.ed25519_identity_key,
-                  curve25519Key: primaryDev.curve25519_identity_key,
-                }
-              );
-            }
-            peerSecCacheRef.current[secKey] = {
-              at: Date.now(),
-              warnings: trust.securityWarnings,
-              verified: allVerified,
-              safetyNumber: sn,
-            };
+            peerSecCacheRef.current[secKey] = { at: Date.now() };
           }
-          const peerSec = peerSecCacheRef.current[secKey];
-          setPeerSecurityWarnings(peerSec.warnings);
-          setPeerIsVerified(peerSec.verified);
-          if (peerSec.safetyNumber) setSafetyNumber(peerSec.safetyNumber);
 
           const resolveDm = async (rec: any) => {
+            if (rec.deleted || rec.expired) {
+              // Deleted for everyone / disappeared. A remaining copy is a session-setup message: decrypt it
+              // only so this device's encrypted session keeps working, then throw the text away.
+              const setupCt = rec.device_ciphertexts?.[localDeviceId];
+              const already = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(e2eeProfile.user_id, rec.message_id);
+              if (setupCt && !already) {
+                try {
+                  await decryptOlmDeviceCiphertext(e2eeProfile.user_id, rec.sender_curve25519_key, setupCt.message_type, setupCt.ciphertext_b64);
+                } catch {
+                  // nothing to keep either way
+                }
+              }
+              if (already) await deleteVaultRecord(`dec_msg:${e2eeProfile.user_id}:${rec.message_id}`).catch(() => { });
+              return null;
+            }
             let cached = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(
               e2eeProfile.user_id,
               rec.message_id
@@ -920,12 +1025,17 @@ export const Chat: React.FC<ChatProps> = ({
             seq: rec.seq,
             channel: rec.conversation_id,
             sender: rec.sender_user_id,
-            message: cached ? cached.text : 'Encrypted with prior keys (Unrecoverable on this device)',
+            message: rec.deleted || rec.expired ? '' : cached ? cached.text : 'This message is not available on this device.',
             attachments: cached?.attachments,
+            replyTo: cleanReplyRef(cached?.reply_to),
             isEncrypted: true,
-            canDecrypt: Boolean(cached),
+            canDecrypt: Boolean(cached) || Boolean(rec.deleted),
             timestamp: rec.timestamp,
-            protocolBadge: 'OLM v2 E2EE',
+            protocolBadge: 'Encrypted',
+            env: cached ? envFields(cached) : rec.event_kind === 'control' ? { kind: 'reaction' } : undefined,
+            deleted: Boolean(rec.deleted),
+            expired: Boolean(rec.expired),
+            expiresAt: rec.expires_at || null,
           });
 
           // Retry only the few records that could not be decrypted earlier.
@@ -954,12 +1064,13 @@ export const Chat: React.FC<ChatProps> = ({
           for (const rec of newDmMessages) {
             if (rec.seq > maxSeq) maxSeq = rec.seq;
             const cached = await resolveDm(rec);
-            if (!cached) dmEntry.retry[rec.message_id] = rec;
+            if (!cached && !rec.deleted && !rec.expired) dmEntry.retry[rec.message_id] = rec;
             dmEntry.msgs.push(dmToDisplay(rec, cached));
           }
           dmEntry.lastSeq = maxSeq;
           const dmServerMsgs = [...dmEntry.msgs];
           setMessages((prev) => mergeLocalEntries(dmServerMsgs, prev, dmScope));
+          conversationShown(`dm:${selectedPeer.user_id}`, maxSeq);
 
           // Optional DM read receipts - only when there is something newer to acknowledge
           if (maxSeq > dmEntry.lastReceiptSeq && e2eeProfile.send_read_receipts !== false) {
@@ -1007,11 +1118,6 @@ export const Chat: React.FC<ChatProps> = ({
             }
           }
 
-          const secAfter = await getMlsGroupSecurityInfo(
-            e2eeProfile.user_id,
-            selectedGroup.group_id
-          );
-          setGroupSecurityInfo(secAfter);
 
           const grpScope = `groups|${selectedGroup.group_id}`;
           const grpCacheKey = `${e2eeProfile.user_id}|${localDeviceId}|${grpScope}`;
@@ -1024,6 +1130,10 @@ export const Chat: React.FC<ChatProps> = ({
           syncCacheRef.current[grpCacheKey] = grpEntry;
 
           const resolveGrp = async (gm: any) => {
+            if (gm.deleted) {
+              await deleteVaultRecord(`dec_msg:${e2eeProfile.user_id}:${gm.message_id}`).catch(() => { });
+              return null;
+            }
             let cached = await loadVaultDecryptedMessage<E2EEPlaintextEnvelope>(
               e2eeProfile.user_id,
               gm.message_id
@@ -1047,15 +1157,21 @@ export const Chat: React.FC<ChatProps> = ({
             seq: gm.seq,
             channel: selectedGroup.group_id,
             sender: gm.sender_user_id,
-            message: cached
-              ? cached.text
-              : `Encrypted in Epoch #${gm.epoch} (Key not available on this device)`,
+            message: gm.deleted
+              ? ''
+              : cached
+                ? cached.text
+                : 'This message was sent before you joined, or is not available on this device.',
             attachments: cached?.attachments,
+            replyTo: cleanReplyRef(cached?.reply_to),
             epoch: gm.epoch,
             isEncrypted: true,
-            canDecrypt: Boolean(cached),
+            canDecrypt: Boolean(cached) || Boolean(gm.deleted),
             timestamp: gm.timestamp,
-            protocolBadge: `MLS E#${gm.epoch}`,
+            protocolBadge: 'Encrypted',
+            env: cached ? envFields(cached) : gm.event_kind === 'control' ? { kind: 'reaction' } : undefined,
+            deleted: Boolean(gm.deleted),
+            expiresAt: gm.expires_at || null,
           });
 
           for (const [mid, gm] of Object.entries(grpEntry.retry)) {
@@ -1083,26 +1199,26 @@ export const Chat: React.FC<ChatProps> = ({
           for (const gm of newGrpMessages) {
             if (gm.seq > grpMaxSeq) grpMaxSeq = gm.seq;
             const cached = await resolveGrp(gm);
-            if (!cached) grpEntry.retry[gm.message_id] = gm;
+            if (!cached && !gm.deleted) grpEntry.retry[gm.message_id] = gm;
             grpEntry.msgs.push(grpToDisplay(gm, cached));
           }
           grpEntry.lastSeq = grpMaxSeq;
           const grpServerMsgs = [...grpEntry.msgs];
           setMessages((prev) => mergeLocalEntries(grpServerMsgs, prev, grpScope));
+          conversationShown(`group:${selectedGroup.group_id}`, grpMaxSeq);
         }
       } while (loadMsgsQueuedRef.current);
     } catch (err) {
       console.warn('Message sync error:', err);
     } finally {
       loadMsgsInFlightRef.current = false;
+      if (scopeAtStart) setLoadedScopeKey(scopeAtStart);
     }
   }, [
     activeTab,
     isVaultReadyForProfile,
     e2eeProfile,
     localDeviceId,
-    localEd25519Key,
-    localCurve25519Key,
     selectedPeer,
     selectedGroup,
     syncSidebarLists,
@@ -1121,7 +1237,7 @@ export const Chat: React.FC<ChatProps> = ({
 
   useEffect(() => {
     if (!isVaultReadyForProfile) return;
-    const sub = connectE2EEWebSocket((evt) => {
+    return subscribeE2EERealtime((evt) => {
       if (
         evt.type === 'dm_ciphertext' ||
         evt.type === 'dm_read_receipt' ||
@@ -1129,16 +1245,381 @@ export const Chat: React.FC<ChatProps> = ({
         evt.type === 'group_commit' ||
         evt.type === 'group_welcome' ||
         evt.type === 'group_join_request' ||
+        evt.type === 'group_invitation' ||
+        evt.type === 'group_invitation_response' ||
         evt.type === 'group_member_left' ||
+        evt.type === 'group_deleted' ||
         evt.type === 'identity_event'
       ) {
         if (evt.type === 'identity_event') forceSecurityRefreshRef.current = true;
+        if (evt.type === 'group_deleted' && (evt as any).group_id && e2eeProfile) {
+          // The group no longer exists: drop its keys from this device. The list refresh below removes it from view.
+          void clearLocalMlsGroupState(e2eeProfile.user_id, String((evt as any).group_id)).catch(() => { });
+        }
+        if (evt.type === 'group_join_request' && (evt as any).group_id) {
+          setJoinRequestAlertGroupId(String((evt as any).group_id));
+        }
+        if (evt.type === 'group_invitation' && (evt as any).group_id) {
+          setInvitationAlert({
+            group_id: String((evt as any).group_id),
+            group_name: String((evt as any).group_name || 'a group'),
+            by: (evt as any).invited_by_username ? String((evt as any).invited_by_username) : null,
+          });
+        }
         loadActiveChannelMessages();
         syncSidebarLists();
+      } else if (evt.type === 'support_reply') {
+        // An admin answered a support conversation: update the badge and an open Concierge page now.
+        window.dispatchEvent(new CustomEvent('zyphra:support-reply', { detail: evt }));
       }
     });
-    return () => sub.close();
   }, [isVaultReadyForProfile, loadActiveChannelMessages, syncSidebarLists]);
+
+  // ====================================================================================
+  // CHAT FEATURES: reactions, edits, delete for everyone, polls, pins, typing, search,
+  // disappearing messages, announcement groups, mute / archive.
+  // Reactions, edits and votes are ENCRYPTED events folded on this device (services/chatEvents.ts);
+  // the raw `messages` list stays as loaded, `displayMessages` is what the timeline shows.
+  // ====================================================================================
+  const [convState, setConvState] = useState<ConversationState | null>(null);
+  const [convPrefs, setConvPrefs] = useState<Record<string, ConversationPref>>({});
+  const [showArchived, setShowArchived] = useState(false);
+  const [editTarget, setEditTarget] = useState<{ id: string; original: string } | null>(null);
+  const [pollOpen, setPollOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchIndex, setSearchIndex] = useState(0);
+  const [typingBy, setTypingBy] = useState<Record<string, Record<string, number>>>({});
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [featureNotice, setFeatureNotice] = useState<string | null>(null);
+  const lastTypingSentRef = useRef(0);
+
+  const convKey =
+    activeTab === 'dm' && selectedPeer
+      ? `dm:${selectedPeer.user_id}`
+      : activeTab === 'groups' && selectedGroup
+        ? `group:${selectedGroup.group_id}`
+        : null;
+  const convKeyRef = useRef<string | null>(null);
+  convKeyRef.current = convKey;
+  const refFromKey = (key: string): ConversationRef =>
+    key.startsWith('dm:') ? { scope_type: 'dm', peer_user_id: key.slice(3) } : { scope_type: 'group', group_id: key.slice(6) };
+
+  const loadConvState = useCallback(async () => {
+    const key = convKeyRef.current;
+    if (!isVaultReadyForProfile || !key) {
+      setConvState(null);
+      return;
+    }
+    try {
+      const st = await fetchConversationState(refFromKey(key));
+      if (convKeyRef.current === key) setConvState(st);
+    } catch {
+      if (convKeyRef.current === key) setConvState(null);
+    }
+  }, [isVaultReadyForProfile]);
+
+  const loadConvPrefs = useCallback(async () => {
+    if (!isVaultReadyForProfile) return;
+    try {
+      const res = await fetchConversationPrefs();
+      setConvPrefs(res.prefs || {});
+      setNotificationMutedScopes(Object.entries(res.prefs || {}).filter(([, p]) => p.muted).map(([k]) => k));
+    } catch {
+      // keep what we have
+    }
+  }, [isVaultReadyForProfile]);
+
+  useEffect(() => {
+    setConvState(null);
+    setEditTarget(null);
+    setSearchOpen(false);
+    setSearchQuery('');
+    void loadConvState();
+  }, [convKey, loadConvState]);
+
+  useEffect(() => {
+    void loadConvPrefs();
+  }, [loadConvPrefs]);
+
+  // Disappearing messages and "typing…" need the clock: re-check every 15 s, and right when a typing line ends.
+  useEffect(() => {
+    const t = window.setInterval(() => setNowTick(Date.now()), 15000);
+    return () => window.clearInterval(t);
+  }, []);
+  useEffect(() => {
+    const ends = Object.values(typingBy).flatMap((m) => Object.values(m)).filter((t) => t > Date.now());
+    if (!ends.length) return;
+    const t = window.setTimeout(() => setNowTick(Date.now()), Math.min(...ends) - Date.now() + 50);
+    return () => window.clearTimeout(t);
+  }, [typingBy, nowTick]);
+
+  /** Deleted for everyone: show it as deleted everywhere on this device and drop the readable copy. */
+  const markDeletedLocally = useCallback(
+    (messageId: string) => {
+      const scrub = (m: RichDisplayMessage): RichDisplayMessage =>
+        m.id === messageId ? { ...m, deleted: true, message: '', env: undefined, attachments: undefined, replyTo: undefined } : m;
+      for (const entry of Object.values(syncCacheRef.current)) entry.msgs = entry.msgs.map(scrub);
+      setMessages((prev) => prev.map(scrub));
+      if (e2eeProfile) void deleteVaultRecord(`dec_msg:${e2eeProfile.user_id}:${messageId}`).catch(() => { });
+    },
+    [e2eeProfile]
+  );
+
+  useEffect(() => {
+    if (!isVaultReadyForProfile) return;
+    return subscribeE2EERealtime((evt: any) => {
+      if (evt.type === 'conversation_state_changed') {
+        const key = convKeyRef.current;
+        if (key && ((evt.scope_type === 'group' && key === `group:${evt.group_id}`) || (evt.scope_type === 'dm' && key.startsWith('dm:')))) {
+          void loadConvState();
+        }
+      } else if (evt.type === 'conversation_prefs_changed') {
+        void loadConvPrefs();
+      } else if (evt.type === 'message_deleted' && evt.message_id) {
+        markDeletedLocally(String(evt.message_id));
+      } else if (evt.type === 'typing' && evt.user_id) {
+        const key = evt.scope_type === 'dm' ? `dm:${evt.peer_user_id}` : `group:${evt.group_id}`;
+        setTypingBy((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), [evt.user_id]: Date.now() + 6000 } }));
+      } else if ((evt.type === 'dm_ciphertext' || evt.type === 'group_ciphertext') && evt.sender_user_id) {
+        // Their message arrived: they are no longer typing.
+        const key = evt.type === 'dm_ciphertext' ? `dm:${evt.sender_user_id}` : `group:${evt.group_id}`;
+        setTypingBy((prev) => {
+          if (!prev[key]?.[evt.sender_user_id]) return prev;
+          const next = { ...prev[key] };
+          delete next[evt.sender_user_id];
+          return { ...prev, [key]: next };
+        });
+      }
+    });
+  }, [isVaultReadyForProfile, loadConvState, loadConvPrefs, markDeletedLocally]);
+
+  const groupAdminIds = React.useMemo(
+    () => new Set((selectedGroup?.members || []).filter((m) => m.status === 'active' && m.role === 'admin').map((m) => m.user_id)),
+    [selectedGroup]
+  );
+  const isGroupAdminHere = activeTab === 'groups' && Boolean(e2eeProfile && groupAdminIds.has(e2eeProfile.user_id));
+  const adminsOnlyHere = activeTab === 'groups' && Boolean(convState?.admins_only);
+
+  const displayMessages = React.useMemo(
+    () =>
+      foldChatEvents(messages as Array<RichDisplayMessage & FoldInput>, {
+        myUserId: e2eeProfile?.user_id || '',
+        nowMs: nowTick,
+        adminsOnly: adminsOnlyHere,
+        adminIds: groupAdminIds,
+      }),
+    [messages, e2eeProfile?.user_id, nowTick, adminsOnlyHere, groupAdminIds]
+  );
+
+  const searchHits = React.useMemo(
+    () => (searchOpen ? searchMessages(displayMessages, searchQuery) : []),
+    [searchOpen, displayMessages, searchQuery]
+  );
+  useEffect(() => {
+    setSearchIndex(Math.max(0, searchHits.length - 1)); // start from the newest match
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+  const stepSearch = (dir: 1 | -1) => {
+    const n = searchHits.length;
+    if (!n) return;
+    const next = (searchIndex + dir + n) % n;
+    setSearchIndex(next);
+    jumpToMessage(searchHits[next]);
+  };
+
+  const typingNames = (() => {
+    if (!convKey || !e2eeProfile) return [] as string[];
+    const map = typingBy[convKey] || {};
+    return Object.entries(map)
+      .filter(([uid, until]) => until > nowTick && uid !== e2eeProfile.user_id)
+      .map(([uid]) => nameForSender(uid));
+  })();
+
+  /** Encrypts and sends one envelope (a reaction, edit, vote or poll) in the open chat. */
+  const sendEnvelopeNow = async (
+    extra: Partial<E2EEPlaintextEnvelope>,
+    eventKind: 'message' | 'control',
+    mentionIds: string[] = []
+  ): Promise<void> => {
+    if (!e2eeProfile || !localDeviceId) throw new Error('Please sign in first.');
+    const myUserId = e2eeProfile.user_id;
+    const msgId = `emsg_${crypto.randomUUID().replace(/-/g, '')}`;
+    const envelope: E2EEPlaintextEnvelope = { v: 1, text: '', sent_at: new Date().toISOString(), ...extra };
+    if (activeTab === 'dm' && selectedPeer) {
+      const [peerDevs, ownAccount] = await Promise.all([fetchPeerActiveDevices(selectedPeer.user_id), fetchMyE2EEAccount()]);
+      const targets = [...peerDevs.devices, ...ownAccount.devices.filter((d) => d.status === 'active')];
+      if (!targets.length) throw new Error('This member has not signed in to chats yet.');
+      const enc = await encryptOlmMultiDevicePayload(myUserId, envelope, targets, (uid, ids) => claimPeerOlmPrekeyBundles(uid, ids));
+      await saveVaultDecryptedMessage(myUserId, msgId, envelope);
+      await submitOlmDmCiphertext({
+        message_id: msgId,
+        recipient_user_id: selectedPeer.user_id,
+        sender_device_id: enc.senderDeviceId,
+        protocol: OLM_PROTOCOL_ID,
+        device_ciphertexts: enc.deviceCiphertexts,
+        event_kind: eventKind,
+      });
+    } else if (activeTab === 'groups' && selectedGroup) {
+      const enc = await encryptMlsGroupMessage(myUserId, selectedGroup.group_id, envelope);
+      await saveVaultDecryptedMessage(myUserId, msgId, envelope);
+      await submitServerMlsGroupMessage(selectedGroup.group_id, {
+        message_id: msgId,
+        sender_device_id: localDeviceId,
+        epoch: enc.epoch,
+        mls_ciphertext_b64: enc.mlsCiphertextB64,
+        event_kind: eventKind,
+        mention_user_ids: mentionIds,
+      });
+    } else {
+      throw new Error('Open a chat first.');
+    }
+    await loadActiveChannelMessages();
+  };
+
+  const runFeature = async (fn: () => Promise<unknown>, fallback: string) => {
+    setFeatureNotice(null);
+    try {
+      await fn();
+    } catch (err: any) {
+      if (isGroupPaymentRequired(err) && onOpenPaidGroupModal) onOpenPaidGroupModal(err.detail.group_id, err.detail.group_name);
+      setFeatureNotice(err?.detail?.code === 'admins_only' ? 'Only admins can send messages in this group.' : friendlyError(err, fallback));
+    }
+  };
+
+  const reactTo = (msgId: string, emoji: string) =>
+    runFeature(() => sendEnvelopeNow({ kind: 'reaction', target_id: msgId, emoji }, 'control'), 'Your reaction was not sent.');
+  const voteOn = (msgId: string, options: number[]) =>
+    runFeature(() => sendEnvelopeNow({ kind: 'poll_vote', target_id: msgId, vote: options }, 'control'), 'Your vote was not sent.');
+  const createPoll = async (question: string, options: string[], multi: boolean) => {
+    await sendEnvelopeNow({ text: question, poll: { question, options, multi } }, 'message');
+  };
+  const deleteForEveryone = (msg: RichDisplayMessage) => {
+    if (!window.confirm('Delete this message for everyone? It is removed from the server and from everyone\u2019s chat.')) return;
+    void runFeature(async () => {
+      if (activeTab === 'dm') await deleteDmMessageForEveryone(msg.id);
+      else if (selectedGroup) await deleteGroupMessageForEveryone(selectedGroup.group_id, msg.id);
+      markDeletedLocally(msg.id);
+    }, 'The message was not deleted.');
+  };
+  const togglePin = (msgId: string, pinned: boolean) =>
+    runFeature(async () => {
+      if (!convKey) return;
+      const res = await setMessagePinned(refFromKey(convKey), msgId, pinned);
+      setConvState((s) => (s ? { ...s, pins: res.pins } : s));
+    }, pinned ? 'The message was not pinned.' : 'The message was not unpinned.');
+  const updatePref = (change: { mute?: MuteChoice; archived?: boolean }, key = convKey) =>
+    runFeature(async () => {
+      if (!key) return;
+      const res = await setConversationPref(key, change);
+      setConvPrefs((prev) => {
+        const next = { ...prev };
+        if (res.pref.muted || res.pref.archived) next[key] = res.pref;
+        else delete next[key];
+        setNotificationMutedScopes(Object.entries(next).filter(([, p]) => p.muted).map(([k]) => k));
+        return next;
+      });
+    }, 'That setting was not saved.');
+  const changeTimer = (ttl: number) =>
+    runFeature(async () => {
+      if (!convKey) return;
+      const res = await setDisappearingTimer(refFromKey(convKey), ttl);
+      setConvState((s) => (s ? { ...s, disappearing_ttl: res.disappearing_ttl } : s));
+    }, 'The timer was not changed.');
+  const changeAdminsOnly = (value: boolean) =>
+    runFeature(async () => {
+      if (!selectedGroup) return;
+      const res = await setGroupAdminsOnly(selectedGroup.group_id, value);
+      setConvState((s) => (s ? { ...s, admins_only: res.admins_only } : s));
+    }, 'That setting was not saved.');
+  const signalTyping = () => {
+    if (!convKey || e2eeProfile?.show_online_presence === false) return;
+    const now = Date.now();
+    if (now - lastTypingSentRef.current < 3000) return;
+    lastTypingSentRef.current = now;
+    sendTypingSignal(refFromKey(convKey)).catch(() => { });
+  };
+  const currentPref = convKey ? convPrefs[convKey] : undefined;
+  const mentionCandidates = React.useMemo(
+    () =>
+      (selectedGroup?.members || [])
+        .filter((m) => m.status === 'active' && m.username && m.user_id !== e2eeProfile?.user_id)
+        .map((m) => ({ id: m.user_id, username: m.username as string }))
+        .filter((m, i, all) => all.findIndex((x) => x.id === m.id) === i),
+    [selectedGroup, e2eeProfile?.user_id]
+  );
+
+  // Notifications: which conversation is on screen (it is never notified while you look at it).
+  const activeConversationScope =
+    activeTab === 'dm' && selectedPeer
+      ? `dm:${selectedPeer.user_id}`
+      : activeTab === 'groups' && selectedGroup
+        ? `group:${selectedGroup.group_id}`
+        : null;
+  // A reply belongs to the conversation it was started in.
+  const replyTarget = replyState && replyState.scope === activeConversationScope ? replyState.ref : null;
+  const setReplyTarget = (ref: ReplyRef | null) =>
+    setReplyState(ref && activeConversationScope ? { scope: activeConversationScope, ref } : null);
+  useEffect(() => {
+    setActiveConversation(activeConversationScope);
+  }, [activeConversationScope]);
+  useEffect(() => () => setActiveConversation(null), []);
+
+  // Names for notifications ("@name in Group"), from what the sidebar already knows.
+  useEffect(() => {
+    const users: Record<string, string> = {};
+    for (const c of dmConversations) if (c.peer_username) users[c.peer_user_id] = `@${c.peer_username}`;
+    for (const p of openedPeers) if (p.username) users[p.user_id] = `@${p.username}`;
+    const grp: Record<string, string> = {};
+    for (const g of groups) {
+      grp[g.group_id] = g.name;
+      for (const m of g.members) if (m.username) users[m.user_id] = `@${m.username}`;
+    }
+    rememberNames({ users, groups: grp });
+  }, [dmConversations, openedPeers, groups]);
+
+  // Open a group from a notification: it opens as soon as the group list has it (same path as Accept).
+  // ('' only means "the Groups page", which App already switched to.)
+  useEffect(() => {
+    if (initialGroupId === null || initialGroupId === undefined) return;
+    if (initialGroupId) {
+      openGroupWhenReadyRef.current = { id: initialGroupId, at: syncIterationRef.current };
+      // Refresh right after this render; the refresh opens the group when the list has it.
+      queueMicrotask(() => void syncSidebarLists());
+    }
+    onConsumedInitialGroup?.();
+  }, [initialGroupId, syncSidebarLists, onConsumedInitialGroup]);
+
+  // Keep this device's one-time prekeys and MLS KeyPackages topped up while the app stays open.
+  // (Previously only done at sign-in, so a long session that was added to many groups could run out
+  // and then nobody could add this member to a new group.)
+  useEffect(() => {
+    if (!isVaultReadyForProfile || !e2eeProfile || !localDeviceId) return;
+    const userId = e2eeProfile.user_id;
+    const deviceId = localDeviceId;
+    const topUp = async () => {
+      if (prekeyTopUpInFlightRef.current || document.visibilityState !== 'visible') return;
+      prekeyTopUpInFlightRef.current = true;
+      try {
+        const counts = await fetchDevicePrekeyCounts(deviceId);
+        if (counts.one_time_prekeys >= 5 && counts.mls_key_packages >= 3) return;
+        const moreOlm = await generateMoreOlmPrekeys(userId, 12, false);
+        const moreMls = await generateMlsKeyPackagesForDevice(userId, deviceId, 6);
+        await replenishE2EEPrekeys(deviceId, { ...moreOlm, mls_key_packages: moreMls });
+        await markLocalPrekeysPublished(userId);
+      } catch (err) {
+        console.warn('Prekey top-up deferred (non-fatal):', err);
+      } finally {
+        prekeyTopUpInFlightRef.current = false;
+      }
+    };
+    const first = setTimeout(topUp, 60_000); // sign-in already topped up; check again after a minute
+    const every = setInterval(topUp, 10 * 60_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(every);
+    };
+  }, [isVaultReadyForProfile, e2eeProfile?.user_id, localDeviceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (chatBodyRef.current && messages.length > 0 && isFirstLoadRef.current) {
@@ -1227,7 +1708,7 @@ export const Chat: React.FC<ChatProps> = ({
       }
       if (resolved.devices.length === 0) {
         setChatIndividualError(
-          'This member has not unlocked their E2EE Vault yet. Ask them to connect MetaMask & Sign In once.'
+          'This member has not signed in to chats yet. Ask them to connect MetaMask and sign in once.'
         );
         return;
       }
@@ -1238,7 +1719,7 @@ export const Chat: React.FC<ChatProps> = ({
       handleSelectChannelTab('dm');
     } catch (err: any) {
       setChatIndividualError(
-        err?.message || 'Could not find a verified member with that ID.'
+        friendlyError(err, 'Could not find a verified member with that ID.')
       );
     } finally {
       setStartingIndividualBusy(false);
@@ -1259,7 +1740,7 @@ export const Chat: React.FC<ChatProps> = ({
       }
       if (resolved.devices.length === 0) {
         setCreateGroupError(
-          `${resolved.username ? `@${resolved.username}` : resolved.user_id} has not unlocked an E2EE Vault yet.`
+          `${resolved.username ? `@${resolved.username}` : 'This member'} has not signed in to chats yet.`
         );
         return;
       }
@@ -1268,7 +1749,7 @@ export const Chat: React.FC<ChatProps> = ({
       );
       setGroupMemberInput('');
     } catch (err: any) {
-      setCreateGroupError(err?.message || `Member "${target}" not found.`);
+      setCreateGroupError(friendlyError(err, `Member "${target}" not found.`));
     } finally {
       setAddingGroupMemberBusy(false);
     }
@@ -1293,7 +1774,7 @@ export const Chat: React.FC<ChatProps> = ({
     const isSuperadmin = e2eeProfile.admin_role === 'superadmin';
     const feeUsd = Number(newGroupFeeUsd);
     if (isSuperadmin && newGroupPaid && !(feeUsd > 0)) {
-      setCreateGroupError('Enter an entry fee greater than $0 for a paid group.');
+      setCreateGroupError('Enter a monthly price greater than $0 for a paid group.');
       return;
     }
 
@@ -1309,7 +1790,7 @@ export const Chat: React.FC<ChatProps> = ({
         }
         if (extraPeer.devices.length === 0) {
           throw new Error(
-            `${extraPeer.username ? `@${extraPeer.username}` : extraPeer.user_id} has not unlocked an E2EE Vault yet.`
+            `${extraPeer.username ? `@${extraPeer.username}` : 'This member'} has not signed in to chats yet.`
           );
         }
         if (!finalMembers.some((m) => m.user_id === extraPeer.user_id)) {
@@ -1325,10 +1806,11 @@ export const Chat: React.FC<ChatProps> = ({
         creator_device_id: localDeviceId,
         ciphersuite: MLS_CIPHERSUITE_NAME,
         visibility: newGroupVisibility,
-        min_level: 7,
         min_eth_balance_wei: parseEthStringToWeiString(newGroupMinEth),
         require_invitation: true,
-        ...(isSuperadmin && newGroupPaid ? { is_paid: true, entry_fee_usd: feeUsd } : {}),
+        ...(isSuperadmin && newGroupPaid
+          ? { is_paid: true, entry_fee_usd: feeUsd, entry_fee_yearly_usd: Number(newGroupYearlyFeeUsd) || 0 }
+          : {}),
       });
       await localInit.finalizeWithServerGroupId(created.group.group_id);
 
@@ -1355,7 +1837,7 @@ export const Chat: React.FC<ChatProps> = ({
           const pkgs = await claimPeerMlsKeyPackages(member.user_id);
           if (pkgs.length === 0) {
             throw new Error(
-              `${member.username ? `@${member.username}` : member.user_id} has no available MLS KeyPackages. Ask them to open Chats once to replenish.`
+              `${member.username ? `@${member.username}` : 'This member'} cannot be added right now. Ask them to open Messages once, then try again.`
             );
           }
           claimedAll.push(...pkgs);
@@ -1378,6 +1860,7 @@ export const Chat: React.FC<ChatProps> = ({
 
       setNewGroupName('');
       setNewGroupPaid(false);
+      setNewGroupYearlyFeeUsd('0');
       setGroupMemberInput('');
       setPendingGroupMembers([]);
       setShowGroupOpts(false);
@@ -1390,29 +1873,89 @@ export const Chat: React.FC<ChatProps> = ({
       handleSelectChannelTab('groups');
       await syncSidebarLists();
     } catch (err: any) {
-      setCreateGroupError(err?.message || 'Failed to create encrypted group');
+      setCreateGroupError(friendlyError(err, 'Failed to create encrypted group'));
     } finally {
       setCreatingGroupBusy(false);
     }
   };
 
-  const handleAddGroupMember = async (identifier: string) => {
-    if (!selectedGroup) return;
+  /**
+   * Adds a member as group admin. Someone who asked to join (join request / invite code) is added
+   * straight away; anyone else gets an invitation and joins only after they press Accept.
+   */
+  const handleAddGroupMember = async (identifier: string): Promise<'active' | 'invited'> => {
+    if (!selectedGroup || !e2eeProfile) throw new Error('Open a group first.');
     const peer = await resolveE2EEPeer(identifier);
+    const who = peer.username ? `@${peer.username}` : 'This member';
+    if (peer.user_id === e2eeProfile.user_id) throw new Error('You are already in this group.');
+    const rows = selectedGroup.members.filter((m) => m.user_id === peer.user_id);
+    if (rows.some((m) => m.status === 'active')) throw new Error(`${who} is already in this group.`);
+    if (rows.some((m) => m.status === 'invited')) {
+      throw new Error(`${who} has already been invited and has not replied yet.`);
+    }
+    if (rows.some((m) => m.status === 'declined' || m.status === 'left')) {
+      // Clear their old place in the group first, so they can be invited again cleanly.
+      try {
+        await handleRemoveGroupMember(peer.user_id);
+      } catch {
+        /* nothing left to clear */
+      }
+    }
     const claimed = await claimPeerMlsKeyPackages(peer.user_id);
     if (claimed.length === 0) {
-      throw new Error(`User ${identifier} has no active MLS KeyPackages available on the server. Ask them to unlock their vault.`);
+      throw new Error('This member cannot be added right now. Ask them to open Messages once, then try again.');
     }
-    await executeMlsCommitWithRetry(
+    const updated = await executeMlsCommitWithRetry(
       selectedGroup.group_id,
       () =>
         buildMlsAddMembersCommit(
-          e2eeProfile!.user_id,
+          e2eeProfile.user_id,
           selectedGroup.group_id,
           claimed
         ),
       'add'
     );
+    const after = (updated?.members || []).filter((m) => m.user_id === peer.user_id);
+    return after.some((m) => m.status === 'invited') ? 'invited' : 'active';
+  };
+
+  const handleAcceptGroupInvitation = async (groupId: string, groupName: string) => {
+    if (invitationBusyId) return;
+    setInvitationBusyId(groupId);
+    setInvitationNotice(null);
+    try {
+      await acceptGroupInvitation(groupId);
+      setGroupInvitations((prev) => prev.filter((i) => i.group_id !== groupId));
+      setInvitationAlert((cur) => (cur?.group_id === groupId ? null : cur));
+      openGroupWhenReadyRef.current = { id: groupId, at: syncIterationRef.current };
+      await syncSidebarLists();
+    } catch (err: any) {
+      if (isGroupPaymentRequired(err) && onOpenPaidGroupModal) {
+        onOpenPaidGroupModal(err.detail.group_id, err.detail.group_name);
+        setInvitationNotice(`"${groupName}" is a paid group. Choose a plan in the payment window, then press Accept again.`);
+      } else {
+        setInvitationNotice(friendlyError(err, 'Could not join the group. Please try again.'));
+        void syncSidebarLists();
+      }
+    } finally {
+      setInvitationBusyId(null);
+    }
+  };
+
+  const handleDeclineGroupInvitation = async (groupId: string) => {
+    if (invitationBusyId) return;
+    setInvitationBusyId(groupId);
+    setInvitationNotice(null);
+    try {
+      await declineGroupInvitation(groupId);
+      setGroupInvitations((prev) => prev.filter((i) => i.group_id !== groupId));
+      setInvitationAlert((cur) => (cur?.group_id === groupId ? null : cur));
+    } catch (err: any) {
+      setInvitationNotice(friendlyError(err, 'Could not reject the invitation. Please try again.'));
+      void syncSidebarLists();
+    } finally {
+      setInvitationBusyId(null);
+    }
   };
 
   const handleRemoveGroupMember = async (targetUserId: string) => {
@@ -1429,15 +1972,6 @@ export const Chat: React.FC<ChatProps> = ({
     );
   };
 
-  const handleRotateGroupKey = async () => {
-    if (!selectedGroup) return;
-    await executeMlsCommitWithRetry(
-      selectedGroup.group_id,
-      () => buildMlsSelfKeyRotationCommit(e2eeProfile!.user_id, selectedGroup.group_id),
-      'update'
-    );
-  };
-
   const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!account) {
@@ -1446,10 +1980,10 @@ export const Chat: React.FC<ChatProps> = ({
     }
 
     const text = inputMessage.trim();
-    const file = pendingFile;
-    if ((!text && !file) || sending) return;
+    const files = pendingFiles;
+    if ((!text && files.length === 0) || sending) return;
     if (!e2eeProfile || !localDeviceId) {
-      alert('Authenticate your SIWE session & E2EE Vault first.');
+      alert('Please sign in first.');
       return;
     }
     const channelType: 'dm' | 'groups' = activeTab === 'dm' ? 'dm' : 'groups';
@@ -1457,12 +1991,28 @@ export const Chat: React.FC<ChatProps> = ({
     const group = selectedGroup;
     if ((channelType === 'dm' && !peer) || (channelType === 'groups' && !group)) return;
 
+    // Editing one of my messages: send an encrypted edit instead of a new message.
+    if (editTarget) {
+      if (!text) return;
+      const target = editTarget;
+      setInputMessage('');
+      setEditTarget(null);
+      await runFeature(() => sendEnvelopeNow({ kind: 'edit', target_id: target.id, text }, 'control'), 'Your edit was not saved.');
+      return;
+    }
+
     const targetId = channelType === 'dm' ? peer!.user_id : group!.group_id;
     const scope = `${channelType}|${targetId}`;
     const msgId = `emsg_${crypto.randomUUID().replace(/-/g, '')}`;
-    const displayText = text || (file ? `[Encrypted Attachment: ${file.name}]` : '');
+    const displayText = text;
     const myUserId = e2eeProfile.user_id;
     const sentAtIso = new Date().toISOString();
+    const replyRef = replyTarget || undefined;
+    // @mentions (groups): inside the encrypted message, and their ids to the server for the notice.
+    const mentionIds =
+      channelType === 'groups' && group
+        ? findMentionedIds(text, group.members.filter((m) => m.status === 'active'), myUserId)
+        : [];
 
     // 1) Show the message and free the input IMMEDIATELY. Encryption and the network call run
     //    behind it, so the sender never waits on the server to see their own message.
@@ -1477,21 +2027,24 @@ export const Chat: React.FC<ChatProps> = ({
         isEncrypted: true,
         canDecrypt: true,
         timestamp: sentAtIso,
-        protocolBadge: channelType === 'dm' ? 'OLM v2 E2EE' : 'MLS E2EE',
+        protocolBadge: 'Encrypted',
         sendStatus: 'sending',
         localScope: scope,
+        localFiles: files.length ? files : undefined,
+        replyTo: replyRef,
       },
     ]);
     setInputMessage('');
-    setPendingFile(null);
+    setPendingFiles([]);
+    setReplyTarget(null);
     setTimeout(() => scrollToBottom(true), 20);
 
     const job = async () => {
+      // Declared outside `try` so a failed send keeps the files that were already uploaded (for Retry).
+      const attachments: EncryptedAttachmentKeyDescriptor[] = [];
+      const attachmentIds: string[] = [];
       try {
-        const attachments: EncryptedAttachmentKeyDescriptor[] = [];
-        const attachmentIds: string[] = [];
-
-        if (file) {
+        for (const file of files) {
           const fileBuf = new Uint8Array(await file.arrayBuffer());
           const encAtt = await encryptAttachmentOnDevice(fileBuf, {
             scopeType: channelType === 'dm' ? 'dm' : 'group',
@@ -1521,7 +2074,9 @@ export const Chat: React.FC<ChatProps> = ({
           v: 1,
           text: displayText,
           attachments: attachments.length > 0 ? attachments : undefined,
+          reply_to: replyRef,
           sent_at: sentAtIso,
+          mentions: mentionIds.length ? mentionIds : undefined,
         };
 
         if (channelType === 'dm') {
@@ -1535,7 +2090,7 @@ export const Chat: React.FC<ChatProps> = ({
           ];
 
           if (!targetDevices || targetDevices.length === 0) {
-            throw new Error('Recipient has no active encryption keys registered. Transmission stopped for safety (plaintext fallback prohibited).');
+            throw new Error('This member has not signed in to chats yet, so the message was not sent.');
           }
 
           const olmEncrypted = await encryptOlmMultiDevicePayload(
@@ -1564,6 +2119,7 @@ export const Chat: React.FC<ChatProps> = ({
             epoch: mlsEncrypted.epoch,
             mls_ciphertext_b64: mlsEncrypted.mlsCiphertextB64,
             attachment_ids: attachmentIds,
+            mention_user_ids: mentionIds,
           });
         }
 
@@ -1574,13 +2130,26 @@ export const Chat: React.FC<ChatProps> = ({
         void loadActiveChannelMessages();
       } catch (err: any) {
         console.warn('Encrypted transmission rejected or failed:', err);
+        // Paid group whose subscription ended: open its payment window; the message stays with Retry.
+        const paymentNeeded = isGroupPaymentRequired(err);
+        if (paymentNeeded && onOpenPaidGroupModal) {
+          onOpenPaidGroupModal(err.detail.group_id, err.detail.group_name);
+        }
         const isKeyError =
-          err?.message?.toLowerCase().includes('key') ||
-          err?.message?.toLowerCase().includes('device') ||
-          err?.message?.toLowerCase().includes('epoch');
-        const safeError = isKeyError
-          ? `Encryption keys unavailable or outdated: ${err?.message}. Refresh keys to proceed (never plaintext).`
-          : (err?.message || 'Message was not sent (server rejected or database failed)');
+          !paymentNeeded &&
+          (err?.message?.toLowerCase().includes('key') ||
+            err?.message?.toLowerCase().includes('device') ||
+            err?.message?.toLowerCase().includes('epoch'));
+        const safeError = paymentNeeded
+          ? 'Your access to this group has ended. Renew it, then press Retry.'
+          : err?.detail?.code === 'admins_only'
+            ? 'Only admins can send messages in this group.'
+            : isKeyError
+              ? 'The message could not be sent securely right now. Please try again in a moment.'
+              : (friendlyError(err, 'Message was not sent (server rejected or database failed)'));
+        const allFilesUploaded = attachments.length === files.length;
+        const fileNote =
+          files.length > 0 && !allFilesUploaded ? ' The files were not sent: attach them again.' : '';
 
         const failedEntry: RichDisplayMessage = {
           id: `failed_${Date.now()}`,
@@ -1592,9 +2161,11 @@ export const Chat: React.FC<ChatProps> = ({
           isEncrypted: true,
           canDecrypt: true,
           sendStatus: 'failed',
-          sendError: safeError,
-          canRetry: !isKeyError,
+          sendError: safeError + fileNote,
+          canRetry: !isKeyError && (allFilesUploaded || Boolean(text)),
           localScope: scope,
+          attachments: allFilesUploaded && attachments.length ? attachments : undefined,
+          replyTo: replyRef,
           failedPayload: {
             channelType,
             targetId,
@@ -1602,9 +2173,13 @@ export const Chat: React.FC<ChatProps> = ({
             plainEnvelope: {
               v: 1,
               text: text || '',
+              attachments: allFilesUploaded && attachments.length ? attachments : undefined,
+              reply_to: replyRef,
               sent_at: new Date().toISOString(),
+              mentions: mentionIds.length ? mentionIds : undefined,
             },
             createdAt: Date.now(),
+            attachmentIds: allFilesUploaded ? attachmentIds : [],
           },
         };
         // Replace the optimistic bubble with the failed one (which offers Retry).
@@ -1619,6 +2194,7 @@ export const Chat: React.FC<ChatProps> = ({
   const handleRetryFailedMessage = async (failedMsg: RichDisplayMessage) => {
     if (!failedMsg.failedPayload || sending) return;
     const { channelType, targetId, plainEnvelope, createdAt } = failedMsg.failedPayload;
+    const retryAttachmentIds = failedMsg.failedPayload.attachmentIds || [];
     setSending(true);
     try {
       const isFresh = Date.now() - createdAt < 300000; // 5 min freshness
@@ -1634,7 +2210,7 @@ export const Chat: React.FC<ChatProps> = ({
           ...ownAccount.devices.filter((d) => d.status === 'active'),
         ];
         if (!targetDevices || targetDevices.length === 0) {
-          throw new Error('Recipient has no active encryption keys registered. Please refresh keys.');
+          throw new Error('This member has not signed in to chats yet, so the message was not sent.');
         }
         const freshPlain = isFresh ? plainEnvelope : { ...plainEnvelope, sent_at: new Date().toISOString() };
         const olmEncrypted = await encryptOlmMultiDevicePayload(
@@ -1649,7 +2225,7 @@ export const Chat: React.FC<ChatProps> = ({
           sender_device_id: olmEncrypted.senderDeviceId,
           protocol: OLM_PROTOCOL_ID,
           device_ciphertexts: olmEncrypted.deviceCiphertexts,
-          attachment_ids: [],
+          attachment_ids: retryAttachmentIds,
         });
         await saveVaultDecryptedMessage(e2eeProfile!.user_id, retryMsgId, freshPlain);
       } else {
@@ -1664,7 +2240,7 @@ export const Chat: React.FC<ChatProps> = ({
           sender_device_id: localDeviceId!,
           epoch: mlsEncrypted.epoch,
           mls_ciphertext_b64: mlsEncrypted.mlsCiphertextB64,
-          attachment_ids: [],
+          attachment_ids: retryAttachmentIds,
         });
         await saveVaultDecryptedMessage(e2eeProfile!.user_id, retryMsgId, freshPlain);
       }
@@ -1687,26 +2263,37 @@ export const Chat: React.FC<ChatProps> = ({
     }
   };
 
-  const handleDownloadAttachment = async (att: EncryptedAttachmentKeyDescriptor) => {
+  /** Downloads and decrypts one encrypted file on this device (used by image previews and downloads). */
+  const loadDecryptedAttachment = async (
+    att: EncryptedAttachmentKeyDescriptor,
+    scopeType: 'dm' | 'group'
+  ): Promise<Blob> => {
     try {
-      const scopeType = activeTab === 'dm' ? 'dm' : 'group';
       const blobRes = await downloadEncryptedAttachmentBlob(att.attachment_id);
-      const decryptedBytes = await decryptAttachmentOnDevice(
-        blobRes.attachment.ciphertext_b64,
-        att,
-        scopeType
-      );
+      const decryptedBytes = await decryptAttachmentOnDevice(blobRes.attachment.ciphertext_b64, att, scopeType);
       const copyBuf = new Uint8Array(decryptedBytes.byteLength);
       copyBuf.set(decryptedBytes);
-      const blob = new Blob([copyBuf.buffer], { type: att.mime_type });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = att.file_name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      return new Blob([copyBuf.buffer], { type: att.mime_type || 'application/octet-stream' });
     } catch (err: any) {
-      alert(err?.message || 'Attachment integrity verification or decryption failed');
+      if (err?.status === 410) {
+        setRevokedAttachmentIds((prev) => new Set(prev).add(att.attachment_id));
+      }
+      throw err;
+    }
+  };
+
+  /** The sender removes a file they sent. The message stays; the file can no longer be downloaded. */
+  const handleRevokeAttachment = async (att: EncryptedAttachmentKeyDescriptor) => {
+    if (!confirm(`Remove "${att.file_name}"? Nobody will be able to download it any more.`)) return;
+    try {
+      await revokeEncryptedAttachment(att.attachment_id);
+      setRevokedAttachmentIds((prev) => new Set(prev).add(att.attachment_id));
+    } catch (err: any) {
+      if (err?.status === 404 || err?.status === 410) {
+        setRevokedAttachmentIds((prev) => new Set(prev).add(att.attachment_id));
+      } else {
+        alert(friendlyError(err, 'Could not remove the file.'));
+      }
     }
   };
 
@@ -1733,22 +2320,8 @@ export const Chat: React.FC<ChatProps> = ({
           className="chat-channels-header"
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
         >
-          <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Radio size={16} className="pulse-icon" /> Chats
-          </span>
+          <span>Conversations</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            {e2eeProfile && (
-              <button
-                type="button"
-                className="btn-outline"
-                style={{ padding: '4px 8px', fontSize: '0.7rem' }}
-                onClick={() => setVaultModalOpen(true)}
-                title="Manage Permanent Identity, Wallets & Device Keys"
-              >
-                <KeyRound size={12} />
-                <span>Vault</span>
-              </button>
-            )}
             <button
               type="button"
               className="mobile-rail-close-btn"
@@ -1768,8 +2341,8 @@ export const Chat: React.FC<ChatProps> = ({
             className={`channel-btn ${activeTab === 'open_chat' ? 'active' : ''}`}
             onClick={() => handleSelectChannelTab('open_chat')}
           >
-            <Globe size={16} />
-            <span>Open Chat</span>
+            <Globe size={18} />
+            <span>Members&rsquo; room</span>
           </button>
 
           {account && (
@@ -1782,8 +2355,8 @@ export const Chat: React.FC<ChatProps> = ({
                 aria-haspopup="menu"
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                  <Plus size={15} />
-                  <span>+Add</span>
+                  <Plus size={16} />
+                  <span>Start a conversation</span>
                 </span>
                 <ChevronDown
                   size={14}
@@ -1806,11 +2379,11 @@ export const Chat: React.FC<ChatProps> = ({
                       setCreateGroupModalOpen(true);
                     }}
                   >
-                    <Users size={15} />
+                    <Users size={18} />
                     <div>
-                      <div>Create Group</div>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 400, color: 'var(--text-muted)' }}>
-                        Name a group &amp; add members
+                      <div>New group</div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: 400, color: 'var(--text-muted)' }}>
+                        Name a group and invite members
                       </div>
                     </div>
                   </button>
@@ -1825,11 +2398,11 @@ export const Chat: React.FC<ChatProps> = ({
                       setChatIndividualModalOpen(true);
                     }}
                   >
-                    <UserPlus size={15} />
+                    <UserPlus size={18} />
                     <div>
-                      <div>Chat Individual</div>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 400, color: 'var(--text-muted)' }}>
-                        Enter member ID to chat 1-to-1
+                      <div>New private chat</div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: 400, color: 'var(--text-muted)' }}>
+                        Message one member, end-to-end encrypted
                       </div>
                     </div>
                   </button>
@@ -1848,20 +2421,20 @@ export const Chat: React.FC<ChatProps> = ({
                 borderRadius: '10px',
                 background: 'var(--bg-card)',
                 border: '1px solid var(--border-focus)',
-                fontSize: '0.74rem',
+                fontSize: '0.9rem',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '8px',
               }}
             >
               <div style={{ color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-                MetaMask switched to <code>{formatAddress(account, 4)}</code>. Sign in to use this
-                wallet&apos;s E2EE vault, or link it inside <strong>Vault</strong>.
+                MetaMask switched to <code>{formatAddress(account, 4)}</code>. Sign in again to keep
+                chatting, or add this wallet under <strong>Settings &gt; Privacy &gt; Account and devices</strong>.
               </div>
               <button
                 type="button"
                 className="btn-solid"
-                style={{ padding: '6px 10px', fontSize: '0.74rem', justifyContent: 'center' }}
+                style={{ padding: '6px 10px', fontSize: '0.9rem', justifyContent: 'center' }}
                 disabled={siweLoading || authLoading}
                 onClick={onAuthenticateSiwe || authenticateE2EESession}
               >
@@ -1880,7 +2453,7 @@ export const Chat: React.FC<ChatProps> = ({
               {/* Encrypted Groups Section */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <div className="rail-section-label">
-                  <span>Groups ({groups.length})</span>
+                  <span>Groups{groups.length > 0 ? ` (${groups.length})` : ''}</span>
                   <button
                     type="button"
                     onClick={() => {
@@ -1890,66 +2463,163 @@ export const Chat: React.FC<ChatProps> = ({
                     style={{
                       background: 'transparent',
                       border: 'none',
-                      color: 'var(--text-secondary)',
-                      fontSize: '0.68rem',
+                      color: 'var(--accent-strong)',
+                      fontSize: '0.86rem',
                       fontWeight: 600,
                       cursor: 'pointer',
                       padding: 0,
                       textTransform: 'none',
                     }}
-                    title="Redeem invite code or browse public groups"
+                    title="Browse public groups"
                   >
-                    Invites / Public &rarr;
+                    Join or browse
                   </button>
                 </div>
 
-                {groups.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: '0.73rem',
-                      color: 'var(--text-muted)',
-                      padding: '4px 4px 2px',
-                    }}
-                  >
-                    No groups yet — click <strong>+Add &rarr; Create Group</strong>.
-                  </div>
-                ) : (
-                  groups.map((g) => {
-                    const isGroupActive =
-                      activeTab === 'groups' && selectedGroup?.group_id === g.group_id;
-                    return (
-                      <button
-                        key={g.group_id}
-                        type="button"
-                        className={`rail-conv-item ${isGroupActive ? 'active' : ''}`}
-                        onClick={() => {
-                          setSelectedGroup(g);
-                          handleSelectChannelTab('groups');
+                {groupInvitations.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }} aria-label="Group invitations">
+                    {groupInvitations.map((inv) => (
+                      <div
+                        key={inv.group_id}
+                        style={{
+                          padding: '10px 12px',
+                          borderRadius: '12px',
+                          border: '1px solid var(--border-focus)',
+                          background: 'var(--bg-card)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '8px',
                         }}
                       >
-                        <span
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '7px',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                          <Users size={14} style={{ flexShrink: 0, color: 'var(--accent)' }} />
+                          <strong
+                            style={{
+                              fontSize: '0.92rem',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {inv.group_name}
+                          </strong>
+                        </div>
+                        <div style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                          {inv.invited_by_username ? `@${inv.invited_by_username} added you` : 'You were added'}
+                          {` · ${inv.member_count} ${inv.member_count === 1 ? 'member' : 'members'}`}
+                          {inv.is_paid ? ' · Paid group' : ''}
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            className="btn-solid"
+                            style={{ flex: 1, justifyContent: 'center', padding: '6px 10px', fontSize: '0.88rem' }}
+                            disabled={invitationBusyId !== null}
+                            onClick={() => handleAcceptGroupInvitation(inv.group_id, inv.group_name)}
+                          >
+                            <Check size={13} />
+                            <span>{invitationBusyId === inv.group_id ? 'Joining...' : 'Accept'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-outline"
+                            style={{ flex: 1, justifyContent: 'center', padding: '6px 10px', fontSize: '0.88rem' }}
+                            disabled={invitationBusyId !== null}
+                            onClick={() => handleDeclineGroupInvitation(inv.group_id)}
+                          >
+                            <X size={13} />
+                            <span>Reject</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {invitationNotice && (
+                  <div role="status" style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', padding: '2px 10px' }}>
+                    {invitationNotice}
+                  </div>
+                )}
+
+                {isVaultReadyForProfile && e2eeProfile && sidebarLoadedUserId !== e2eeProfile.user_id && groups.length === 0 ? (
+                  <SidebarListSkeleton count={3} />
+                ) : groups.length === 0 && groupInvitations.length > 0 ? null : groups.length === 0 ? (
+                  <div
+                    style={{
+                      fontSize: '0.9rem',
+                      lineHeight: 1.5,
+                      color: 'var(--text-muted)',
+                      padding: '4px 10px 2px',
+                    }}
+                  >
+                    You are not in any groups yet. Choose <strong>Start a conversation</strong> to create one.
+                  </div>
+                ) : (
+                  groups
+                    .filter(
+                      (g) =>
+                        showArchived ||
+                        !convPrefs[`group:${g.group_id}`]?.archived ||
+                        (activeTab === 'groups' && selectedGroup?.group_id === g.group_id)
+                    )
+                    .map((g) => {
+                      const isGroupActive =
+                        activeTab === 'groups' && selectedGroup?.group_id === g.group_id;
+                      return (
+                        <button
+                          key={g.group_id}
+                          type="button"
+                          className={`rail-conv-item ${isGroupActive ? 'active' : ''}`}
+                          onClick={() => {
+                            setSelectedGroup(g);
+                            handleSelectChannelTab('groups');
                           }}
                         >
-                          <Users size={13} style={{ flexShrink: 0 }} />
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {g.name}
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '7px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            <Users size={13} style={{ flexShrink: 0 }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {g.name}
+                            </span>
+                            {convPrefs[`group:${g.group_id}`]?.muted && <BellOff size={12} aria-label="Muted" style={{ flexShrink: 0, opacity: 0.6 }} />}
+                            {convPrefs[`group:${g.group_id}`]?.archived && <Archive size={12} aria-label="Archived" style={{ flexShrink: 0, opacity: 0.6 }} />}
                           </span>
-                        </span>
-                        <span style={{ fontSize: '0.66rem', fontFamily: 'ui-monospace, monospace' }}>
-                          E#{g.current_epoch}
-                        </span>
-                      </button>
-                    );
-                  })
+                          {(notifications.unread[`group:${g.group_id}`] || 0) > 0 && !isGroupActive && (
+                            <span className="rail-unread" aria-label={`${notifications.unread[`group:${g.group_id}`]} unread`}>
+                              {notifications.unread[`group:${g.group_id}`] > 99 ? '99+' : notifications.unread[`group:${g.group_id}`]}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })
                 )}
               </div>
+
+              {/* Archived chats are hidden from the lists until shown */}
+              {Object.entries(convPrefs).some(([k, p]) => p.archived && k !== 'room') && (
+                <button
+                  type="button"
+                  className="rail-conv-item"
+                  aria-pressed={showArchived}
+                  onClick={() => setShowArchived((v) => !v)}
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                    <Archive size={13} />
+                    {showArchived
+                      ? 'Hide archived chats'
+                      : `Archived chats (${Object.entries(convPrefs).filter(([k, p]) => p.archived && k !== 'room').length})`}
+                  </span>
+                </button>
+              )}
 
               {/* Individual 1-to-1 Chats Section */}
               {(() => {
@@ -1980,86 +2650,103 @@ export const Chat: React.FC<ChatProps> = ({
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                     <div className="rail-section-label">
-                      <span>Individual Chats ({combinedPeers.length})</span>
+                      <span>Private chats{combinedPeers.length > 0 ? ` (${combinedPeers.length})` : ''}</span>
                       <button
                         type="button"
                         onClick={() => {
-                          setSelectedPeer(null);
-                          handleSelectChannelTab('dm');
+                          setMobileRailOpen(false);
+                          setChatIndividualError(null);
+                          setChatIndividualModalOpen(true);
                         }}
                         style={{
                           background: 'transparent',
                           border: 'none',
-                          color: 'var(--text-secondary)',
-                          fontSize: '0.68rem',
+                          color: 'var(--accent-strong)',
+                          fontSize: '0.86rem',
                           fontWeight: 600,
                           cursor: 'pointer',
                           padding: 0,
                           textTransform: 'none',
                         }}
-                        title="Browse username directory"
+                        title="Search members by @username"
                       >
-                        Directory &rarr;
+                        Find a member
                       </button>
                     </div>
 
-                    {combinedPeers.length === 0 ? (
+                    {isVaultReadyForProfile && e2eeProfile && sidebarLoadedUserId !== e2eeProfile.user_id && combinedPeers.length === 0 ? (
+                      <SidebarListSkeleton count={3} />
+                    ) : combinedPeers.length === 0 ? (
                       <div
                         style={{
-                          fontSize: '0.73rem',
+                          fontSize: '0.9rem',
+                          lineHeight: 1.5,
                           color: 'var(--text-muted)',
-                          padding: '4px 4px 2px',
+                          padding: '4px 10px 2px',
                         }}
                       >
-                        No individual chats — click <strong>+Add &rarr; Chat Individual</strong>.
+                        No private chats yet. Choose <strong>Start a conversation</strong> to message a member.
                       </div>
                     ) : (
-                      combinedPeers.map((peerItem) => {
-                        const isPeerActive =
-                          activeTab === 'dm' && selectedPeer?.user_id === peerItem.user_id;
-                        const label = peerItem.username
-                          ? `@${peerItem.username}`
-                          : peerItem.primary_wallet
-                            ? formatAddress(peerItem.primary_wallet, 4)
-                            : peerItem.user_id.slice(0, 12);
-                        return (
-                          <button
-                            key={peerItem.user_id}
-                            type="button"
-                            className={`rail-conv-item ${isPeerActive ? 'active' : ''}`}
-                            onClick={async () => {
-                              setMobileRailOpen(false);
-                              const cachedOpened = openedPeers.find(
-                                (p) => p.user_id === peerItem.user_id
-                              );
-                              if (cachedOpened) {
-                                setSelectedPeer(cachedOpened);
-                                handleSelectChannelTab('dm');
-                              }
-                              try {
-                                const freshPeer = await resolveE2EEPeer(peerItem.user_id);
-                                registerOpenedPeer(freshPeer);
-                                setSelectedPeer(freshPeer);
-                                handleSelectChannelTab('dm');
-                              } catch {
-                                // keep cached peer if offline
-                              }
-                            }}
-                          >
-                            <span
-                              style={{
-                                fontFamily: 'ui-monospace, monospace',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
+                      combinedPeers
+                        .filter(
+                          (p) =>
+                            showArchived ||
+                            !convPrefs[`dm:${p.user_id}`]?.archived ||
+                            (activeTab === 'dm' && selectedPeer?.user_id === p.user_id)
+                        )
+                        .map((peerItem) => {
+                          const isPeerActive =
+                            activeTab === 'dm' && selectedPeer?.user_id === peerItem.user_id;
+                          const label = peerItem.username
+                            ? `@${peerItem.username}`
+                            : peerItem.primary_wallet
+                              ? formatAddress(peerItem.primary_wallet, 4)
+                              : peerItem.user_id.slice(0, 12);
+                          return (
+                            <button
+                              key={peerItem.user_id}
+                              type="button"
+                              className={`rail-conv-item ${isPeerActive ? 'active' : ''}`}
+                              onClick={async () => {
+                                setMobileRailOpen(false);
+                                const cachedOpened = openedPeers.find(
+                                  (p) => p.user_id === peerItem.user_id
+                                );
+                                if (cachedOpened) {
+                                  setSelectedPeer(cachedOpened);
+                                  handleSelectChannelTab('dm');
+                                }
+                                try {
+                                  const freshPeer = await resolveE2EEPeer(peerItem.user_id);
+                                  registerOpenedPeer(freshPeer);
+                                  setSelectedPeer(freshPeer);
+                                  handleSelectChannelTab('dm');
+                                } catch {
+                                  // keep cached peer if offline
+                                }
                               }}
                             >
-                              {label}
-                            </span>
-                            <Lock size={11} style={{ flexShrink: 0 }} />
-                          </button>
-                        );
-                      })
+                              <span
+                                style={{
+                                  fontFamily: 'ui-monospace, monospace',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {label}
+                              </span>
+                              {(notifications.unread[`dm:${peerItem.user_id}`] || 0) > 0 && !isPeerActive ? (
+                                <span className="rail-unread" aria-label={`${notifications.unread[`dm:${peerItem.user_id}`]} unread`}>
+                                  {notifications.unread[`dm:${peerItem.user_id}`] > 99 ? '99+' : notifications.unread[`dm:${peerItem.user_id}`]}
+                                </span>
+                              ) : (
+                                <Lock size={11} style={{ flexShrink: 0 }} />
+                              )}
+                            </button>
+                          );
+                        })
                     )}
                   </div>
                 );
@@ -2067,36 +2754,6 @@ export const Chat: React.FC<ChatProps> = ({
             </>
           )}
 
-          {/* Global Public Room Info Card */}
-          <div
-            style={{
-              padding: '10px 12px',
-              borderRadius: '8px',
-              background: 'var(--bg-card)',
-              border: '1px solid var(--border-subtle)',
-              fontSize: '0.74rem',
-              color: 'var(--text-secondary)',
-              lineHeight: 1.45,
-            }}
-          >
-            <div style={{ fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
-              Global Public Room
-            </div>
-            <div>
-              {account ? (
-                <>
-                  Open to all members in real time. Click <strong>+Add</strong> above to{' '}
-                  <strong>Create Group</strong> or <strong>Chat Individual</strong> with end-to-end
-                  encryption.
-                </>
-              ) : (
-                <>
-                  Open to all members in real time. Connect MetaMask to chat or start end-to-end
-                  encrypted Groups and Individual Chats.
-                </>
-              )}
-            </div>
-          </div>
         </div>
       </div>
 
@@ -2136,8 +2793,8 @@ export const Chat: React.FC<ChatProps> = ({
                 title="Chats Menu"
                 aria-label="Chats Menu"
               >
-                <Menu size={14} />
-                <span>Chats</span>
+                <Menu size={16} />
+                <span>Conversations</span>
               </button>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div
@@ -2159,38 +2816,37 @@ export const Chat: React.FC<ChatProps> = ({
                             : selectedPeer.primary_wallet
                               ? formatAddress(selectedPeer.primary_wallet, 6)
                               : selectedPeer.user_id
-                          : 'Username Directory'}
+                          : 'Find a member'}
                       </span>
                       {selectedPeer && (
                         <span className="audit-status">
-                          {peerIsVerified ? 'VERIFIED' : 'PRIVATE CHAT'}
+                          Private chat
                         </span>
                       )}
                     </>
                   )}
                   {activeTab === 'groups' && (
                     <>
-                      <span>{selectedGroup ? selectedGroup.name : 'Encrypted Groups & Invites'}</span>
+                      <span>{selectedGroup ? selectedGroup.name : 'Groups'}</span>
                       {selectedGroup && (
                         <span className="audit-status">
-                          EPOCH #{selectedGroup.current_epoch}
                           {selectedGroup.policy?.is_paid
-                            ? ` • PAID (${formatGroupFee(selectedGroup.policy)})`
-                            : ''}
+                            ? `Paid group: ${formatGroupFee(selectedGroup.policy)}`
+                            : 'Free group'}
                         </span>
                       )}
                     </>
                   )}
                 </div>
-                <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
                   {activeTab === 'dm' &&
                     (selectedPeer
-                      ? `Permanent Peer ID: ${selectedPeer.user_id} • Forward-Secret Curve25519 + Ed25519`
-                      : 'Search verified accounts by unique @username or wallet to start Private Chats')}
+                      ? 'End-to-end encrypted. Only you and this member can read these messages.'
+                      : 'Enter a member’s @username, user ID, or wallet to start a private chat')}
                   {activeTab === 'groups' &&
                     (selectedGroup
-                      ? `Encrypted Group (${selectedGroup.members.filter((m) => m.status === 'active').length} active devices) • Strict pre-join & post-removal secrecy`
-                      : 'Redeem an invite code or browse public groups')}
+                      ? 'End-to-end encrypted group. New members cannot read earlier messages.'
+                      : 'Browse public groups')}
                 </div>
               </div>
             </div>
@@ -2200,12 +2856,15 @@ export const Chat: React.FC<ChatProps> = ({
                 <button
                   type="button"
                   className="btn-outline"
-                  style={{ padding: '6px 10px', fontSize: '0.74rem' }}
-                  onClick={() => setSelectedPeer(null)}
-                  title="Back to Username Directory"
+                  style={{ padding: '6px 10px', fontSize: '0.9rem' }}
+                  onClick={() => {
+                    setChatIndividualError(null);
+                    setChatIndividualModalOpen(true);
+                  }}
+                  title="Start a private chat with another member"
                 >
-                  <Search size={13} />
-                  <span>Directory</span>
+                  <Search size={14} />
+                  <span>Find a member</span>
                 </button>
               )}
 
@@ -2213,12 +2872,12 @@ export const Chat: React.FC<ChatProps> = ({
                 <button
                   type="button"
                   className="btn-outline"
-                  style={{ padding: '6px 10px', fontSize: '0.74rem' }}
+                  style={{ padding: '6px 10px', fontSize: '0.9rem' }}
                   onClick={() => setSelectedGroup(null)}
-                  title="Back to Public Groups & Invites"
+                  title="Back to the group list"
                 >
                   <Compass size={13} />
-                  <span>Browse Groups</span>
+                  <span>Browse groups</span>
                 </button>
               )}
 
@@ -2227,16 +2886,7 @@ export const Chat: React.FC<ChatProps> = ({
                   <button
                     type="button"
                     className="btn-outline"
-                    style={{ padding: '6px 10px', fontSize: '0.74rem' }}
-                    onClick={() => setSafetyModalOpen(true)}
-                  >
-                    {peerIsVerified ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
-                    <span>{peerIsVerified ? 'Verified' : 'Verify Keys'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-outline"
-                    style={{ padding: '6px 10px', fontSize: '0.74rem' }}
+                    style={{ padding: '6px 10px', fontSize: '0.9rem' }}
                     title="Block User"
                     onClick={async () => {
                       if (!confirm(`Block ${selectedPeer.username || selectedPeer.user_id}?`)) return;
@@ -2244,7 +2894,7 @@ export const Chat: React.FC<ChatProps> = ({
                         await blockUser(selectedPeer.user_id, 'Blocked from Private Chat');
                         alert('User blocked. Server will reject new messages from this user.');
                       } catch (err: any) {
-                        alert(err?.message || 'Block failed');
+                        alert(friendlyError(err, 'Block failed'));
                       }
                     }}
                   >
@@ -2253,7 +2903,7 @@ export const Chat: React.FC<ChatProps> = ({
                   <button
                     type="button"
                     className="btn-outline"
-                    style={{ padding: '6px 10px', fontSize: '0.74rem' }}
+                    style={{ padding: '6px 10px', fontSize: '0.9rem' }}
                     title="Report Abuse"
                     onClick={async () => {
                       const reason = prompt('Report reason (spam, impersonation, harassment):');
@@ -2267,7 +2917,7 @@ export const Chat: React.FC<ChatProps> = ({
                         });
                         alert('Moderation report submitted.');
                       } catch (err: any) {
-                        alert(err?.message || 'Report failed');
+                        alert(friendlyError(err, 'Report failed'));
                       }
                     }}
                   >
@@ -2280,260 +2930,47 @@ export const Chat: React.FC<ChatProps> = ({
                 <button
                   type="button"
                   className="btn-outline"
-                  style={{ padding: '6px 12px', fontSize: '0.76rem' }}
+                  style={{ padding: '6px 12px', fontSize: '0.86rem' }}
                   onClick={() => setGroupModalOpen(true)}
                 >
                   <ShieldCheck size={14} />
-                  <span>Governance, Policy &amp; Keys</span>
+                  <span>Group settings</span>
                 </button>
               )}
             </div>
           </div>
 
-          {/* Non-Silent Peer Identity Key Change Warning Banner */}
-          {activeTab === 'dm' && peerSecurityWarnings.length > 0 && (
-            <div
-              style={{
-                padding: '10px 20px',
-                background: 'var(--bg-surface)',
-                borderBottom: '1px solid var(--border-strong)',
-                fontSize: '0.76rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '12px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <ShieldAlert size={16} style={{ flexShrink: 0 }} />
-                <span>{peerSecurityWarnings[peerSecurityWarnings.length - 1]}</span>
-              </div>
-              <button
-                type="button"
-                className="btn-outline"
-                style={{ padding: '4px 10px', fontSize: '0.72rem' }}
-                onClick={() => setSafetyModalOpen(true)}
-              >
-                Review Safety Number
-              </button>
-            </div>
-          )}
 
-          {/* Viewport Content Case 1: Private Chats Directory View */}
+          {/* Viewport Content Case 1: Private Chats Prompt View */}
           {activeTab === 'dm' && !selectedPeer && (
             <div
               style={{
                 flex: 1,
-                overflowY: 'auto',
-                padding: '24px',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '18px',
-                maxWidth: '900px',
-                width: '100%',
-                margin: '0 auto',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '24px',
+                textAlign: 'center',
+                gap: '12px',
               }}
             >
-              <div className="deck-card" style={{ padding: '20px' }}>
-                <div className="deck-header" style={{ marginBottom: '16px' }}>
-                  <div>
-                    <div
-                      className="deck-title"
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        fontSize: '1.05rem',
-                        fontWeight: 600,
-                      }}
-                    >
-                      <Search size={18} />
-                      <span>Username Directory</span>
-                    </div>
-                    <div
-                      className="deck-subtitle"
-                      style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}
-                    >
-                      Search verified accounts by unique <code>@username</code> or
-                      wallet to start Private Chats.
-                    </div>
-                  </div>
-                </div>
-
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    handleSearchDirectory(directoryQuery);
-                  }}
-                  style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}
-                >
-                  <input
-                    type="text"
-                    placeholder="Search @username or wallet..."
-                    value={directoryQuery}
-                    onChange={(e) => {
-                      setDirectoryQuery(e.target.value);
-                      handleSearchDirectory(e.target.value);
-                    }}
-                    style={{
-                      flex: 1,
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-strong)',
-                      borderRadius: '10px',
-                      padding: '10px 14px',
-                      color: 'var(--text-main)',
-                      fontSize: '0.86rem',
-                    }}
-                  />
-                  <button
-                    type="submit"
-                    className="btn-solid"
-                    disabled={directoryLoading}
-                    style={{ padding: '0 18px' }}
-                  >
-                    <Search size={14} />
-                    <span>Search</span>
-                  </button>
-                </form>
-
-                {directoryStatusMsg && (
-                  <div
-                    style={{
-                      padding: '8px 12px',
-                      marginBottom: '12px',
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-strong)',
-                      borderRadius: '8px',
-                      fontSize: '0.8rem',
-                      color: 'var(--text-secondary)',
-                    }}
-                  >
-                    {directoryStatusMsg}
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {directoryUsers.length === 0 ? (
-                    <div
-                      style={{
-                        color: 'var(--text-muted)',
-                        fontSize: '0.84rem',
-                        padding: '24px 0',
-                        textAlign: 'center',
-                      }}
-                    >
-                      {directoryLoading ? 'Searching directory...' : 'No matching accounts found.'}
-                    </div>
-                  ) : (
-                    directoryUsers.map((u) => {
-                      const isMe = e2eeProfile && u.user_id === e2eeProfile.user_id;
-                      return (
-                        <div
-                          key={u.user_id}
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            padding: '12px 16px',
-                            background: 'var(--bg-input)',
-                            border: '1px solid var(--border-subtle)',
-                            borderRadius: '12px',
-                            gap: '12px',
-                            flexWrap: 'wrap',
-                          }}
-                        >
-                          <div>
-                            <div
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '8px',
-                                fontWeight: 600,
-                              }}
-                            >
-                              <span style={{ fontFamily: 'ui-monospace, monospace' }}>
-                                {u.username ? `@${u.username}` : u.user_id.slice(0, 14)}
-                              </span>
-                              <span className="audit-status" style={{ fontSize: '0.66rem' }}>
-                                Member
-                              </span>
-                              {u.online && (
-                                <span
-                                  style={{
-                                    fontSize: '0.68rem',
-                                    color: '#10b981',
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  ● Online
-                                </span>
-                              )}
-                              {isMe && (
-                                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
-                                  (You)
-                                </span>
-                              )}
-                            </div>
-                            {u.bio && (
-                              <div
-                                style={{
-                                  fontSize: '0.78rem',
-                                  color: 'var(--text-secondary)',
-                                  marginTop: '3px',
-                                }}
-                              >
-                                {u.bio}
-                              </div>
-                            )}
-                          </div>
-
-                          {!isMe && (
-                            <div style={{ display: 'flex', gap: '6px' }}>
-                              <button
-                                type="button"
-                                className="btn-solid"
-                                style={{ padding: '6px 14px', fontSize: '0.76rem' }}
-                                onClick={() => {
-                                  if (!account) {
-                                    onConnectWallet();
-                                    return;
-                                  }
-                                  if (needsE2EEAuth) {
-                                    (onAuthenticateSiwe || authenticateE2EESession)();
-                                    return;
-                                  }
-                                  handleSelectPeerFromDirectory(
-                                    u.username ? `@${u.username}` : u.user_id
-                                  );
-                                }}
-                              >
-                                <Lock size={12} />
-                                <span>Message</span>
-                              </button>
-                              {e2eeProfile && (
-                                <button
-                                  type="button"
-                                  className="btn-outline"
-                                  style={{ padding: '6px 10px', fontSize: '0.74rem' }}
-                                  title="Block User"
-                                  onClick={async () => {
-                                    await blockUser(u.user_id, 'Blocked from directory');
-                                    setDirectoryStatusMsg(
-                                      `Blocked ${u.username ? `@${u.username}` : u.user_id}`
-                                    );
-                                  }}
-                                >
-                                  <Ban size={12} />
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
+              <Lock size={34} style={{ color: 'var(--accent)' }} />
+              <div style={{ fontSize: '1.15rem', fontWeight: 600 }}>Start a private chat</div>
+              <div style={{ fontSize: '0.92rem', color: 'var(--text-secondary)', maxWidth: '380px' }}>
+                Enter a member&rsquo;s <code>@username</code>, user ID, or wallet address to start an end-to-end encrypted conversation.
               </div>
+              <button
+                type="button"
+                className="btn-solid"
+                onClick={() => {
+                  setChatIndividualError(null);
+                  setChatIndividualModalOpen(true);
+                }}
+              >
+                <UserPlus size={16} />
+                <span>Message a member</span>
+              </button>
             </div>
           )}
 
@@ -2553,88 +2990,28 @@ export const Chat: React.FC<ChatProps> = ({
                 alignContent: 'start',
               }}
             >
-              {/* Left Card: Redeem Invite Code */}
+              {/* Left Card: how joining works (invite links were removed) */}
               <div className="deck-card" style={{ padding: '20px' }}>
-                <div className="deck-header" style={{ marginBottom: '16px' }}>
-                  <div>
-                    <div
-                      className="deck-title"
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        fontSize: '1.05rem',
-                        fontWeight: 600,
-                      }}
-                    >
-                      <Link2 size={18} />
-                      <span>Redeem Group Invite</span>
-                    </div>
-                    <div
-                      className="deck-subtitle"
-                      style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}
-                    >
-                      Enter a group invite code (<code>zinv_...</code>) to verify wallet qualifications
-                      and join.
-                    </div>
-                  </div>
+                <div className="deck-title" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <UserPlus size={18} />
+                  <span>How joining works</span>
                 </div>
-
-                {inviteStatusMsg && (
-                  <div
-                    style={{
-                      padding: '10px 12px',
-                      marginBottom: '14px',
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-strong)',
-                      borderRadius: '8px',
-                      fontSize: '0.8rem',
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {inviteStatusMsg}
-                  </div>
-                )}
-
-                <form
-                  onSubmit={handleRedeemInvite}
-                  style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}
-                >
-                  <input
-                    type="text"
-                    placeholder="Paste invite code (zinv_...)"
-                    value={inviteCodeInput}
-                    onChange={(e) => setInviteCodeInput(e.target.value)}
-                    style={{
-                      flex: 1,
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-strong)',
-                      borderRadius: '10px',
-                      padding: '10px 14px',
-                      color: 'var(--text-main)',
-                      fontSize: '0.82rem',
-                      fontFamily: 'ui-monospace, monospace',
-                    }}
-                  />
-                  <button
-                    type="submit"
-                    className="btn-solid"
-                    disabled={inviteRedeeming || !inviteCodeInput.trim()}
-                    style={{ padding: '0 16px' }}
-                  >
-                    <Link2 size={14} />
-                    <span>{inviteRedeeming ? 'Redeeming...' : 'Redeem'}</span>
-                  </button>
-                </form>
-
-                <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                  Group invites provide end-to-end encrypted group admission. An existing group admin
-                  will seal your initial welcome bundle.
-                </div>
+                <p style={{ fontSize: '0.95rem', color: 'var(--text-secondary)', lineHeight: 1.55, margin: '0 0 10px 0' }}>
+                  A group admin adds you, and the group appears under <strong>Invitations</strong> for you to
+                  Accept or Reject. Nothing joins you without your Accept.
+                </p>
+                <p style={{ fontSize: '0.95rem', color: 'var(--text-secondary)', lineHeight: 1.55, margin: 0 }}>
+                  Public groups are listed here: send a join request and an admin of the group adds you.
+                </p>
               </div>
 
               {/* Right Card: Discoverable Public Groups */}
               <div className="deck-card" style={{ padding: '20px' }}>
+                {inviteStatusMsg && (
+                  <div role="status" style={{ fontSize: '0.92rem', marginBottom: 12, padding: '10px 12px', borderRadius: 10, background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
+                    {inviteStatusMsg}
+                  </div>
+                )}
                 <div className="deck-header" style={{ marginBottom: '16px' }}>
                   <div>
                     <div
@@ -2652,7 +3029,7 @@ export const Chat: React.FC<ChatProps> = ({
                     </div>
                     <div
                       className="deck-subtitle"
-                      style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}
+                      style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginTop: '4px' }}
                     >
                       Browse public groups or request entry when your wallet meets
                       requirements.
@@ -2661,18 +3038,18 @@ export const Chat: React.FC<ChatProps> = ({
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {discoverableGroups.length === 0 ? (
+                  {groupsLoading && discoverableGroups.length === 0 ? (
+                    <ListRowsSkeleton count={3} showButton />
+                  ) : discoverableGroups.length === 0 ? (
                     <div
                       style={{
-                        fontSize: '0.82rem',
+                        fontSize: '0.9rem',
                         color: 'var(--text-muted)',
                         padding: '24px 0',
                         textAlign: 'center',
                       }}
                     >
-                      {groupsLoading
-                        ? 'Loading discoverable groups...'
-                        : 'No public groups listed yet. Create one in the sidebar!'}
+                      No public groups listed yet. Create one in the sidebar!
                     </div>
                   ) : (
                     discoverableGroups.map((g) => (
@@ -2696,12 +3073,12 @@ export const Chat: React.FC<ChatProps> = ({
                             {g.is_paid && (
                               <span
                                 style={{
-                                  fontSize: '0.66rem',
+                                  fontSize: '0.86rem',
                                   fontWeight: 700,
                                   padding: '1px 6px',
                                   borderRadius: '4px',
                                   backgroundColor: 'rgba(234, 179, 8, 0.15)',
-                                  color: '#eab308',
+                                  color: 'var(--accent)',
                                   border: '1px solid rgba(234, 179, 8, 0.3)',
                                 }}
                               >
@@ -2711,14 +3088,14 @@ export const Chat: React.FC<ChatProps> = ({
                           </div>
                           <div
                             style={{
-                              fontSize: '0.74rem',
+                              fontSize: '0.9rem',
                               color: 'var(--text-secondary)',
                               marginTop: '2px',
                             }}
                           >
                             {g.is_paid ? (
                               <>
-                                Paid Group &bull; Entry Fee: <strong>{formatGroupFee(g)}</strong> &bull;{' '}
+                                Paid Group &bull; <strong>{formatGroupFee(g)}</strong> &bull;{' '}
                                 {g.active_member_count} members
                               </>
                             ) : (
@@ -2728,7 +3105,7 @@ export const Chat: React.FC<ChatProps> = ({
                           {g.description && (
                             <div
                               style={{
-                                fontSize: '0.74rem',
+                                fontSize: '0.9rem',
                                 color: 'var(--text-muted)',
                                 marginTop: '3px',
                               }}
@@ -2742,7 +3119,7 @@ export const Chat: React.FC<ChatProps> = ({
                           <button
                             type="button"
                             className="btn-outline"
-                            style={{ padding: '6px 14px', fontSize: '0.75rem' }}
+                            style={{ padding: '6px 14px', fontSize: '0.86rem' }}
                             onClick={() => handleOpenDiscoverableGroup(g)}
                           >
                             Open Group
@@ -2753,8 +3130,8 @@ export const Chat: React.FC<ChatProps> = ({
                             className="btn-solid"
                             style={{
                               padding: '6px 14px',
-                              fontSize: '0.75rem',
-                              backgroundColor: '#eab308',
+                              fontSize: '0.86rem',
+                              backgroundColor: 'var(--accent)',
                               color: '#000000',
                               fontWeight: 600,
                             }}
@@ -2770,7 +3147,7 @@ export const Chat: React.FC<ChatProps> = ({
                           <button
                             type="button"
                             className="btn-solid"
-                            style={{ padding: '6px 14px', fontSize: '0.75rem' }}
+                            style={{ padding: '6px 14px', fontSize: '0.86rem' }}
                             onClick={() => handleRequestJoinGroup(g)}
                           >
                             Request Join
@@ -2797,7 +3174,7 @@ export const Chat: React.FC<ChatProps> = ({
                 <p
                   style={{
                     color: 'var(--text-muted)',
-                    fontSize: '0.84rem',
+                    fontSize: '0.9rem',
                     maxWidth: '410px',
                     lineHeight: 1.5,
                     margin: '0 0 20px 0',
@@ -2822,24 +3199,24 @@ export const Chat: React.FC<ChatProps> = ({
                   <KeyRound size={32} />
                 </div>
                 <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: '0 0 8px 0' }}>
-                  Sign In with Ethereum (SIWE) &amp; Unlock Vault
+                  Sign in to see your messages
                 </h3>
                 <p
                   style={{
                     color: 'var(--text-muted)',
-                    fontSize: '0.84rem',
+                    fontSize: '0.9rem',
                     maxWidth: '420px',
                     lineHeight: 1.5,
                     margin: '0 0 16px 0',
                   }}
                 >
-                  Sign a single-use EIP-4361 challenge to authenticate your permanent account and
-                  unlock your on-device encryption keys.
+                  Approve the sign-in request in MetaMask. It is free and does not send any
+                  payment.
                 </p>
                 {authError && (
                   <div
                     style={{
-                      fontSize: '0.78rem',
+                      fontSize: '0.86rem',
                       marginBottom: '12px',
                       color: 'var(--text-secondary)',
                     }}
@@ -2856,16 +3233,110 @@ export const Chat: React.FC<ChatProps> = ({
                   <ShieldCheck size={15} />
                   <span>
                     {siweLoading || authLoading
-                      ? 'Signing SIWE & Unlocking...'
-                      : 'Sign SIWE & Unlock E2EE'}
+                      ? 'Signing in...'
+                      : 'Sign in with MetaMask'}
                   </span>
                 </button>
               </div>
             ) : (
               <>
+                {/* Chat toolbar: timer / announcement / muted chips, search, options, pinned messages */}
+                {(activeTab === 'dm' ? selectedPeer : selectedGroup) && (
+                  <div className="chat-extras-bar">
+                    <div className="chat-extras-row">
+                      <ChatStatusChips timer={convState?.disappearing_ttl} adminsOnly={adminsOnlyHere} muted={Boolean(currentPref?.muted)} />
+                      <span style={{ flex: 1 }} />
+                      <button
+                        type="button"
+                        className="chat-icon-btn"
+                        aria-label="Search this chat"
+                        aria-pressed={searchOpen}
+                        onClick={() => {
+                          setSearchOpen((v) => !v);
+                          setSearchQuery('');
+                        }}
+                      >
+                        <Search size={15} />
+                      </button>
+                      <ConversationMenu
+                        kind={activeTab === 'dm' ? 'dm' : 'group'}
+                        muted={Boolean(currentPref?.muted)}
+                        mutedForever={currentPref?.muted_forever}
+                        mutedUntil={currentPref?.muted_until}
+                        archived={currentPref?.archived}
+                        timer={convState?.disappearing_ttl || 0}
+                        adminsOnly={adminsOnlyHere}
+                        canManage={Boolean(convState?.can_manage)}
+                        onMute={(choice) => void updatePref({ mute: choice })}
+                        onArchive={(archived) => void updatePref({ archived })}
+                        onTimer={(ttl) => void changeTimer(ttl)}
+                        onAdminsOnly={(v) => void changeAdminsOnly(v)}
+                        onSearch={() => setSearchOpen(true)}
+                        onPoll={activeTab === 'groups' && (!adminsOnlyHere || isGroupAdminHere) ? () => setPollOpen(true) : undefined}
+                      />
+                    </div>
+                    {searchOpen && (
+                      <ChatSearchBar
+                        query={searchQuery}
+                        onQuery={setSearchQuery}
+                        count={searchHits.length}
+                        index={searchIndex}
+                        onStep={stepSearch}
+                        onClose={() => {
+                          setSearchOpen(false);
+                          setSearchQuery('');
+                        }}
+                      />
+                    )}
+                    {convState && convState.pins.length > 0 && (
+                      <PinnedBar
+                        pins={convState.pins}
+                        previewFor={(id) => {
+                          const m = displayMessages.find((x) => x.id === id);
+                          if (!m) return null;
+                          if (m.deleted) return 'Deleted message';
+                          return m.poll ? `Poll: ${m.poll.question}` : m.message || 'Message';
+                        }}
+                        onJump={(id) => {
+                          if (!jumpToMessage(id)) setFeatureNotice('That pinned message is not loaded on this device.');
+                        }}
+                        onUnpin={convState.can_manage ? (id) => void togglePin(id, false) : undefined}
+                      />
+                    )}
+                    {featureNotice && (
+                      <div className="chat-extras-row" role="alert">
+                        <span className="chat-chip" style={{ whiteSpace: 'normal' }}>{featureNotice}</span>
+                        <button type="button" className="chat-icon-btn" aria-label="Dismiss" onClick={() => setFeatureNotice(null)}>
+                          <X size={13} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Message Stream */}
                 <div className="chat-stream-body" ref={chatBodyRef}>
-                  {messages.length === 0 ? (
+                  {searchHits.length > 0 && (
+                    <style>
+                      {searchHits
+                        .map(
+                          (id, i) =>
+                            `.ig-row[data-msg-id="${CSS.escape(id)}"] .ig-bubble{outline:2px solid ${i === searchIndex ? 'var(--accent)' : 'var(--warn)'};outline-offset:1px}`
+                        )
+                        .join('\n')}
+                    </style>
+                  )}
+                  {(() => {
+                    const activeScopeKey =
+                      activeTab === 'dm' && selectedPeer
+                        ? `dm|${selectedPeer.user_id}`
+                        : activeTab === 'groups' && selectedGroup
+                          ? `groups|${selectedGroup.group_id}`
+                          : null;
+                    return Boolean(activeScopeKey && loadedScopeKey !== activeScopeKey && messages.length === 0);
+                  })() ? (
+                    <ChatMessagesSkeleton count={5} />
+                  ) : displayMessages.length === 0 ? (
                     <div
                       style={{
                         display: 'flex',
@@ -2879,251 +3350,238 @@ export const Chat: React.FC<ChatProps> = ({
                       }}
                     >
                       <MessageSquare size={36} strokeWidth={1.5} />
-                      <div style={{ fontWeight: 500, fontSize: '0.98rem' }}>
-                        No encrypted transmissions yet
+                      <div style={{ fontFamily: 'var(--font-display)', fontSize: '1.4rem', color: 'var(--text-secondary)' }}>
+                        No messages yet
                       </div>
-                      <div style={{ fontSize: '0.82rem', maxWidth: '340px' }}>
+                      <div style={{ fontSize: '0.95rem', maxWidth: '360px' }}>
                         {activeTab === 'dm'
-                          ? 'Search a peer by @username, permanent user_id, or 0x wallet in the left rail.'
-                          : 'Create or select an RFC 9420 MLS group to exchange TreeKEM-encrypted messages.'}
+                          ? 'Say hello. Only you and this member can read what you write here.'
+                          : 'Say something. Only the people in this group can read it.'}
                       </div>
                     </div>
                   ) : (
-                    messages.map((msg, index) => {
-                      const isMe = Boolean(e2eeProfile && msg.sender === e2eeProfile.user_id);
-                      const initials = msg.sender.slice(4, 6).toUpperCase() || 'E2';
-                      const isReadByPeer =
-                        activeTab === 'dm' && isMe && msg.seq && peerLastReadSeq >= msg.seq;
-
+                    (() => {
+                      const myId = e2eeProfile?.user_id || '';
+                      const scopeType: 'dm' | 'group' = activeTab === 'dm' ? 'dm' : 'group';
+                      const nameFor = (msg: RichDisplayMessage): string => {
+                        if (msg.sender === myId) return 'You';
+                        if (activeTab === 'dm' && selectedPeer && msg.sender === selectedPeer.user_id && selectedPeer.username) {
+                          return `@${selectedPeer.username}`;
+                        }
+                        if (activeTab === 'groups' && selectedGroup) {
+                          const gm = selectedGroup.members.find((m) => m.user_id === msg.sender && m.username);
+                          if (gm?.username) return `@${gm.username}`;
+                        }
+                        return `User-${msg.sender.slice(4, 10)}`;
+                      };
+                      // Instagram shows "Seen" / "Sent" only under your latest message.
+                      let lastMine: DisplayMsg | undefined;
+                      for (let i = displayMessages.length - 1; i >= 0; i--) {
+                        if (displayMessages[i].sender === myId) {
+                          lastMine = displayMessages[i];
+                          break;
+                        }
+                      }
                       return (
-                        <div
-                          key={msg.id || index}
-                          className="chat-message-row"
-                          style={{
-                            display: 'flex',
-                            flexDirection: isMe ? 'row-reverse' : 'row',
-                            alignItems: 'flex-start',
-                            gap: '12px',
-                            maxWidth: '80%',
-                            alignSelf: isMe ? 'flex-end' : 'flex-start',
-                          }}
-                        >
-                          <div
-                            className="chat-avatar"
-                            style={{
-                              width: '32px',
-                              height: '32px',
-                              borderRadius: '8px',
-                              fontSize: '0.74rem',
-                              fontWeight: 600,
-                              flexShrink: 0,
-                              background: isMe ? 'var(--text-main)' : 'var(--bg-input)',
-                              color: isMe ? 'var(--text-inverse)' : 'var(--text-main)',
-                              border: '1px solid var(--border-strong)',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              fontFamily: 'ui-monospace, monospace',
-                            }}
-                          >
-                            {initials}
-                          </div>
-
-                          <div
-                            className="chat-packet"
-                            style={{
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: isMe ? 'flex-end' : 'flex-start',
-                            }}
-                          >
-                            <div
-                              className="chat-msg-header"
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                                marginBottom: '4px',
-                                fontSize: '0.72rem',
-                                color: 'var(--text-muted)',
-                              }}
-                            >
-                              <span
-                                style={{
-                                  fontWeight: 600,
-                                  color: 'var(--text-main)',
-                                  fontFamily: 'ui-monospace, monospace',
-                                }}
-                              >
-                                {(() => {
-                                  if (isMe) return 'You';
-                                  if (
-                                    activeTab === 'dm' &&
-                                    selectedPeer &&
-                                    msg.sender === selectedPeer.user_id &&
-                                    selectedPeer.username
-                                  ) {
-                                    return `@${selectedPeer.username}`;
-                                  }
-                                  if (activeTab === 'groups' && selectedGroup) {
-                                    const gm = selectedGroup.members.find(
-                                      (m) => m.user_id === msg.sender && m.username
-                                    );
-                                    if (gm?.username) return `@${gm.username}`;
-                                  }
-                                  return msg.sender.slice(0, 12);
-                                })()}
-                              </span>
-                              <button
-                                onClick={() => handleCopy(msg.sender, msg.id)}
-                                className="chat-copy-btn"
-                                title="Copy Permanent User ID"
-                              >
-                                {copiedId === msg.id ? <Check size={11} /> : <Copy size={11} />}
-                              </button>
-                              <span>&bull;</span>
-                              <span>
-                                {new Date(msg.timestamp).toLocaleTimeString([], {
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                })}
-                              </span>
-                              <span
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '3px',
-                                  fontSize: '0.66rem',
-                                  fontWeight: 600,
-                                  padding: '1px 6px',
-                                  borderRadius: '4px',
-                                  border: '1px solid var(--border-subtle)',
-                                }}
-                              >
-                                <Lock size={9} />
-                                {msg.protocolBadge || 'E2EE'}
-                              </span>
-                              {msg.sendStatus === 'sending' && (
-                                <span style={{ opacity: 0.7, fontStyle: 'italic' }}>Sending…</span>
-                              )}
-                              {isReadByPeer && (
-                                <span
-                                  title="Read by peer"
-                                  style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}
-                                >
-                                  <CheckCheck size={12} />
-                                </span>
-                              )}
-                            </div>
-
-                            <div
-                              className={`chat-message-bubble ${isMe ? 'bubble-me' : 'bubble-peer'}`}
-                              style={{
-                                padding: '12px 16px',
-                                borderRadius: isMe ? '14px 14px 2px 14px' : '14px 14px 14px 2px',
-                                background: isMe ? 'var(--text-main)' : 'var(--bg-input)',
-                                color: isMe ? 'var(--text-inverse)' : 'var(--text-main)',
-                                fontSize: '0.9rem',
-                                lineHeight: '1.45',
-                                wordBreak: 'break-word',
-                              }}
-                            >
-                              {!msg.canDecrypt ? (
-                                <div
-                                  style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '8px',
-                                    opacity: 0.82,
-                                    fontStyle: 'italic',
-                                    fontSize: '0.82rem',
-                                  }}
-                                >
-                                  <Lock size={13} style={{ flexShrink: 0 }} />
-                                  <span>{msg.message}</span>
-                                </div>
-                              ) : (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                  <span>{msg.message}</span>
-                                  {msg.attachments &&
-                                    msg.attachments.map((att) => (
-                                      <button
-                                        key={att.attachment_id}
-                                        type="button"
-                                        onClick={() => handleDownloadAttachment(att)}
-                                        style={{
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          gap: '6px',
-                                          padding: '6px 10px',
-                                          borderRadius: '8px',
-                                          border: '1px solid currentColor',
-                                          background: 'transparent',
-                                          color: 'inherit',
-                                          fontSize: '0.76rem',
-                                          cursor: 'pointer',
-                                        }}
-                                      >
-                                        <Download size={12} />
-                                        <span>
-                                          Decrypt {att.file_name} ({Math.ceil(att.size_bytes / 1024)} KB)
-                                        </span>
-                                      </button>
-                                    ))}
-                                </div>
-                              )}
-                            </div>
-
-                            {msg.sendStatus === 'failed' && (
-                              <div
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '6px',
-                                  marginTop: '6px',
-                                  fontSize: '0.72rem',
-                                  color: 'var(--color-danger, #ef4444)',
-                                  background: 'rgba(239, 68, 68, 0.08)',
-                                  padding: '5px 10px',
-                                  borderRadius: '6px',
-                                  border: '1px solid rgba(239, 68, 68, 0.25)',
-                                  maxWidth: '100%',
-                                  wordBreak: 'break-word',
-                                }}
-                              >
-                                <AlertCircle size={13} style={{ flexShrink: 0 }} />
-                                <span style={{ flex: 1 }}>{msg.sendError || 'Message was not sent'}</span>
-                                {msg.canRetry && (
-                                  <button
-                                    type="button"
-                                    className="btn-outline"
-                                    style={{
-                                      padding: '2px 8px',
-                                      fontSize: '0.7rem',
-                                      borderRadius: '4px',
-                                      borderColor: 'currentColor',
-                                      color: 'inherit',
-                                      cursor: 'pointer',
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: '3px',
-                                    }}
-                                    onClick={() => handleRetryFailedMessage(msg)}
-                                    disabled={sending}
-                                    title="Retry sending with safe encrypted payload"
-                                  >
-                                    <RotateCcw size={10} />
-                                    <span>Retry</span>
-                                  </button>
-                                )}
+                        <ChatTimeline<DisplayMsg>
+                          items={displayMessages}
+                          getKey={(msg, index) => msg.id || `idx_${index}`}
+                          getTime={(msg) => msg.timestamp}
+                          getSender={(msg) => msg.sender}
+                          isMine={(msg) => msg.sender === myId}
+                          isPending={(msg) => msg.sendStatus === 'sending'}
+                          getMessageId={(msg) => msg.id}
+                          showNames={activeTab === 'groups'}
+                          getName={nameFor}
+                          getInitials={(msg) => initialsFor(nameFor(msg))}
+                          renderBody={(msg, ctx) =>
+                            msg.deleted ? (
+                              <DeletedBubble mine={ctx.mine} title={ctx.fullTime} />
+                            ) : !msg.canDecrypt ? (
+                              <div className="ig-bubble ig-locked" title={ctx.fullTime}>
+                                <Lock size={13} />
+                                <span>{msg.message}</span>
                               </div>
-                            )}
-                          </div>
-                        </div>
+                            ) : (
+                              <>
+                                {msg.replyTo && (
+                                  <QuotedReply
+                                    name={nameForSender(msg.replyTo.sender_user_id)}
+                                    preview={msg.replyTo.preview}
+                                    onClick={() => {
+                                      if (!jumpToMessage(msg.replyTo!.message_id)) {
+                                        setReplyJumpMissId(msg.id);
+                                        setTimeout(() => setReplyJumpMissId((cur) => (cur === msg.id ? null : cur)), 2500);
+                                      }
+                                    }}
+                                  />
+                                )}
+                                {replyJumpMissId === msg.id && (
+                                  <span className="ig-footer">The original message is not loaded here.</span>
+                                )}
+                                {(msg.localFiles || []).map((f, i) => (
+                                  <AttachmentTile
+                                    key={`${msg.id}_local_${i}`}
+                                    id={`${msg.id}_local_${i}`}
+                                    name={f.name}
+                                    mime={f.type || 'application/octet-stream'}
+                                    size={f.size}
+                                    load={() => Promise.resolve(f as Blob)}
+                                  />
+                                ))}
+                                {(msg.attachments || []).map((att) => (
+                                  <AttachmentTile
+                                    key={att.attachment_id}
+                                    id={att.attachment_id}
+                                    name={att.file_name}
+                                    mime={att.mime_type}
+                                    size={att.size_bytes}
+                                    removed={revokedAttachmentIds.has(att.attachment_id)}
+                                    load={() => loadDecryptedAttachment(att, scopeType)}
+                                    onRemove={ctx.mine && msg.sendStatus !== 'failed' ? () => handleRevokeAttachment(att) : undefined}
+                                  />
+                                ))}
+                                {msg.poll ? (
+                                  <PollCard poll={msg.poll} nameFor={nameForSender} onVote={(opts) => void voteOn(msg.id, opts)} title={ctx.fullTime} />
+                                ) : (
+                                  <TextBubble text={msg.message} title={ctx.fullTime} edited={msg.edited} myUsername={e2eeProfile?.username} />
+                                )}
+                              </>
+                            )
+                          }
+                          renderFooter={(msg, ctx) => {
+                            const chips =
+                              Object.keys(msg.reactions || {}).length > 0 ? (
+                                <ReactionChips
+                                  reactions={msg.reactions}
+                                  myId={myId}
+                                  nameFor={nameForSender}
+                                  onToggle={(emoji) => void reactTo(msg.id, (msg.reactions[emoji] || []).includes(myId) ? '' : emoji)}
+                                />
+                              ) : null;
+                            const status = statusFooter(msg, ctx);
+                            return chips || status ? (
+                              <>
+                                {chips}
+                                {status}
+                              </>
+                            ) : null;
+                          }}
+                          renderActions={(msg, ctx) => renderMessageActions(msg, ctx)}
+                        />
                       );
-                    })
+                      function statusFooter(msg: DisplayMsg, ctx: { mine: boolean }) {
+                        if (msg.sendStatus === 'failed') {
+                          return (
+                            <span className="ig-footer ig-failed" role="alert">
+                              <AlertCircle size={12} />
+                              <span>{msg.sendError || 'Not sent'}</span>
+                              {msg.canRetry && (
+                                <button type="button" onClick={() => handleRetryFailedMessage(msg)} disabled={sending}>
+                                  Retry
+                                </button>
+                              )}
+                            </span>
+                          );
+                        }
+                        if (!ctx.mine || msg !== lastMine) return null;
+                        if (msg.sendStatus === 'sending') {
+                          return <span className="ig-footer">{msg.localFiles?.length ? 'Encrypting and sending…' : 'Sending…'}</span>;
+                        }
+                        if (activeTab === 'dm') {
+                          const seen = Boolean(msg.seq && peerLastReadSeq >= msg.seq);
+                          return <span className="ig-footer">{seen ? 'Seen' : 'Sent'}</span>;
+                        }
+                        return null;
+                      }
+                      function renderMessageActions(msg: DisplayMsg, ctx: { mine: boolean }) {
+                        const sent =
+                          msg.canDecrypt && msg.sendStatus !== 'sending' && msg.sendStatus !== 'failed' && !msg.id.startsWith('failed_');
+                        const canReply = sent && !msg.deleted;
+                        const now = Date.now();
+                        const myReaction = Object.entries(msg.reactions || {}).find(([, ids]) => ids.includes(myId))?.[0];
+                        const pinned = Boolean(convState?.pins.some((p) => p.message_id === msg.id));
+                        const canEdit = canReply && canEditMessage(msg, myId, now);
+                        const canDelete = sent && canDeleteForEveryone(msg, myId, now, isGroupAdminHere);
+                        if (!canReply && !canDelete && ctx.mine) return null;
+                        return (
+                          <>
+                            {canReply && <ReactButton current={myReaction} onPick={(emoji) => void reactTo(msg.id, emoji)} />}
+                            {canEdit && (
+                              <button
+                                type="button"
+                                className="ig-action"
+                                title="Edit (within 15 minutes)"
+                                aria-label="Edit this message"
+                                onClick={() => {
+                                  setReplyTarget(null);
+                                  setEditTarget({ id: msg.id, original: msg.message });
+                                  setInputMessage(msg.message);
+                                }}
+                              >
+                                <Pencil size={14} />
+                              </button>
+                            )}
+                            {canDelete && (
+                              <button
+                                type="button"
+                                className="ig-action"
+                                title="Delete for everyone"
+                                aria-label="Delete this message for everyone"
+                                onClick={() => deleteForEveryone(msg)}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                            {canReply && convState?.can_manage && (
+                              <button
+                                type="button"
+                                className="ig-action"
+                                title={pinned ? 'Unpin' : 'Pin'}
+                                aria-label={pinned ? 'Unpin this message' : 'Pin this message'}
+                                aria-pressed={pinned}
+                                onClick={() => void togglePin(msg.id, !pinned)}
+                              >
+                                {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+                              </button>
+                            )}
+                            {canReply && (
+                              <button
+                                type="button"
+                                className="ig-action"
+                                title="Reply"
+                                aria-label="Reply to this message"
+                                onClick={() =>
+                                  setReplyTarget({
+                                    message_id: msg.id,
+                                    sender_user_id: msg.sender,
+                                    preview: replyPreviewFor(msg),
+                                    has_files: Boolean(msg.attachments?.length || msg.localFiles?.length),
+                                  })
+                                }
+                              >
+                                <Reply size={14} />
+                              </button>
+                            )}
+                            {!ctx.mine && (
+                              <button
+                                type="button"
+                                className="ig-action"
+                                title="Copy user ID"
+                                aria-label="Copy user ID"
+                                onClick={() => handleCopy(msg.sender, msg.id)}
+                              >
+                                {copiedId === msg.id ? <Check size={14} /> : <Copy size={14} />}
+                              </button>
+                            )}
+                          </>
+                        );
+                      }
+                    })()
                   )}
                 </div>
+
+                <TypingLine names={typingNames} />
 
                 {/* Composer */}
                 <div className="chat-composer-bar">
@@ -3142,108 +3600,61 @@ export const Chat: React.FC<ChatProps> = ({
                       }}
                     >
                       <span style={{ fontSize: '0.86rem', color: 'var(--text-main)' }}>
-                        <strong>Platform Admission Required:</strong> Pay the one-time ETH entry fee to send encrypted messages.
+                        <strong>Membership Required:</strong> Pay your monthly or yearly membership in ETH to send encrypted messages.
                       </span>
                       <button
                         type="button"
                         className="btn-solid"
-                        style={{ padding: '6px 14px', fontSize: '0.8rem', whiteSpace: 'nowrap' }}
+                        style={{ padding: '6px 14px', fontSize: '0.9rem', whiteSpace: 'nowrap' }}
                         onClick={onOpenAdmissionModal}
                       >
-                        Pay Admission Fee
+                        Pay / Renew Membership
                       </button>
                     </div>
                   ) : (
-                    <form
-                      onSubmit={handleSendMessage}
-                      style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%' }}
-                    >
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        style={{ display: 'none' }}
-                        onChange={(e) => {
-                          const f = e.target.files?.[0] || null;
-                          setPendingFile(f);
-                          e.target.value = '';
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="btn-outline"
-                        style={{
-                          width: '40px',
-                          height: '40px',
-                          borderRadius: '50%',
-                          padding: 0,
-                          justifyContent: 'center',
-                        }}
-                        disabled={
-                          sending ||
-                          (activeTab === 'dm' && !selectedPeer) ||
-                          (activeTab === 'groups' && !selectedGroup)
-                        }
-                        onClick={() => fileInputRef.current?.click()}
-                        title="Attach E2EE Encrypted File"
-                      >
-                        <Paperclip size={15} />
-                      </button>
-
-                      <input
-                        type="text"
-                        placeholder={
-                          pendingFile
-                            ? `Attached E2EE file: ${pendingFile.name} — add caption or press send...`
-                            : activeTab === 'dm'
-                              ? selectedPeer
-                                ? 'Type an encrypted private message...'
-                                : 'Select a peer first...'
-                              : selectedGroup
-                                ? `Message ${selectedGroup.name}...`
-                                : 'Select or create a group first...'
-                        }
-                        value={inputMessage}
-                        onChange={(e) => setInputMessage(e.target.value)}
-                        disabled={
-                          sending ||
-                          (activeTab === 'dm' && !selectedPeer) ||
-                          (activeTab === 'groups' && !selectedGroup)
-                        }
-                        style={{
-                          flex: 1,
-                          background: 'var(--bg-input)',
-                          border: '1px solid var(--border-strong)',
-                          borderRadius: '9999px',
-                          padding: '12px 20px',
-                          fontSize: '0.9rem',
-                          color: 'var(--text-main)',
-                          outline: 'none',
-                        }}
-                      />
-
-                      <button
-                        type="submit"
-                        disabled={
-                          (!inputMessage.trim() && !pendingFile) ||
-                          sending ||
-                          (activeTab === 'dm' && !selectedPeer) ||
-                          (activeTab === 'groups' && !selectedGroup)
-                        }
-                        className="btn-solid"
-                        style={{
-                          width: '44px',
-                          height: '44px',
-                          borderRadius: '50%',
-                          padding: 0,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                        }}
-                        title="Encrypt & Transmit"
-                      >
-                        <Send size={16} />
-                      </button>
-                    </form>
+                    <ChatComposer
+                      value={inputMessage}
+                      onChange={setInputMessage}
+                      onSubmit={() => void handleSendMessage()}
+                      files={pendingFiles}
+                      onFilesChange={setPendingFiles}
+                      maxFileBytes={MAX_ENCRYPTED_FILE_BYTES}
+                      maxFiles={MAX_FILES_PER_MESSAGE}
+                      dailyLimitText={DAILY_LIMIT_TEXT_ENCRYPTED}
+                      disabled={(activeTab === 'dm' && !selectedPeer) || (activeTab === 'groups' && !selectedGroup)}
+                      autoFocusKey={activeTab === 'dm' ? selectedPeer?.user_id : selectedGroup?.group_id}
+                      placeholder={
+                        activeTab === 'dm'
+                          ? selectedPeer
+                            ? 'Message…'
+                            : 'Choose a member first'
+                          : selectedGroup
+                            ? `Message ${selectedGroup.name}`
+                            : 'Choose or create a group first'
+                      }
+                      note="Messages and files here are end-to-end encrypted on your device."
+                      canAttach={false}
+                      replyTo={
+                        editTarget
+                          ? { name: 'Editing your message', preview: editTarget.original }
+                          : replyTarget
+                            ? { name: nameForSender(replyTarget.sender_user_id), preview: replyTarget.preview }
+                            : null
+                      }
+                      onCancelReply={() => {
+                        if (editTarget) {
+                          setEditTarget(null);
+                          setInputMessage('');
+                        } else setReplyTarget(null);
+                      }}
+                      mentionCandidates={activeTab === 'groups' ? mentionCandidates : undefined}
+                      onTyping={signalTyping}
+                      readOnlyNote={
+                        adminsOnlyHere && !isGroupAdminHere
+                          ? 'Only admins can send messages in this group. You can still react and vote.'
+                          : null
+                      }
+                    />
                   )}
                 </div>
               </>
@@ -3252,53 +3663,153 @@ export const Chat: React.FC<ChatProps> = ({
       )}
 
       {/* Modals */}
-      {selectedPeer && e2eeProfile && (
-        <SafetyNumberModal
-          open={safetyModalOpen}
-          onClose={() => setSafetyModalOpen(false)}
-          localUserId={e2eeProfile.user_id}
-          localEd25519Key={localEd25519Key}
-          peerUserId={selectedPeer.user_id}
-          peerDisplayName={
-            selectedPeer.username
-              ? `@${selectedPeer.username}`
-              : selectedPeer.primary_wallet || selectedPeer.user_id
-          }
-          peerIdentityVersion={selectedPeer.identity_version}
-          peerDevices={selectedPeer.devices}
-          safetyNumber={safetyNumber}
-          isVerified={peerIsVerified}
-          onMarkVerified={async () => {
-            await markPeerDevicesVerified(e2eeProfile.user_id, selectedPeer.user_id);
-            setPeerIsVerified(true);
-            setPeerSecurityWarnings([]);
+      <PollComposer open={pollOpen} onClose={() => setPollOpen(false)} onCreate={createPoll} />
+
+      {invitationAlert && groupInvitations.some((i) => i.group_id === invitationAlert.group_id) && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed',
+            right: 'max(16px, env(safe-area-inset-right, 0px))',
+            bottom: joinRequestAlertGroupId
+              ? 'calc(max(16px, env(safe-area-inset-bottom, 0px)) + 120px)'
+              : 'max(16px, env(safe-area-inset-bottom, 0px))',
+            zIndex: 900,
+            maxWidth: 360,
+            display: 'flex',
+            gap: 10,
+            alignItems: 'flex-start',
+            padding: '12px 14px',
+            background: 'var(--bg-card)',
+            color: 'var(--text-main)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 14,
+            boxShadow: 'var(--shadow-pop)',
+            fontSize: '0.92rem',
           }}
-          onResetSession={async () => {
-            for (const d of selectedPeer.devices) {
-              await resetOlmSessionWithPeerDevice(
-                e2eeProfile.user_id,
-                d.curve25519_identity_key
-              );
-            }
+        >
+          <Users size={18} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 2 }} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <span>
+              {invitationAlert.by ? `@${invitationAlert.by} added you to ` : 'You were added to '}
+              <strong>{invitationAlert.group_name}</strong>.
+            </span>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn-solid"
+                style={{ padding: '6px 12px', fontSize: '0.88rem' }}
+                disabled={invitationBusyId !== null}
+                onClick={() => handleAcceptGroupInvitation(invitationAlert.group_id, invitationAlert.group_name)}
+              >
+                Accept
+              </button>
+              <button
+                type="button"
+                className="btn-outline"
+                style={{ padding: '6px 12px', fontSize: '0.88rem' }}
+                disabled={invitationBusyId !== null}
+                onClick={() => handleDeclineGroupInvitation(invitationAlert.group_id)}
+              >
+                Reject
+              </button>
+              <button
+                type="button"
+                className="btn-outline"
+                style={{ padding: '6px 12px', fontSize: '0.88rem' }}
+                onClick={() => setInvitationAlert(null)}
+              >
+                Later
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {joinRequestAlertGroupId && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed',
+            right: 'max(16px, env(safe-area-inset-right, 0px))',
+            bottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
+            zIndex: 900,
+            maxWidth: 360,
+            display: 'flex',
+            gap: 10,
+            alignItems: 'flex-start',
+            padding: '12px 14px',
+            background: 'var(--bg-card)',
+            color: 'var(--text-main)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 14,
+            boxShadow: 'var(--shadow-pop)',
+            fontSize: '0.92rem',
           }}
-        />
+        >
+          <BellRing size={18} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 2 }} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <span>
+              Someone asked to join{' '}
+              <strong>{groups.find((g) => g.group_id === joinRequestAlertGroupId)?.name || 'one of your groups'}</strong>.
+            </span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                className="btn-solid"
+                style={{ padding: '6px 12px', fontSize: '0.88rem' }}
+                onClick={() => {
+                  const g = groups.find((item) => item.group_id === joinRequestAlertGroupId);
+                  setJoinRequestAlertGroupId(null);
+                  if (g) {
+                    setSelectedGroup(g);
+                    handleSelectChannelTab('groups');
+                    setGroupModalInitialTab('invites');
+                    setGroupModalOpen(true);
+                  }
+                }}
+              >
+                Review
+              </button>
+              <button
+                type="button"
+                className="btn-outline"
+                style={{ padding: '6px 12px', fontSize: '0.88rem' }}
+                onClick={() => setJoinRequestAlertGroupId(null)}
+              >
+                Later
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {selectedGroup && e2eeProfile && (
         <MlsGroupSecurityModal
+          initialTab={groupModalInitialTab}
           open={groupModalOpen}
-          onClose={() => setGroupModalOpen(false)}
+          onClose={() => {
+            setGroupModalOpen(false);
+            setGroupModalInitialTab(undefined);
+          }}
           group={selectedGroup}
           currentUserId={e2eeProfile.user_id}
-          epochVerifyCode={groupSecurityInfo?.exportedContextVerifyCode || ''}
-          epochAuthenticatorHex={groupSecurityInfo?.epochAuthenticatorHex || ''}
           onAddMember={handleAddGroupMember}
           onRemoveMember={handleRemoveGroupMember}
-          onRotateOwnKey={handleRotateGroupKey}
           onLeaveGroup={async () => {
             const gid = selectedGroup.group_id;
             await leaveEncryptedGroup(gid);
             await clearLocalMlsGroupState(e2eeProfile.user_id, gid);
+            setSelectedGroup(null);
+            handleSelectChannelTab('open_chat');
+            await syncSidebarLists();
+          }}
+          onDeleteGroup={async () => {
+            const gid = selectedGroup.group_id;
+            await deleteGroup(gid);
+            await clearLocalMlsGroupState(e2eeProfile.user_id, gid).catch(() => { });
             setSelectedGroup(null);
             handleSelectChannelTab('open_chat');
             await syncSidebarLists();
@@ -3320,9 +3831,9 @@ export const Chat: React.FC<ChatProps> = ({
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <Users size={19} />
                 <div>
-                  <h3 style={{ fontSize: '1.02rem', fontWeight: 700, margin: 0 }}>Create Group</h3>
-                  <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                    Name your group &amp; add members with RFC 9420 MLS encryption
+                  <h3 style={{ fontSize: '1.45rem', fontWeight: 500, letterSpacing: '-0.015em', margin: 0 }}>New group</h3>
+                  <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                    Create an end-to-end encrypted group and invite members.
                   </div>
                 </div>
               </div>
@@ -3349,14 +3860,14 @@ export const Chat: React.FC<ChatProps> = ({
                   justifyContent: 'space-between',
                   gap: '10px',
                   flexWrap: 'wrap',
-                  fontSize: '0.78rem',
+                  fontSize: '0.86rem',
                 }}
               >
                 <span>Connect MetaMask to create an encrypted group.</span>
                 <button
                   type="button"
                   className="btn-solid"
-                  style={{ padding: '7px 14px', fontSize: '0.76rem' }}
+                  style={{ padding: '7px 14px', fontSize: '0.86rem' }}
                   onClick={onConnectWallet}
                 >
                   <Wallet size={13} />
@@ -3375,23 +3886,23 @@ export const Chat: React.FC<ChatProps> = ({
                   justifyContent: 'space-between',
                   gap: '10px',
                   flexWrap: 'wrap',
-                  fontSize: '0.78rem',
+                  fontSize: '0.86rem',
                 }}
               >
                 <span>
                   {isWalletMismatch
-                    ? `Sign in as ${formatAddress(account, 4)} to unlock your E2EE Vault.`
-                    : 'Sign SIWE challenge to unlock your on-device E2EE Vault.'}
+                    ? `Sign in as ${formatAddress(account, 4)} to keep chatting.`
+                    : 'Sign in with MetaMask to see your private chats and groups.'}
                 </span>
                 <button
                   type="button"
                   className="btn-solid"
-                  style={{ padding: '7px 14px', fontSize: '0.76rem' }}
+                  style={{ padding: '7px 14px', fontSize: '0.86rem' }}
                   disabled={siweLoading || authLoading}
                   onClick={onAuthenticateSiwe || authenticateE2EESession}
                 >
                   <KeyRound size={13} />
-                  <span>{siweLoading || authLoading ? 'Signing...' : 'Sign In & Unlock'}</span>
+                  <span>{siweLoading || authLoading ? 'Signing in...' : 'Sign in'}</span>
                 </button>
               </div>
             ) : null}
@@ -3403,7 +3914,7 @@ export const Chat: React.FC<ChatProps> = ({
                   borderRadius: '8px',
                   background: 'var(--bg-input)',
                   border: '1px solid var(--border-focus)',
-                  fontSize: '0.78rem',
+                  fontSize: '0.86rem',
                   color: 'var(--text-main)',
                 }}
               >
@@ -3416,13 +3927,13 @@ export const Chat: React.FC<ChatProps> = ({
               style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}
             >
               <div>
-                <label style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                  Group Name
+                <label style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  Group name
                 </label>
                 <input
                   type="text"
                   autoFocus
-                  placeholder="Enter group name..."
+                  placeholder="For example: Allocation committee"
                   value={newGroupName}
                   onChange={(e) => setNewGroupName(e.target.value)}
                   style={{
@@ -3440,14 +3951,16 @@ export const Chat: React.FC<ChatProps> = ({
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <label style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                  Add Members (Optional — by <code>@username</code>, <code>usr_...</code>, or{' '}
-                  <code>0x...</code>)
+                <label style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  Add members (optional)
                 </label>
+                <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+                  They get an invitation and join when they press Accept.
+                </span>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <input
                     type="text"
-                    placeholder="Type member ID (@username, usr_..., or 0x...)"
+                    placeholder="@username, member ID or wallet address"
                     value={groupMemberInput}
                     onChange={(e) => setGroupMemberInput(e.target.value)}
                     onKeyDown={(e) => {
@@ -3465,7 +3978,7 @@ export const Chat: React.FC<ChatProps> = ({
                       borderRadius: '10px',
                       padding: '9px 13px',
                       color: 'var(--text-main)',
-                      fontSize: '0.82rem',
+                      fontSize: '0.9rem',
                       fontFamily: 'ui-monospace, monospace',
                       outline: 'none',
                     }}
@@ -3475,7 +3988,7 @@ export const Chat: React.FC<ChatProps> = ({
                     className="btn-outline"
                     disabled={!groupMemberInput.trim() || addingGroupMemberBusy}
                     onClick={() => handleStageMemberForGroup()}
-                    style={{ padding: '0 14px', fontSize: '0.78rem', flexShrink: 0 }}
+                    style={{ padding: '0 14px', fontSize: '0.86rem', flexShrink: 0 }}
                   >
                     <Plus size={14} />
                     <span>{addingGroupMemberBusy ? 'Checking...' : 'Add'}</span>
@@ -3523,7 +4036,7 @@ export const Chat: React.FC<ChatProps> = ({
                           <span style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 600 }}>
                             {idStr}
                           </span>
-                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
                             Add
                           </span>
                         </button>
@@ -3536,12 +4049,12 @@ export const Chat: React.FC<ChatProps> = ({
               <button
                 type="button"
                 className="btn-outline"
-                style={{ padding: '6px 10px', fontSize: '0.74rem', justifyContent: 'center' }}
+                style={{ padding: '6px 10px', fontSize: '0.9rem', justifyContent: 'center' }}
                 onClick={() => setShowGroupOpts((p) => !p)}
               >
                 {showGroupOpts
                   ? 'Hide Access Policy Options'
-                  : `Access Policy: ${newGroupVisibility === 'public' ? 'Public Discovery' : 'Invite Only'} • Min ETH ${newGroupMinEth || '0'}`}
+                  : `Who can join: ${newGroupVisibility === 'public' ? 'anyone, via the group list' : 'by invitation only'}. ${Number(newGroupMinEth || 0) > 0 ? `Minimum balance ${newGroupMinEth} ETH.` : 'No minimum balance.'}`}
               </button>
 
               {showGroupOpts && (
@@ -3554,7 +4067,7 @@ export const Chat: React.FC<ChatProps> = ({
                     display: 'grid',
                     gridTemplateColumns: '1fr 1fr',
                     gap: '8px',
-                    fontSize: '0.74rem',
+                    fontSize: '0.9rem',
                   }}
                 >
                   <div>
@@ -3608,7 +4121,7 @@ export const Chat: React.FC<ChatProps> = ({
                     display: 'flex',
                     flexDirection: 'column',
                     gap: '8px',
-                    fontSize: '0.78rem',
+                    fontSize: '0.86rem',
                   }}
                 >
                   <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
@@ -3625,7 +4138,7 @@ export const Chat: React.FC<ChatProps> = ({
                   {newGroupPaid && (
                     <div>
                       <label style={{ color: 'var(--text-muted)' }}>
-                        Entry fee in US dollars (members pay the ETH equivalent)
+                        MONTHLY price in US dollars (members pay the ETH equivalent for 30 days)
                       </label>
                       <input
                         type="number"
@@ -3633,6 +4146,25 @@ export const Chat: React.FC<ChatProps> = ({
                         step="0.5"
                         value={newGroupFeeUsd}
                         onChange={(e) => setNewGroupFeeUsd(e.target.value)}
+                        style={{
+                          width: '100%',
+                          marginTop: '3px',
+                          background: 'var(--bg-input)',
+                          border: '1px solid var(--border-strong)',
+                          color: 'var(--text-main)',
+                          borderRadius: '6px',
+                          padding: '6px',
+                        }}
+                      />
+                      <label style={{ color: 'var(--text-muted)', display: 'block', marginTop: '8px' }}>
+                        YEARLY price in US dollars (365 days). 0 = automatic: 12 x monthly
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.5"
+                        value={newGroupYearlyFeeUsd}
+                        onChange={(e) => setNewGroupYearlyFeeUsd(e.target.value)}
                         style={{
                           width: '100%',
                           marginTop: '3px',
@@ -3660,30 +4192,30 @@ export const Chat: React.FC<ChatProps> = ({
                 <button
                   type="button"
                   className="btn-outline"
-                  style={{ padding: '7px 12px', fontSize: '0.75rem' }}
+                  style={{ padding: '7px 12px', fontSize: '0.86rem' }}
                   onClick={() => {
                     setCreateGroupModalOpen(false);
                     setSelectedGroup(null);
                     handleSelectChannelTab('groups');
                   }}
                 >
-                  <Link2 size={13} />
-                  <span>Have Invite Code?</span>
+                  <Search size={13} />
+                  <span>Browse public groups</span>
                 </button>
 
                 <button
                   type="submit"
                   className="btn-solid"
                   disabled={creatingGroupBusy || !newGroupName.trim()}
-                  style={{ padding: '9px 18px', fontSize: '0.84rem' }}
+                  style={{ padding: '9px 18px', fontSize: '0.9rem' }}
                 >
                   <Users size={15} />
                   <span>
                     {creatingGroupBusy
                       ? 'Creating Group...'
                       : pendingGroupMembers.length > 0
-                        ? `Create Group (${pendingGroupMembers.length + 1})`
-                        : 'Create Group'}
+                        ? `Create group (${pendingGroupMembers.length + 1})`
+                        : 'Create group'}
                   </span>
                 </button>
               </div>
@@ -3705,10 +4237,10 @@ export const Chat: React.FC<ChatProps> = ({
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <UserPlus size={19} />
                 <div>
-                  <h3 style={{ fontSize: '1.02rem', fontWeight: 700, margin: 0 }}>
+                  <h3 style={{ fontSize: '1.45rem', fontWeight: 500, letterSpacing: '-0.015em', margin: 0 }}>
                     Chat Individual
                   </h3>
-                  <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                  <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
                     Enter a member&apos;s ID to open a 1-to-1 end-to-end encrypted chat
                   </div>
                 </div>
@@ -3736,14 +4268,14 @@ export const Chat: React.FC<ChatProps> = ({
                   justifyContent: 'space-between',
                   gap: '10px',
                   flexWrap: 'wrap',
-                  fontSize: '0.78rem',
+                  fontSize: '0.86rem',
                 }}
               >
                 <span>Connect MetaMask to start an encrypted individual chat.</span>
                 <button
                   type="button"
                   className="btn-solid"
-                  style={{ padding: '7px 14px', fontSize: '0.76rem' }}
+                  style={{ padding: '7px 14px', fontSize: '0.86rem' }}
                   onClick={onConnectWallet}
                 >
                   <Wallet size={13} />
@@ -3762,23 +4294,23 @@ export const Chat: React.FC<ChatProps> = ({
                   justifyContent: 'space-between',
                   gap: '10px',
                   flexWrap: 'wrap',
-                  fontSize: '0.78rem',
+                  fontSize: '0.86rem',
                 }}
               >
                 <span>
                   {isWalletMismatch
-                    ? `Sign in as ${formatAddress(account, 4)} to unlock your E2EE Vault.`
-                    : 'Sign SIWE challenge to unlock your on-device E2EE Vault.'}
+                    ? `Sign in as ${formatAddress(account, 4)} to keep chatting.`
+                    : 'Sign in with MetaMask to see your private chats and groups.'}
                 </span>
                 <button
                   type="button"
                   className="btn-solid"
-                  style={{ padding: '7px 14px', fontSize: '0.76rem' }}
+                  style={{ padding: '7px 14px', fontSize: '0.86rem' }}
                   disabled={siweLoading || authLoading}
                   onClick={onAuthenticateSiwe || authenticateE2EESession}
                 >
                   <KeyRound size={13} />
-                  <span>{siweLoading || authLoading ? 'Signing...' : 'Sign In & Unlock'}</span>
+                  <span>{siweLoading || authLoading ? 'Signing in...' : 'Sign in'}</span>
                 </button>
               </div>
             ) : null}
@@ -3790,7 +4322,7 @@ export const Chat: React.FC<ChatProps> = ({
                   borderRadius: '9px',
                   background: 'var(--bg-surface)',
                   border: '1px solid var(--border-subtle)',
-                  fontSize: '0.75rem',
+                  fontSize: '0.86rem',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
@@ -3806,7 +4338,7 @@ export const Chat: React.FC<ChatProps> = ({
                 <button
                   type="button"
                   className="btn-outline"
-                  style={{ padding: '3px 8px', fontSize: '0.7rem', flexShrink: 0 }}
+                  style={{ padding: '3px 8px', fontSize: '0.9rem', flexShrink: 0 }}
                   onClick={() =>
                     handleCopy(
                       e2eeProfile.username ? `@${e2eeProfile.username}` : e2eeProfile.user_id,
@@ -3827,7 +4359,7 @@ export const Chat: React.FC<ChatProps> = ({
                   borderRadius: '8px',
                   background: 'var(--bg-input)',
                   border: '1px solid var(--border-focus)',
-                  fontSize: '0.78rem',
+                  fontSize: '0.86rem',
                   color: 'var(--text-main)',
                 }}
               >
@@ -3840,7 +4372,7 @@ export const Chat: React.FC<ChatProps> = ({
               style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}
             >
               <div>
-                <label style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                <label style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
                   Individual Member ID
                 </label>
                 <input
@@ -3868,12 +4400,10 @@ export const Chat: React.FC<ChatProps> = ({
                 <div>
                   <div
                     style={{
-                      fontSize: '0.7rem',
+                      fontSize: '0.9rem',
                       color: 'var(--text-muted)',
                       marginBottom: '5px',
                       fontWeight: 600,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.04em',
                     }}
                   >
                     Verified Accounts
@@ -3896,7 +4426,7 @@ export const Chat: React.FC<ChatProps> = ({
                           <span style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 600 }}>
                             {idStr}
                           </span>
-                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
                             {u.online ? '• Online ' : ''}&rarr; Chat
                           </span>
                         </button>
@@ -3912,7 +4442,7 @@ export const Chat: React.FC<ChatProps> = ({
                   className="btn-outline"
                   disabled={startingIndividualBusy}
                   onClick={() => setChatIndividualModalOpen(false)}
-                  style={{ padding: '8px 14px', fontSize: '0.82rem' }}
+                  style={{ padding: '8px 14px', fontSize: '0.9rem' }}
                 >
                   Cancel
                 </button>
@@ -3920,7 +4450,7 @@ export const Chat: React.FC<ChatProps> = ({
                   type="submit"
                   className="btn-solid"
                   disabled={startingIndividualBusy || !individualIdInput.trim()}
-                  style={{ padding: '8px 18px', fontSize: '0.84rem' }}
+                  style={{ padding: '8px 18px', fontSize: '0.9rem' }}
                 >
                   <Lock size={14} />
                   <span>{startingIndividualBusy ? 'Opening Chat...' : 'Start Chat'}</span>
@@ -3960,20 +4490,6 @@ export const Chat: React.FC<ChatProps> = ({
             });
             setE2eeProfile(res.user);
           }}
-          onReplenishPrekeys={async () => {
-            if (!localDeviceId) return;
-            const moreOlm = await generateMoreOlmPrekeys(e2eeProfile.user_id, 15, true);
-            const moreMls = await generateMlsKeyPackagesForDevice(
-              e2eeProfile.user_id,
-              localDeviceId,
-              6
-            );
-            await replenishE2EEPrekeys(localDeviceId, {
-              ...moreOlm,
-              mls_key_packages: moreMls,
-            });
-            await markLocalPrekeysPublished(e2eeProfile.user_id);
-          }}
           onRevokeDevice={async (devId) => {
             await revokeE2EEDevice(devId);
             const fresh = await fetchMyE2EEAccount();
@@ -3984,9 +4500,10 @@ export const Chat: React.FC<ChatProps> = ({
             const chainNum = chainIdHex ? parseInt(chainIdHex, 16) || 1 : 1;
             const chal = await requestE2EEAuthChallenge(account, 'reset_lost_identity', chainNum);
             const sig = await signWalletAuthChallenge(account, chal.message);
-            const freshLocal = await getOrCreateLocalOlmDevice(
+            const freshLocal = await generateFreshLocalOlmDevice(
               e2eeProfile.user_id,
-              'Reset Browser Vault'
+              'Web browser',
+              false
             );
             const freshMls = await generateMlsKeyPackagesForDevice(
               e2eeProfile.user_id,
@@ -4004,14 +4521,13 @@ export const Chat: React.FC<ChatProps> = ({
               },
             });
             await wipeUserDeviceVault(e2eeProfile.user_id);
+            await saveDeviceVaultRecord(freshLocal.record);
             await markLocalPrekeysPublished(e2eeProfile.user_id);
             const freshMe = await fetchMyE2EEAccount();
             setE2eeProfile(freshMe.user);
             setMyDevices(freshMe.devices);
             setLocalDeviceId(freshLocal.record.deviceId);
             setVaultBoundUserId(e2eeProfile.user_id);
-            setLocalEd25519Key(freshLocal.record.ed25519Key);
-            setLocalCurve25519Key(freshLocal.record.curve25519Key);
           }}
         />
       )}

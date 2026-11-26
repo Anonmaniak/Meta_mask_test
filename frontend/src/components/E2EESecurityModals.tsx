@@ -1,58 +1,39 @@
 import React, { useState, useEffect } from 'react';
+import { friendlyError } from '../services/friendlyError';
 import {
-  ShieldCheck,
-  ShieldAlert,
-  KeyRound,
+  Users,
+  UserCog,
   Smartphone,
   Wallet,
-  RefreshCw,
   Trash2,
   UserPlus,
   UserMinus,
   AlertTriangle,
   X,
-  Check,
-  Copy,
   Link2,
   LogOut,
   Award,
 } from 'lucide-react';
+import { fetchIdentitySecurityEvents } from '../services/e2eeApi.ts';
+import { ListRowsSkeleton } from './Skeleton';
 import type { E2EEAccountProfile, E2EEGroupRecord } from '../services/e2eeApi.ts';
 import type { PeerActiveDeviceDescriptor } from '../services/olmService.ts';
 import {
   fetchGroupPolicy,
   updateGroupPolicy,
-  createGroupInvite,
-  fetchGroupInvites,
-  revokeGroupInvite,
   fetchGroupJoinRequests,
+  declineGroupJoinRequest,
   setGroupMemberRole,
-  type GroupInviteRecord,
   type GroupJoinRequestRecord,
 } from '../services/platformApi.ts';
 import { formatAddress, formatEth } from '../services/web3.ts';
 
-interface SafetyNumberModalProps {
-  open: boolean;
-  onClose: () => void;
-  localUserId: string;
-  localEd25519Key: string;
-  peerUserId: string;
-  peerDisplayName: string;
-  peerIdentityVersion: number;
-  peerDevices: PeerActiveDeviceDescriptor[];
-  safetyNumber: string;
-  isVerified: boolean;
-  onMarkVerified: () => Promise<void>;
-  onResetSession: () => Promise<void>;
-}
-
 const modalBackdropStyle: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
-  zIndex: 300,
-  background: 'rgba(0, 0, 0, 0.78)',
-  backdropFilter: 'blur(8px)',
+  zIndex: 1300,
+  background: 'var(--backdrop)',
+  backdropFilter: 'blur(6px)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -74,163 +55,20 @@ const modalCardStyle: React.CSSProperties = {
   gap: '16px',
 };
 
-export const SafetyNumberModal: React.FC<SafetyNumberModalProps> = ({
-  open,
-  onClose,
-  localUserId,
-  localEd25519Key,
-  peerUserId,
-  peerDisplayName,
-  peerIdentityVersion,
-  peerDevices,
-  safetyNumber,
-  isVerified,
-  onMarkVerified,
-  onResetSession,
-}) => {
-  const [copied, setCopied] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  if (!open) return null;
-
-  const copySafety = () => {
-    navigator.clipboard.writeText(safetyNumber);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div style={modalBackdropStyle} onClick={onClose}>
-      <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            {isVerified ? <ShieldCheck size={20} /> : <KeyRound size={20} />}
-            <h3 style={{ fontSize: '1.05rem', fontWeight: 700 }}>
-              Safety Number &amp; Identity Verification
-            </h3>
-          </div>
-          <button className="btn-outline" style={{ padding: '6px' }} onClick={onClose}>
-            <X size={16} />
-          </button>
-        </div>
-
-        <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-          Compare this 60-digit Safety Number with <strong>{peerDisplayName}</strong> over an
-          out-of-band channel. Matching digits prove no man-in-the-middle substituted Olm Curve25519
-          or Ed25519 keys.
-        </p>
-
-        <div
-          style={{
-            background: 'var(--bg-input)',
-            border: '1px solid var(--border-strong)',
-            borderRadius: '12px',
-            padding: '16px',
-            textAlign: 'center',
-          }}
-        >
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(4, 1fr)',
-              gap: '10px',
-              fontFamily: 'ui-monospace, monospace',
-              fontSize: '1.02rem',
-              fontWeight: 700,
-              letterSpacing: '0.06em',
-            }}
-          >
-            {safetyNumber.split(' ').map((block, idx) => (
-              <span key={idx}>{block}</span>
-            ))}
-          </div>
-          <button
-            type="button"
-            className="btn-outline"
-            style={{ marginTop: '14px', padding: '5px 12px', fontSize: '0.75rem' }}
-            onClick={copySafety}
-          >
-            {copied ? <Check size={13} /> : <Copy size={13} />}
-            <span>{copied ? 'Copied' : 'Copy 60-Digit Safety Number'}</span>
-          </button>
-        </div>
-
-        <div
-          style={{
-            background: 'var(--bg-surface)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: '10px',
-            padding: '12px',
-            fontSize: '0.76rem',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-            fontFamily: 'ui-monospace, monospace',
-          }}
-        >
-          <div>Your Permanent ID: {localUserId}</div>
-          <div>Your Ed25519 Key : {localEd25519Key}</div>
-          <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '6px' }}>
-            Peer Permanent ID: {peerUserId} (v{peerIdentityVersion})
-          </div>
-          {peerDevices.map((d) => (
-            <div key={d.device_id} style={{ color: 'var(--text-secondary)' }}>
-              Device {d.device_id.slice(0, 12)}: Ed25519 {d.ed25519_identity_key.slice(0, 22)}...
-            </div>
-          ))}
-        </div>
-
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-          <button
-            type="button"
-            className="btn-outline"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await onResetSession();
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <RefreshCw size={14} />
-            <span>Re-establish Olm Session</span>
-          </button>
-          <button
-            type="button"
-            className="btn-solid"
-            disabled={busy || isVerified}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await onMarkVerified();
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <ShieldCheck size={15} />
-            <span>{isVerified ? 'Verified' : 'Mark Identity Verified'}</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 interface MlsGroupSecurityModalProps {
   open: boolean;
   onClose: () => void;
   group: E2EEGroupRecord | null;
   currentUserId: string;
-  epochVerifyCode: string;
-  epochAuthenticatorHex: string;
-  onAddMember: (identifier: string) => Promise<void>;
+  /** Resolves to 'invited' when the person must still Accept, 'active' when they joined directly. */
+  onAddMember: (identifier: string) => Promise<'active' | 'invited' | void>;
   onRemoveMember: (targetUserId: string) => Promise<void>;
-  onRotateOwnKey: () => Promise<void>;
   onLeaveGroup?: () => Promise<void>;
+  /** Group admins: delete the whole group (members, messages and files). */
+  onDeleteGroup?: () => Promise<void>;
   onGroupUpdated?: () => Promise<void>;
+  /** Tab to show when the window opens ("invites" = the join requests tab, e.g. from a new join request alert). */
+  initialTab?: 'members' | 'policy' | 'invites';
 }
 
 export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
@@ -238,15 +76,18 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
   onClose,
   group,
   currentUserId,
-  epochVerifyCode,
-  epochAuthenticatorHex,
   onAddMember,
   onRemoveMember,
-  onRotateOwnKey,
   onLeaveGroup,
+  onDeleteGroup,
   onGroupUpdated,
+  initialTab,
 }) => {
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteText, setDeleteText] = useState('');
   const [tab, setTab] = useState<'members' | 'policy' | 'invites'>('members');
+  // Paid status is shown read-only here (only the platform admin sets prices, in /Admin456).
+  const [paidInfo, setPaidInfo] = useState<{ isPaid: boolean; monthlyUsd: number } | null>(null);
   const [memberInput, setMemberInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -258,10 +99,8 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
   const [minEth, setMinEth] = useState('0');
   const [requireInvite, setRequireInvite] = useState(true);
 
-  // Invites & Join Requests
-  const [invites, setInvites] = useState<GroupInviteRecord[]>([]);
+  // Join requests (invite links were removed: admins add people, who Accept or Reject)
   const [joinRequests, setJoinRequests] = useState<GroupJoinRequestRecord[]>([]);
-  const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
   const activeMembers = group ? group.members.filter((m) => m.status === 'active') : [];
   const isGroupAdmin = activeMembers.some(
@@ -269,31 +108,44 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
   );
 
   useEffect(() => {
+    if (open) setTab(initialTab && (initialTab !== 'invites' || isGroupAdmin) ? initialTab : 'members');
+  }, [open, initialTab, isGroupAdmin]);
+
+  useEffect(() => {
     if (!open || !group) return;
     setErrorMsg(null);
     setInfoMsg(null);
     fetchGroupPolicy(group.group_id)
       .then((res) => {
+        setPaidInfo({
+          isPaid: Boolean((res.policy as any).is_paid),
+          monthlyUsd: Number((res.policy as any).entry_fee_usd || 0),
+        });
         setDesc(res.policy.description || '');
         setVisibility(res.policy.visibility || 'invite_only');
         setMinEth(res.policy.min_eth_balance_eth || '0');
         setRequireInvite(Boolean(res.policy.require_invitation));
       })
-      .catch(() => {});
+      .catch(() => { });
 
     if (isGroupAdmin) {
-      fetchGroupInvites(group.group_id)
-        .then((r) => setInvites(r.invites || []))
-        .catch(() => {});
       fetchGroupJoinRequests(group.group_id)
         .then((r) => setJoinRequests(r.requests || []))
-        .catch(() => {});
+        .catch(() => { });
     }
   }, [open, group?.group_id, isGroupAdmin]);
 
   if (!open || !group) return null;
 
   const uniqueUsers = Array.from(new Set(activeMembers.map((m) => m.user_id)));
+  // People an admin added who have not pressed Accept yet
+  const invitedUsers = Array.from(
+    new Map(
+      group.members
+        .filter((m) => m.status === 'invited' && !uniqueUsers.includes(m.user_id))
+        .map((m) => [m.user_id, m.username || null] as const)
+    ).entries()
+  );
 
   const handleSavePolicy = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -304,14 +156,13 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
       await updateGroupPolicy(group.group_id, {
         description: desc,
         visibility,
-        min_level: 7,
         min_eth_balance_eth: minEth || '0',
         require_invitation: requireInvite,
       });
-      setInfoMsg('Group access & ETH balance policy updated.');
+      setInfoMsg('Group settings saved.');
       if (onGroupUpdated) await onGroupUpdated();
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Failed to save group policy');
+      setErrorMsg(friendlyError(err, 'Could not save the group settings. Please try again.'));
     } finally {
       setBusy(false);
     }
@@ -322,9 +173,9 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
       <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <ShieldCheck size={20} />
-            <h3 style={{ fontSize: '1.05rem', fontWeight: 700 }}>
-              MLS Group Governance — {group.name}
+            <Users size={20} />
+            <h3 style={{ fontSize: '1.45rem', fontWeight: 500, letterSpacing: '-0.015em', margin: 0 }}>
+              Group settings: {group.name}
             </h3>
           </div>
           <button className="btn-outline" style={{ padding: '6px' }} onClick={onClose}>
@@ -337,29 +188,29 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
           <button
             type="button"
             className={tab === 'members' ? 'btn-solid' : 'btn-outline'}
-            style={{ padding: '6px 12px', fontSize: '0.76rem' }}
+            style={{ padding: '6px 12px', fontSize: '0.86rem' }}
             onClick={() => setTab('members')}
           >
-            Members &amp; Keys ({uniqueUsers.length})
+            Members ({uniqueUsers.length})
           </button>
           <button
             type="button"
             className={tab === 'policy' ? 'btn-solid' : 'btn-outline'}
-            style={{ padding: '6px 12px', fontSize: '0.76rem' }}
+            style={{ padding: '6px 12px', fontSize: '0.86rem' }}
             onClick={() => setTab('policy')}
           >
             <Award size={13} />
-            <span>Access Policy</span>
+            <span>Who can join</span>
           </button>
           {isGroupAdmin && (
             <button
               type="button"
               className={tab === 'invites' ? 'btn-solid' : 'btn-outline'}
-              style={{ padding: '6px 12px', fontSize: '0.76rem' }}
+              style={{ padding: '6px 12px', fontSize: '0.86rem' }}
               onClick={() => setTab('invites')}
             >
               <Link2 size={13} />
-              <span>Invites &amp; Requests ({joinRequests.length})</span>
+              <span>Join requests ({joinRequests.length})</span>
             </button>
           )}
         </div>
@@ -370,7 +221,7 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
               padding: '10px 12px',
               borderRadius: '8px',
               border: '1px solid var(--border-strong)',
-              fontSize: '0.78rem',
+              fontSize: '0.86rem',
             }}
           >
             {errorMsg}
@@ -383,7 +234,7 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
               borderRadius: '8px',
               background: 'var(--bg-input)',
               border: '1px solid var(--border-subtle)',
-              fontSize: '0.78rem',
+              fontSize: '0.86rem',
             }}
           >
             {infoMsg}
@@ -392,41 +243,6 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
 
         {tab === 'members' && (
           <>
-            <div
-              style={{
-                background: 'var(--bg-input)',
-                border: '1px solid var(--border-strong)',
-                borderRadius: '12px',
-                padding: '14px',
-                fontSize: '0.76rem',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '5px',
-              }}
-            >
-              <div>
-                <strong>Protocol:</strong> IETF RFC 9420 MLS ({group.ciphersuite}) &bull;{' '}
-                <strong>Epoch:</strong> #{group.current_epoch}
-              </div>
-              <div style={{ fontFamily: 'ui-monospace, monospace' }}>
-                <strong>Epoch Verify Code:</strong> {epochVerifyCode || 'Syncing...'}
-              </div>
-              <div
-                style={{
-                  fontFamily: 'ui-monospace, monospace',
-                  fontSize: '0.7rem',
-                  color: 'var(--text-secondary)',
-                  wordBreak: 'break-all',
-                }}
-              >
-                Authenticator: {epochAuthenticatorHex || '—'}
-              </div>
-              <div style={{ color: 'var(--text-secondary)' }}>
-                Strict Epoch Isolation: new members cannot decrypt pre-join epochs; removed members
-                trigger immediate TreeKEM rekeying.
-              </div>
-            </div>
-
             {isGroupAdmin && (
               <form
                 onSubmit={async (e) => {
@@ -435,11 +251,16 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                   setBusy(true);
                   setErrorMsg(null);
                   try {
-                    await onAddMember(memberInput.trim());
+                    const who = memberInput.trim();
+                    const outcome = await onAddMember(who);
                     setMemberInput('');
-                    setInfoMsg('Member added & encrypted MLS Welcome delivered.');
+                    setInfoMsg(
+                      outcome === 'invited'
+                        ? `Invitation sent to ${who}. They will join when they press Accept.`
+                        : 'Member added to the group.'
+                    );
                   } catch (err: any) {
-                    setErrorMsg(err?.message || 'Failed to add member to MLS group');
+                    setErrorMsg(friendlyError(err, 'Could not add this member. Please try again.'));
                   } finally {
                     setBusy(false);
                   }
@@ -448,7 +269,7 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
               >
                 <input
                   type="text"
-                  placeholder="Add eligible member by usr_..., @username, or 0x..."
+                  placeholder="Add a member by @username or wallet address"
                   value={memberInput}
                   onChange={(e) => setMemberInput(e.target.value)}
                   style={{
@@ -458,8 +279,7 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                     color: 'var(--text-main)',
                     borderRadius: '8px',
                     padding: '8px 12px',
-                    fontSize: '0.8rem',
-                    fontFamily: 'ui-monospace, monospace',
+                    fontSize: '0.9rem',
                   }}
                 />
                 <button type="submit" className="btn-solid" disabled={busy || !memberInput.trim()}>
@@ -472,12 +292,11 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               {uniqueUsers.map((uid) => {
                 const userDevs = activeMembers.filter((m) => m.user_id === uid);
-                const joinedAt = Math.min(...userDevs.map((m) => m.joined_epoch));
                 const role = userDevs.some((m) => m.role === 'admin') ? 'admin' : 'member';
                 const uname = userDevs.find((m) => m.username)?.username;
                 const displayLabel = uname
                   ? `@${uname}`
-                  : `${uid.slice(0, 16)}...`;
+                  : 'Member';
                 return (
                   <div
                     key={uid}
@@ -489,15 +308,15 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                       background: 'var(--bg-surface)',
                       border: '1px solid var(--border-subtle)',
                       borderRadius: '8px',
-                      fontSize: '0.76rem',
+                      fontSize: '0.86rem',
                       gap: '8px',
                       flexWrap: 'wrap',
                     }}
                   >
-                    <div style={{ fontFamily: 'ui-monospace, monospace' }}>
+                    <div>
                       <span>{uid === currentUserId ? `${displayLabel} (You)` : displayLabel}</span>
                       <span style={{ color: 'var(--text-muted)', marginLeft: '8px' }}>
-                        [{role.toUpperCase()} &bull; E#{joinedAt} &bull; {userDevs.length} dev]
+                        {role === 'admin' ? 'Admin' : 'Member'}
                       </span>
                     </div>
                     {isGroupAdmin && uid !== currentUserId && (
@@ -505,7 +324,7 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                         <button
                           type="button"
                           className="btn-outline"
-                          style={{ padding: '4px 8px', fontSize: '0.7rem' }}
+                          style={{ padding: '4px 8px', fontSize: '0.9rem' }}
                           disabled={busy}
                           onClick={async () => {
                             setBusy(true);
@@ -517,18 +336,18 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                               );
                               if (onGroupUpdated) await onGroupUpdated();
                             } catch (err: any) {
-                              setErrorMsg(err?.message || 'Role update failed');
+                              setErrorMsg(friendlyError(err, 'Role update failed'));
                             } finally {
                               setBusy(false);
                             }
                           }}
                         >
-                          {role === 'admin' ? 'Set Member' : 'Make Admin'}
+                          {role === 'admin' ? 'Remove admin' : 'Make admin'}
                         </button>
                         <button
                           type="button"
                           className="btn-outline"
-                          style={{ padding: '4px 8px', fontSize: '0.7rem' }}
+                          style={{ padding: '4px 8px', fontSize: '0.9rem' }}
                           disabled={busy}
                           onClick={async () => {
                             setBusy(true);
@@ -536,14 +355,14 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                             try {
                               await onRemoveMember(uid);
                             } catch (err: any) {
-                              setErrorMsg(err?.message || 'Remove failed');
+                              setErrorMsg(friendlyError(err, 'Remove failed'));
                             } finally {
                               setBusy(false);
                             }
                           }}
                         >
                           <UserMinus size={12} />
-                          <span>Remove &amp; Rekey</span>
+                          <span>Remove</span>
                         </button>
                       </div>
                     )}
@@ -552,6 +371,137 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
               })}
             </div>
 
+            {invitedUsers.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>Waiting for reply ({invitedUsers.length})</div>
+                {invitedUsers.map(([uid, uname]) => (
+                  <div
+                    key={uid}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 12px',
+                      background: 'var(--bg-surface)',
+                      border: '1px dashed var(--border-strong)',
+                      borderRadius: '8px',
+                      fontSize: '0.86rem',
+                      gap: '8px',
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div>
+                      <span>{uname ? `@${uname}` : 'Invited member'}</span>
+                      <span style={{ color: 'var(--text-muted)', marginLeft: '8px' }}>Invited, not accepted yet</span>
+                    </div>
+                    {isGroupAdmin && (
+                      <button
+                        type="button"
+                        className="btn-outline"
+                        style={{ padding: '4px 8px', fontSize: '0.9rem' }}
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          setErrorMsg(null);
+                          try {
+                            await onRemoveMember(uid);
+                            setInfoMsg('Invitation cancelled.');
+                          } catch (err: any) {
+                            setErrorMsg(friendlyError(err, 'Could not cancel the invitation. Please try again.'));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        <X size={12} />
+                        <span>Cancel invite</span>
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {onDeleteGroup && isGroupAdmin && (
+              <div
+                style={{
+                  border: '1px solid var(--danger)',
+                  borderRadius: '12px',
+                  padding: '12px 14px',
+                  marginBottom: '12px',
+                  background: 'var(--danger-soft)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                }}
+              >
+                <div style={{ fontWeight: 600, fontSize: '0.92rem' }}>Delete this group</div>
+                {paidInfo?.isPaid ? (
+                  <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
+                    Paid groups can only be deleted by the platform admin, because members paid for access.
+                  </div>
+                ) : !deleteOpen ? (
+                  <>
+                    <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
+                      Removes the group for everyone: all members, messages and files. This cannot be undone.
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-outline"
+                      style={{ alignSelf: 'flex-start', borderColor: 'var(--danger)', color: 'var(--danger)' }}
+                      disabled={busy}
+                      onClick={() => {
+                        setDeleteOpen(true);
+                        setDeleteText('');
+                      }}
+                    >
+                      <Trash2 size={14} />
+                      <span>Delete group</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <label style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
+                      Type the group name <strong>{group.name}</strong> to confirm:
+                      <input
+                        type="text"
+                        value={deleteText}
+                        onChange={(e) => setDeleteText(e.target.value)}
+                        autoFocus
+                        aria-label="Group name to confirm deletion"
+                        style={{ display: 'block', width: '100%', marginTop: '6px', padding: '8px 12px' }}
+                      />
+                    </label>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button
+                        type="button"
+                        className="btn-solid"
+                        style={{ background: 'var(--danger)', color: '#fff' }}
+                        disabled={busy || deleteText.trim() !== group.name}
+                        onClick={async () => {
+                          setBusy(true);
+                          setErrorMsg(null);
+                          try {
+                            await onDeleteGroup();
+                            onClose();
+                          } catch (err: any) {
+                            setErrorMsg(friendlyError(err, 'Could not delete the group'));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        Delete for everyone
+                      </button>
+                      <button type="button" className="btn-outline" disabled={busy} onClick={() => setDeleteOpen(false)}>
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
               {onLeaveGroup && (
                 <button
@@ -559,57 +509,44 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                   className="btn-outline"
                   disabled={busy}
                   onClick={async () => {
-                    if (!confirm(`Leave encrypted group "${group.name}"?`)) return;
+                    if (!confirm(`Leave the group "${group.name}"?`)) return;
                     setBusy(true);
                     setErrorMsg(null);
                     try {
                       await onLeaveGroup();
                       onClose();
                     } catch (err: any) {
-                      setErrorMsg(err?.message || 'Cannot leave group');
+                      setErrorMsg(friendlyError(err, 'Could not leave the group. Please try again.'));
                     } finally {
                       setBusy(false);
                     }
                   }}
                 >
                   <LogOut size={14} />
-                  <span>Leave Group</span>
+                  <span>Leave group</span>
                 </button>
               )}
-              <button
-                type="button"
-                className="btn-outline"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  setErrorMsg(null);
-                  try {
-                    await onRotateOwnKey();
-                    setInfoMsg('Rotated leaf key & advanced TreeKEM epoch.');
-                  } catch (err: any) {
-                    setErrorMsg(err?.message || 'Key rotation failed');
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                <RefreshCw size={14} />
-                <span>Rotate My Leaf Key</span>
-              </button>
             </div>
           </>
         )}
 
         {tab === 'policy' && (
           <form onSubmit={handleSavePolicy} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {paidInfo && (
+              <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
+                {paidInfo.isPaid
+                  ? `Paid group${paidInfo.monthlyUsd > 0 ? ` ($${paidInfo.monthlyUsd.toFixed(2)}/month)` : ''}. Saving here keeps it paid; only the platform admin changes prices.`
+                  : 'Free group. Only the platform admin can make a group paid.'}
+              </div>
+            )}
             <div>
-              <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Group Description</label>
+              <label style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>Group description</label>
               <input
                 type="text"
                 value={desc}
                 disabled={!isGroupAdmin}
                 onChange={(e) => setDesc(e.target.value)}
-                placeholder="Purpose & rules for this encrypted group..."
+                placeholder="What this group is for, and its rules"
                 style={{
                   width: '100%',
                   marginTop: '4px',
@@ -618,14 +555,14 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                   borderRadius: '8px',
                   padding: '8px 12px',
                   color: 'var(--text-main)',
-                  fontSize: '0.82rem',
+                  fontSize: '0.9rem',
                 }}
               />
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
               <div>
-                <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Visibility</label>
+                <label style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>Visibility</label>
                 <select
                   value={visibility}
                   disabled={!isGroupAdmin}
@@ -638,16 +575,16 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                     borderRadius: '8px',
                     padding: '8px 10px',
                     color: 'var(--text-main)',
-                    fontSize: '0.82rem',
+                    fontSize: '0.9rem',
                   }}
                 >
-                  <option value="invite_only">Invite Only</option>
-                  <option value="public">Public Discovery</option>
+                  <option value="invite_only">Private (admins add people)</option>
+                  <option value="public">Anyone can find it</option>
                 </select>
               </div>
 
               <div>
-                <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Min ETH Balance</label>
+                <label style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>Minimum wallet balance (ETH)</label>
                 <input
                   type="text"
                   value={minEth}
@@ -662,31 +599,30 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                     borderRadius: '8px',
                     padding: '8px 10px',
                     color: 'var(--text-main)',
-                    fontSize: '0.82rem',
+                    fontSize: '0.9rem',
                     fontFamily: 'ui-monospace, monospace',
                   }}
                 />
               </div>
             </div>
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.86rem' }}>
               <input
                 type="checkbox"
                 checked={requireInvite}
                 disabled={!isGroupAdmin}
                 onChange={(e) => setRequireInvite(e.target.checked)}
               />
-              <span>Require invite code or group admin approval before MLS onboarding</span>
+              <span>New members need admin approval</span>
             </label>
 
             {isGroupAdmin ? (
               <button type="submit" className="btn-solid" disabled={busy} style={{ alignSelf: 'flex-end' }}>
-                Save Access Policy
+                Save
               </button>
             ) : (
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                Only group admins can modify access thresholds. Server enforces these rules on all invites,
-                MLS Add commits, and message transmissions.
+              <div style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>
+                Only group admins can change these settings.
               </div>
             )}
           </form>
@@ -694,96 +630,13 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
 
         {tab === 'invites' && isGroupAdmin && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: '0.82rem', fontWeight: 600 }}>Invite Codes</div>
-              <button
-                type="button"
-                className="btn-solid"
-                style={{ padding: '6px 12px', fontSize: '0.75rem' }}
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    const created = await createGroupInvite(group.group_id, 72, 25);
-                    setInvites((prev) => [created.invite, ...prev]);
-                    setInfoMsg(`Created invite code ${created.invite.invite_code}`);
-                  } catch (err: any) {
-                    setErrorMsg(err?.message || 'Invite creation failed');
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                <Link2 size={13} />
-                <span>Generate 72h Invite Code</span>
-              </button>
-            </div>
-
-            {invites.length === 0 ? (
-              <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                No invite links generated yet.
-              </div>
-            ) : (
-              invites.map((inv) => (
-                <div
-                  key={inv.invite_code}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: '8px 12px',
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: '8px',
-                    fontSize: '0.76rem',
-                    fontFamily: 'ui-monospace, monospace',
-                  }}
-                >
-                  <div>
-                    <strong>{inv.invite_code}</strong>{' '}
-                    <span style={{ color: 'var(--text-muted)' }}>
-                      ({inv.uses_count ?? (inv as any).use_count ?? 0}/{inv.max_uses} uses {inv.revoked ? '• REVOKED' : ''})
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button
-                      type="button"
-                      className="btn-outline"
-                      style={{ padding: '4px 8px', fontSize: '0.7rem' }}
-                      onClick={() => {
-                        navigator.clipboard.writeText(inv.invite_code);
-                        setCopiedCode(inv.invite_code);
-                        setTimeout(() => setCopiedCode(null), 1800);
-                      }}
-                    >
-                      {copiedCode === inv.invite_code ? <Check size={12} /> : <Copy size={12} />}
-                    </button>
-                    {!inv.revoked && (
-                      <button
-                        type="button"
-                        className="btn-outline"
-                        style={{ padding: '4px 8px', fontSize: '0.7rem' }}
-                        onClick={async () => {
-                          await revokeGroupInvite(group.group_id, inv.invite_code);
-                          const refreshed = await fetchGroupInvites(group.group_id);
-                          setInvites(refreshed.invites);
-                        }}
-                      >
-                        Revoke
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-
-            <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-              <div style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '8px' }}>
-                Pending Policy-Verified Join Requests ({joinRequests.length})
+            <div>
+              <div style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '8px' }}>
+                Requests to join ({joinRequests.length})
               </div>
               {joinRequests.length === 0 ? (
-                <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                  No pending join requests waiting for MLS Welcome onboarding.
+                <div style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>
+                  No one is waiting to join right now.
                 </div>
               ) : (
                 joinRequests.map((req) => (
@@ -797,38 +650,65 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                       background: 'var(--bg-surface)',
                       border: '1px solid var(--border-subtle)',
                       borderRadius: '8px',
-                      fontSize: '0.76rem',
+                      fontSize: '0.86rem',
                       marginBottom: '6px',
+                      gap: '8px',
+                      flexWrap: 'wrap',
                     }}
                   >
                     <div>
-                      <strong>{req.username ? `@${req.username}` : req.user_id.slice(0, 14)}</strong>{' '}
+                      <strong>{req.username ? `@${req.username}` : 'New member'}</strong>{' '}
                       <span style={{ color: 'var(--text-secondary)' }}>
                         • {formatEth(req.qualifying_balance_wei || '0', 4)} ETH
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      className="btn-solid"
-                      style={{ padding: '5px 10px', fontSize: '0.72rem' }}
-                      disabled={busy}
-                      onClick={async () => {
-                        setBusy(true);
-                        setErrorMsg(null);
-                        try {
-                          await onAddMember(req.user_id);
-                          const refreshed = await fetchGroupJoinRequests(group.group_id);
-                          setJoinRequests(refreshed.requests);
-                          setInfoMsg(`Approved & encrypted MLS Welcome sent to ${req.username || req.user_id}`);
-                        } catch (err: any) {
-                          setErrorMsg(err?.message || 'MLS onboarding failed');
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      Approve &amp; Add (MLS)
-                    </button>
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn-solid"
+                        style={{ padding: '5px 10px', fontSize: '0.9rem' }}
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          setErrorMsg(null);
+                          try {
+                            await onAddMember(req.user_id);
+                            const refreshed = await fetchGroupJoinRequests(group.group_id);
+                            setJoinRequests(refreshed.requests);
+                            setInfoMsg(`${req.username ? `@${req.username}` : 'The member'} has been added to the group.`);
+                          } catch (err: any) {
+                            setErrorMsg(friendlyError(err, 'Could not add this member. Please try again.'));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-outline"
+                        disabled={busy}
+                        style={{ padding: '5px 10px', fontSize: '0.9rem' }}
+                        onClick={async () => {
+                          const who = req.username ? `@${req.username}` : 'this member';
+                          if (!confirm(`Decline the request from ${who}?`)) return;
+                          setBusy(true);
+                          setErrorMsg(null);
+                          try {
+                            await declineGroupJoinRequest(group.group_id, req.request_id);
+                            setJoinRequests((prev) => prev.filter((r) => r.request_id !== req.request_id));
+                            setInfoMsg(`Declined the request from ${who}.`);
+                          } catch (err: any) {
+                            setErrorMsg(friendlyError(err, 'Could not decline the request'));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        Decline
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
@@ -836,6 +716,87 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
           </div>
         )}
       </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Recent account activity: devices removed, fresh starts, wallet changes.
+// Shown in plain words only; no device IDs, versions or other technical detail.
+// ---------------------------------------------------------------------------
+type AccountEvent = Awaited<ReturnType<typeof fetchIdentitySecurityEvents>>['events'][number];
+
+const EVENT_LABELS: Record<string, string> = {
+  device_revoked: 'A device was signed out',
+  identity_reset_lost_keys: 'Private chats were started fresh',
+  wallet_linked: 'A wallet was added to your account',
+  wallet_changed: 'Your main wallet was changed',
+};
+
+const RecentActivity: React.FC<{ userId: string; refreshKey: string }> = ({ userId, refreshKey }) => {
+  const [events, setEvents] = useState<AccountEvent[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        // The server returns oldest first, 50 at a time: page through, then show the newest few.
+        let all: AccountEvent[] = [];
+        let after = 0;
+        for (let page = 0; page < 4; page++) {
+          const res = await fetchIdentitySecurityEvents([userId], after);
+          all = all.concat(res.events);
+          if (res.events.length < 50) break;
+          after = res.events[res.events.length - 1].seq;
+        }
+        if (alive) {
+          setEvents(all.slice(-8).reverse());
+          setFailed(false);
+        }
+      } catch {
+        if (alive) setFailed(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [userId, refreshKey]);
+
+  return (
+    <div
+      style={{
+        background: 'var(--bg-input)',
+        border: '1px solid var(--border-subtle)',
+        borderRadius: '12px',
+        padding: '14px',
+        fontSize: '0.9rem',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '6px',
+      }}
+    >
+      <strong>Recent activity</strong>
+      {failed ? (
+        <span style={{ color: 'var(--text-secondary)' }}>Could not load recent activity right now.</span>
+      ) : events === null ? (
+        <ListRowsSkeleton count={3} compact />
+      ) : events.length === 0 ? (
+        <span style={{ color: 'var(--text-secondary)' }}>Nothing unusual. No changes to your account.</span>
+      ) : (
+        events.map((e) => (
+          <div
+            key={e.event_id}
+            style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}
+          >
+            <span>{EVENT_LABELS[e.event_type] || 'Account change'}</span>
+            <span style={{ color: 'var(--text-secondary)' }}>{new Date(e.timestamp).toLocaleString()}</span>
+          </div>
+        ))
+      )}
+      <span style={{ color: 'var(--text-secondary)', fontSize: '0.86rem' }}>
+        If you see something you did not do, contact support.
+      </span>
     </div>
   );
 };
@@ -849,9 +810,16 @@ interface AccountDevicesVaultModalProps {
   connectedWallet: string | null;
   onUpdateUsername: (username: string) => Promise<void>;
   onLinkCurrentWallet: (revokeOld: boolean) => Promise<void>;
-  onReplenishPrekeys: () => Promise<void>;
   onRevokeDevice: (deviceId: string) => Promise<void>;
   onResetLostIdentity: () => Promise<void>;
+}
+
+/** Friendly name for a device; never shows internal IDs or key names. */
+function deviceName(d: PeerActiveDeviceDescriptor, isThisDevice: boolean, index: number): string {
+  if (isThisDevice) return 'This browser';
+  const label = (d.device_label || '').trim();
+  if (label && !/e2ee|vault|olm|mls|key/i.test(label)) return label;
+  return `Other device ${index + 1}`;
 }
 
 export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> = ({
@@ -863,7 +831,6 @@ export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> =
   connectedWallet,
   onUpdateUsername,
   onLinkCurrentWallet,
-  onReplenishPrekeys,
   onRevokeDevice,
   onResetLostIdentity,
 }) => {
@@ -881,63 +848,40 @@ export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> =
   const isConnectedWalletAlreadyLinked = profile.wallets.some(
     (w) => connectedWallet && w.wallet_address.toLowerCase() === connectedWallet.toLowerCase()
   );
+  const activeDevices = devices.filter((d) => d.status === 'active');
+  const otherDevices = activeDevices.filter((d) => d.device_id !== localDeviceId);
 
   return (
     <div style={modalBackdropStyle} onClick={onClose}>
       <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <KeyRound size={20} />
-            <h3 style={{ fontSize: '1.05rem', fontWeight: 700 }}>
-              Permanent Identity, Devices &amp; E2EE Key Vault
+            <UserCog size={20} />
+            <h3 style={{ fontSize: '1.45rem', fontWeight: 500, letterSpacing: '-0.015em', margin: 0 }}>
+              Account and devices
             </h3>
           </div>
-          <button className="btn-outline" style={{ padding: '6px' }} onClick={onClose}>
+          <button className="btn-outline" style={{ padding: '6px' }} onClick={onClose} aria-label="Close">
             <X size={16} />
           </button>
         </div>
 
         {statusMsg && (
           <div
+            role="status"
             style={{
               padding: '10px 12px',
               background: 'var(--bg-input)',
               border: '1px solid var(--border-strong)',
               borderRadius: '8px',
-              fontSize: '0.8rem',
+              fontSize: '0.9rem',
             }}
           >
             {statusMsg}
           </div>
         )}
 
-        {/* Permanent Account Identity */}
-        <div
-          style={{
-            background: 'var(--bg-input)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: '12px',
-            padding: '14px',
-            fontSize: '0.8rem',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-          }}
-        >
-          <div>
-            <strong>Immutable Permanent user_id:</strong>{' '}
-            <code style={{ fontFamily: 'ui-monospace, monospace' }}>{profile.user_id}</code>
-          </div>
-          <div>
-            <strong>Encryption Identity Version:</strong> v{profile.identity_version}
-          </div>
-          <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
-            Wallet authentication and message encryption are strictly separated. Changing your
-            username or Ethereum wallet never replaces your device encryption keys.
-          </div>
-        </div>
-
-        {/* Username Update */}
+        {/* Username */}
         <form
           onSubmit={async (e) => {
             e.preventDefault();
@@ -946,39 +890,45 @@ export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> =
             setStatusMsg(null);
             try {
               await onUpdateUsername(usernameInput.trim());
-              setStatusMsg('Username updated; encryption identity and history preserved.');
+              setStatusMsg('Username saved. Your chats are unchanged.');
             } catch (err: any) {
-              setStatusMsg(err?.message || 'Failed to update username');
+              setStatusMsg(friendlyError(err, 'Could not save the username. Please try again.'));
             } finally {
               setBusy(false);
             }
           }}
-          style={{ display: 'flex', gap: '8px' }}
+          style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}
         >
-          <input
-            type="text"
-            placeholder="Set @username (3-32 chars)"
-            value={usernameInput}
-            onChange={(e) => setUsernameInput(e.target.value)}
-            style={{
-              flex: 1,
-              background: 'var(--bg-input)',
-              border: '1px solid var(--border-strong)',
-              color: 'var(--text-main)',
-              borderRadius: '8px',
-              padding: '8px 12px',
-              fontSize: '0.82rem',
-            }}
-          />
-          <button type="submit" className="btn-outline" disabled={busy}>
-            Save Username
-          </button>
+          <label htmlFor="account-username" style={{ fontSize: '0.9rem', fontWeight: 600 }}>
+            Username
+          </label>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <input
+              id="account-username"
+              type="text"
+              placeholder="3 to 32 characters"
+              value={usernameInput}
+              onChange={(e) => setUsernameInput(e.target.value)}
+              style={{
+                flex: 1,
+                background: 'var(--bg-input)',
+                border: '1px solid var(--border-strong)',
+                color: 'var(--text-main)',
+                borderRadius: '8px',
+                padding: '8px 12px',
+                fontSize: '0.9rem',
+              }}
+            />
+            <button type="submit" className="btn-outline" disabled={busy}>
+              Save
+            </button>
+          </div>
         </form>
 
-        {/* Linked Wallets */}
+        {/* Wallets */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={{ fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Wallet size={14} /> Linked Authentication Wallets
+          <div style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <Wallet size={14} /> Sign-in wallets
           </div>
           {profile.wallets.map((w) => (
             <div
@@ -988,14 +938,13 @@ export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> =
                 background: 'var(--bg-surface)',
                 border: '1px solid var(--border-subtle)',
                 borderRadius: '8px',
-                fontSize: '0.78rem',
-                fontFamily: 'ui-monospace, monospace',
+                fontSize: '0.86rem',
                 display: 'flex',
                 justifyContent: 'space-between',
               }}
             >
-              <span>{formatAddress(w.wallet_address, 6)}</span>
-              <span>{w.is_primary ? 'PRIMARY AUTH WALLET' : 'LINKED'}</span>
+              <span>{formatAddress(w.wallet_address, 4)}</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{w.is_primary ? 'Main' : 'Added'}</span>
             </div>
           ))}
           {connectedWallet && !isConnectedWalletAlreadyLinked && (
@@ -1008,115 +957,98 @@ export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> =
                   setBusy(true);
                   try {
                     await onLinkCurrentWallet(false);
-                    setStatusMsg('New wallet linked to permanent user_id without changing E2EE keys.');
+                    setStatusMsg('Wallet added. You can now sign in with it too.');
                   } catch (err: any) {
-                    setStatusMsg(err?.message || 'Wallet link failed');
+                    setStatusMsg(friendlyError(err, 'Could not add this wallet. Please try again.'));
                   } finally {
                     setBusy(false);
                   }
                 }}
               >
-                Link Connected Wallet ({formatAddress(connectedWallet, 4)})
+                Add this wallet ({formatAddress(connectedWallet, 4)})
               </button>
               <button
                 type="button"
                 className="btn-solid"
                 disabled={busy}
                 onClick={async () => {
+                  if (!confirm('Make this your main wallet? The old wallet will be signed out and removed.')) return;
                   setBusy(true);
                   try {
                     await onLinkCurrentWallet(true);
-                    setStatusMsg('Primary wallet migrated & old wallet sessions revoked; E2EE keys preserved.');
+                    setStatusMsg('This is now your main wallet. The old one was removed. Your chats are unchanged.');
                   } catch (err: any) {
-                    setStatusMsg(err?.message || 'Wallet migration failed');
+                    setStatusMsg(friendlyError(err, 'Could not change your main wallet. Please try again.'));
                   } finally {
                     setBusy(false);
                   }
                 }}
               >
-                Migrate Primary Wallet &amp; Revoke Old
+                Make this my main wallet
               </button>
             </div>
           )}
         </div>
 
-        {/* Devices & Prekey Rotation */}
+        {/* Devices */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Smartphone size={14} /> Cryptographic Devices ({devices.length})
-            </span>
-            <button
-              type="button"
-              className="btn-outline"
-              style={{ padding: '4px 10px', fontSize: '0.74rem' }}
-              disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  await onReplenishPrekeys();
-                  setStatusMsg('Replenished Olm One-Time Prekeys, rotated Fallback Key & MLS KeyPackages.');
-                } catch (err: any) {
-                  setStatusMsg(err?.message || 'Prekey rotation failed');
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              <RefreshCw size={12} />
-              <span>Rotate &amp; Replenish Prekeys</span>
-            </button>
-          </div>
-
-          {devices.map((d) => (
-            <div
-              key={d.device_id}
-              style={{
-                padding: '10px 12px',
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: '8px',
-                fontSize: '0.76rem',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 600, fontFamily: 'ui-monospace, monospace' }}>
-                  {d.device_id} {d.device_id === localDeviceId ? '(This Browser Vault)' : ''}
-                </div>
-                <div style={{ color: 'var(--text-secondary)', fontFamily: 'ui-monospace, monospace' }}>
-                  Ed25519: {d.ed25519_identity_key.slice(0, 20)}... &bull; Status: {d.status.toUpperCase()}
-                </div>
+          <span style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <Smartphone size={14} /> Signed-in devices ({activeDevices.length})
+          </span>
+          {activeDevices.map((d) => {
+            const isThis = d.device_id === localDeviceId;
+            return (
+              <div
+                key={d.device_id}
+                style={{
+                  padding: '10px 12px',
+                  background: 'var(--bg-surface)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: '8px',
+                  fontSize: '0.86rem',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>
+                  {deviceName(d, isThis, otherDevices.indexOf(d))}
+                </span>
+                {!isThis && (
+                  <button
+                    type="button"
+                    className="btn-outline"
+                    style={{ padding: '4px 8px', fontSize: '0.9rem' }}
+                    disabled={busy}
+                    onClick={async () => {
+                      if (!confirm('Sign out this device? It will no longer receive your private messages.')) return;
+                      setBusy(true);
+                      try {
+                        await onRevokeDevice(d.device_id);
+                        setStatusMsg('Device signed out.');
+                      } catch (err: any) {
+                        setStatusMsg(friendlyError(err, 'Could not sign out the device. Please try again.'));
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    <Trash2 size={12} />
+                    <span>Sign out</span>
+                  </button>
+                )}
               </div>
-              {d.status === 'active' && d.device_id !== localDeviceId && (
-                <button
-                  type="button"
-                  className="btn-outline"
-                  style={{ padding: '4px 8px', fontSize: '0.72rem' }}
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      await onRevokeDevice(d.device_id);
-                      setStatusMsg(`Device ${d.device_id} revoked.`);
-                    } catch (err: any) {
-                      setStatusMsg(err?.message || 'Revoke failed');
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  <Trash2 size={12} />
-                  <span>Revoke</span>
-                </button>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
 
-        {/* Explicit Lost-Keys / Identity Migration Reset */}
+        <RecentActivity
+          userId={profile.user_id}
+          refreshKey={`${devices.length}:${profile.identity_version}:${profile.wallets.length}`}
+        />
+
+        {/* Lost every device: start private chats fresh */}
         <div
           style={{
             borderTop: '1px solid var(--border-subtle)',
@@ -1126,43 +1058,41 @@ export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> =
             gap: '8px',
           }}
         >
-          <div style={{ fontSize: '0.78rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <AlertTriangle size={14} /> Lost All Devices / Explicit Identity Reset
+          <div style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <AlertTriangle size={14} /> Lost your old phone or computer?
           </div>
-          <p style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
-            Because private decryption keys never leave your devices, losing all devices makes
-            previously encrypted messages permanently unrecoverable. Resetting revokes all old
-            devices, generates a fresh identity, and notifies conversation peers.
+          <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', lineHeight: 1.45, margin: 0 }}>
+            Private messages are kept only on your own devices. If you lost all of them, you can start
+            your private chats fresh here. Old private messages cannot be brought back. The people you
+            chat with will see that you started fresh.
           </p>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.75rem' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.86rem' }}>
             <input
               type="checkbox"
               checked={confirmLostReset}
               onChange={(e) => setConfirmLostReset(e.target.checked)}
             />
-            <span>
-              I understand prior E2EE messages without local keys cannot be decrypted.
-            </span>
+            <span>I understand old private messages cannot be brought back.</span>
           </label>
           <button
             type="button"
             className="btn-outline"
+            style={{ alignSelf: 'flex-start' }}
             disabled={busy || !confirmLostReset}
             onClick={async () => {
               setBusy(true);
               try {
                 await onResetLostIdentity();
                 setConfirmLostReset(false);
-                setStatusMsg('Encryption identity reset complete; conversation peers notified.');
+                setStatusMsg('Done. Your private chats have started fresh.');
               } catch (err: any) {
-                setStatusMsg(err?.message || 'Identity reset failed');
+                setStatusMsg(friendlyError(err, 'Could not start fresh. Please try again.'));
               } finally {
                 setBusy(false);
               }
             }}
           >
-            <ShieldAlert size={14} />
-            <span>Reset Encryption Identity &amp; Notify Peers</span>
+            <span>Start private chats fresh</span>
           </button>
         </div>
       </div>

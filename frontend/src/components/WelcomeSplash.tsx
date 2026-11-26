@@ -15,7 +15,7 @@ import './WelcomeSplash.css';
  */
 
 // ---- Copy (change here) ----------------------------------------------------
-const HEADLINE = 'Welcome to Zyphra.in';
+const HEADLINE = 'Welcome to Zyphra';
 const SUBLINE = 'For 1% of 1%';
 const CAPTION = '1 in 10,000';
 

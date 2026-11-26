@@ -89,7 +89,7 @@ sequenceDiagram
 ## 3. Platform Admission Paywall, Paid Groups & Server-Side Verified Payments
 
 1. **Platform Admission Paywall (USD-Denominated with Live ETH/USD Oracle)**:
-   - Platform admission fee is set in USD (`platform_entry_fee_usd`, default `$10`) and converted to ETH at quote time via `price_oracle.py` (Coinbase -> Kraken -> admin-configured `eth_usd_price` fallback, rounded up to 6 decimals), controlled via `platform_settings`.
+   - Platform admission fee is set in USD (`platform_entry_fee_usd` = the MONTHLY price, plus an optional `platform_yearly_fee_usd`; both default to `$0` = free until the admin sets them) and converted to ETH at quote time via `price_oracle.py` (Coinbase -> Kraken -> admin-configured `eth_usd_price` fallback, rounded up to 6 decimals), controlled via `platform_settings`.
    - Visitors start on `WelcomeGate` (after the one-time `WelcomeSplash`). Connected users without platform membership (`is_platform_paid == false`) are prompted with `PlatformAdmissionModal` displaying the USD fee, live ETH quote, rate source, and authorized treasury destination.
    - Access to the chat workspace is granted strictly after verified on-chain payment confirmation (`PAYMENT_PRICE_TOLERANCE_PCT`, default `5%`).
 2. **Paid Groups**:

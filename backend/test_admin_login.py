@@ -92,14 +92,13 @@ class TestAdminLogin(unittest.TestCase):
         for payload in ["' OR '1'='1", "admin'--", "\" OR \"\"=\"", "'; DROP TABLE users;--"]:
             res = self._login(payload, payload)
             self.assertEqual(res.status_code, 401)
-        admin_auth._reset_for_tests()  # clear lockout counters, then confirm real login still works
+        admin_auth._reset_for_tests()  # clear failure counters, then confirm real login still works
         self.assertEqual(self._login().status_code, 200)
 
-    def test_brute_force_lockout(self):
-        for _ in range(admin_auth.MAX_FAILURES_PER_IP):
+    def test_brute_force_is_slowed_never_locked_out(self):
+        for _ in range(admin_auth.SLOWDOWN_AFTER_FAILURES + 2):
             self.assertEqual(self._login("test_admin_id", "nope").status_code, 401)
-        locked = self._login()  # even the correct password is refused during lockout
-        self.assertEqual(locked.status_code, 429)
+        self.assertEqual(self._login().status_code, 200)  # the correct password is never refused
 
     def test_login_disabled_when_not_configured(self):
         with patch.dict(os.environ, {"ADMIN_LOGIN_ID": "", "ADMIN_LOGIN_PASSWORD": ""}):

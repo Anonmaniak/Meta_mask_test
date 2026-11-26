@@ -431,23 +431,10 @@ class TestE2EESecurityArchitecture(unittest.TestCase):
         )
         self.assertEqual(wrong_dev_fetch.status_code, 403)
 
-    # -------------------------------------------------------------------------
-    # Section F: Public Room Security Model & Non-Global Isolation
-    # -------------------------------------------------------------------------
-    def test_03_public_room_explicit_security_model(self):
-        model_res = self.client.get("/api/chat/public-security-model")
-        self.assertEqual(model_res.status_code, 200)
-        model = model_res.json()
-        self.assertEqual(model["confidential"], False)
-        self.assertIn("NOT confidential", model["e2ee_scope_warning"])
-
-        pub_msgs = self.client.get("/api/chat/messages?channel=global")
-        self.assertEqual(pub_msgs.status_code, 200)
-        self.assertEqual(pub_msgs.headers.get("X-Chat-Room-Model"), "public-non-confidential")
-
-        # Private/group channels MUST be rejected on public unauthenticated endpoint
-        blocked = self.client.get("/api/chat/messages?channel=conv_private_dm_room")
-        self.assertEqual(blocked.status_code, 403)
+    # (Removed: the legacy unauthenticated /api/chat/* public-room endpoints no longer exist.)
+    def test_03_legacy_public_chat_endpoints_are_gone(self):
+        for path in ("/api/chat/messages?channel=global", "/api/chat/public-security-model", "/api/chat/keys/challenge"):
+            self.assertIn(self.client.get(path).status_code, (404, 405))
 
     # -------------------------------------------------------------------------
     # E & K.4: MLS Group Add, Remove, Pre-Join/Post-Removal Boundaries & Concurrency
@@ -563,6 +550,32 @@ class TestE2EESecurityArchitecture(unittest.TestCase):
         conflict_detail = stale_commit.json()["detail"]
         self.assertEqual(conflict_detail["current_epoch"], 1)
         self.assertEqual(len(conflict_detail["missing_commits"]), 1)
+
+        # 4b. Bob was added directly by the admin, so he must Accept first (Instagram-style invitation):
+        #     no Welcome, no group access and the group is not in his list until he accepts.
+        self.assertEqual(
+            len(
+                self.client.get(
+                    f"/api/e2ee/groups/welcomes?device_id={bob_dev}&consume=false",
+                    headers=self._auth_headers(bob_tok),
+                ).json()["welcomes"]
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.client.get(f"/api/e2ee/groups/{group_id}", headers=self._auth_headers(bob_tok)).status_code,
+            403,
+        )
+        invs = self.client.get("/api/e2ee/groups/invitations", headers=self._auth_headers(bob_tok)).json()["invitations"]
+        self.assertEqual([i["group_id"] for i in invs], [group_id])
+        acc = self.client.post(
+            f"/api/e2ee/groups/{group_id}/invitation/accept", headers=self._auth_headers(bob_tok)
+        )
+        self.assertEqual(acc.status_code, 200, acc.text)
+        self.assertEqual(
+            self.client.get("/api/e2ee/groups/invitations", headers=self._auth_headers(bob_tok)).json()["invitations"],
+            [],
+        )
 
         # 5. Bob peeks Welcome (consume=false), ACKs after durable import, and verifies non-admin commit guard
         welcomes_peek = self.client.get(

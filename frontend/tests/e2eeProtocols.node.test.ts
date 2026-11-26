@@ -19,7 +19,6 @@ import {
   decryptOlmDeviceCiphertext,
   resetOlmSessionWithPeerDevice,
   computeSafetyNumber,
-  createSasInitiator,
   evaluateAndRecordPeerTrust,
   markPeerDevicesVerified,
   type ClaimedPeerPrekeyBundle,
@@ -77,7 +76,7 @@ test('Encrypted At-Rest Vault wraps records with non-extractable AES-256-GCM and
   assert.equal(decrypted.nested.keyMaterial, 'PRIVATE_CURVE25519_SCALAR_DATA');
 });
 
-test('Olm v2 (Vodozemac) 3DH + Double Ratchet multi-device E2EE, replay rejection, SAS & Safety Numbers', async () => {
+test('Olm v2 (Vodozemac) 3DH + Double Ratchet multi-device E2EE, replay rejection & Safety Numbers', async () => {
   const aliceUserId = 'usr_alice_permanent_01';
   const aliceSiblingVaultId = 'usr_alice_permanent_01__tablet';
   const bobUserId = 'usr_bob_permanent_02';
@@ -304,7 +303,7 @@ test('Olm v2 (Vodozemac) 3DH + Double Ratchet multi-device E2EE, replay rejectio
   );
   assert.equal(bobDecReest.text, 'Fresh 3DH session after manual reset');
 
-  // 7. Symmetric 60-digit Safety Numbers + Interactive Vodozemac SAS
+  // 7. Symmetric 60-digit Safety Numbers
   const snAlice = await computeSafetyNumber(
     {
       userId: aliceUserId,
@@ -345,15 +344,6 @@ test('Olm v2 (Vodozemac) 3DH + Double Ratchet multi-device E2EE, replay rejectio
     }
   );
   assert.notEqual(snAlice, snTampered, 'Safety number MUST change on MITM identity substitution');
-
-  const sasA = await createSasInitiator();
-  const sasB = await createSasInitiator();
-  const sasContext = `zyphra-sas-v1|${aliceUserId}|${bobUserId}`;
-  const resA = sasA.finish(sasB.publicKey, sasContext);
-  const resB = sasB.finish(sasA.publicKey, sasContext);
-  assert.deepEqual(resA.decimals, resB.decimals);
-  assert.deepEqual(resA.emojiIndices, resB.emojiIndices);
-  assert.equal(resA.mac('verified-keys'), resB.mac('verified-keys'));
 
   // 8. Identity-key change, new device & lost-key reset warning detection
   const trustInitial = await evaluateAndRecordPeerTrust(aliceUserId, bobUserId, 1, [

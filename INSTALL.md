@@ -29,6 +29,6 @@ SupportView.tsx (NEW), SupportConversation.tsx (NEW), AdminSupportInbox.tsx (NEW
 platformApi.ts, api.ts, e2eeApi.ts, resilientFetch.ts (NEW)
 
 ## Optional settings (backend environment)
-PLATFORM_ENTRY_FEE_USD       default 10     membership price (also editable in the Admin console)
+(Active network, membership price and payment wallet are set ONLY in the Admin console at /Admin456 - not here.)
 PAYMENT_PRICE_TOLERANCE_PCT  default 5      allowed ETH price movement between quote and payment
 DB_POOL_MIN / DB_POOL_MAX    default 3 / 10 database connections kept ready

@@ -50,7 +50,7 @@ class CredentialPolicyTests(unittest.TestCase):
         with patch.dict(os.environ, {"ADMIN_LOGIN_ID": "admin", "ADMIN_LOGIN_PASSWORD": "abcd1234"}):
             self.assertFalse(admin_auth.credentials_configured())
             with self.assertRaises(admin_auth.LoginError) as cm:
-                admin_auth.attempt_login("admin", "abcd1234", "1.2.3.4")
+                admin_auth.attempt_login("admin", "abcd1234")
             self.assertEqual(cm.exception.status, 503)
             self.assertIn("security policy", cm.exception.detail)
 
@@ -78,18 +78,26 @@ class LockoutDesignTests(unittest.TestCase):
         # 200 failures from many different addresses used to trigger a global 5-minute lockout.
         for i in range(200):
             with self.assertRaises(admin_auth.LoginError) as cm:
-                admin_auth.attempt_login(STRONG_ID, "wrong-guess", f"10.0.{i // 250}.{i % 250}")
+                admin_auth.attempt_login(STRONG_ID, "wrong-guess")
             self.assertEqual(cm.exception.status, 401)
-        token = admin_auth.attempt_login(STRONG_ID, STRONG_PW, "203.0.113.7")  # the real admin, new address
+        token = admin_auth.attempt_login(STRONG_ID, STRONG_PW)  # the real admin, new address
         self.assertTrue(admin_auth.verify_session(token))
 
-    def test_same_address_is_still_locked_after_repeated_failures(self):
-        for _ in range(admin_auth.MAX_FAILURES_PER_IP):
-            with self.assertRaises(admin_auth.LoginError):
-                admin_auth.attempt_login(STRONG_ID, "nope", "198.51.100.9")
-        with self.assertRaises(admin_auth.LoginError) as cm:
-            admin_auth.attempt_login(STRONG_ID, STRONG_PW, "198.51.100.9")
-        self.assertEqual(cm.exception.status, 429)
+    def test_failures_slow_down_but_never_lock_out(self):
+        """Without IPs, repeated failures make each failed attempt slower (global), never a 429 lockout."""
+        with patch.object(admin_auth, "FAILED_ATTEMPT_DELAY_SEC", 0.001), patch.object(admin_auth.time, "sleep") as slept:
+            for _ in range(admin_auth.SLOWDOWN_AFTER_FAILURES + 4):
+                with self.assertRaises(admin_auth.LoginError) as cm:
+                    admin_auth.attempt_login(STRONG_ID, "nope")
+                self.assertEqual(cm.exception.status, 401)
+            delays = [c.args[0] for c in slept.call_args_list]
+        self.assertGreater(delays[-1], delays[0])          # delay grows
+        self.assertLessEqual(max(delays), admin_auth.MAX_ATTEMPT_DELAY_SEC)
+        self.assertTrue(admin_auth.verify_session(admin_auth.attempt_login(STRONG_ID, STRONG_PW)))
+
+    def test_login_takes_no_client_information(self):
+        import inspect
+        self.assertEqual(list(inspect.signature(admin_auth.attempt_login).parameters), ["login_id", "password"])
 
     def test_concurrent_attempts_are_capped_and_overflow_gets_429_immediately(self):
         held = []
@@ -98,20 +106,20 @@ class LockoutDesignTests(unittest.TestCase):
             held.append(1)
         try:
             with self.assertRaises(admin_auth.LoginError) as cm:
-                admin_auth.attempt_login(STRONG_ID, STRONG_PW, "192.0.2.1")
+                admin_auth.attempt_login(STRONG_ID, STRONG_PW)
             self.assertEqual(cm.exception.status, 429)
         finally:
             for _ in held:
                 admin_auth._attempt_slots.release()
         # Capacity is returned afterwards: a normal login works again.
-        self.assertTrue(admin_auth.verify_session(admin_auth.attempt_login(STRONG_ID, STRONG_PW, "192.0.2.1")))
+        self.assertTrue(admin_auth.verify_session(admin_auth.attempt_login(STRONG_ID, STRONG_PW)))
 
     def test_slots_are_released_after_success_and_failure(self):
         for _ in range(admin_auth.MAX_CONCURRENT_ATTEMPTS * 3):
             with self.assertRaises(admin_auth.LoginError):
-                admin_auth.attempt_login(STRONG_ID, "bad", "192.0.2.50")
+                admin_auth.attempt_login(STRONG_ID, "bad")
             admin_auth._reset_for_tests()
-        admin_auth.attempt_login(STRONG_ID, STRONG_PW, "192.0.2.51")  # would 429 if slots had leaked
+        admin_auth.attempt_login(STRONG_ID, STRONG_PW)  # would 429 if slots had leaked
 
 
 class StartupSelfCheckTests(unittest.TestCase):

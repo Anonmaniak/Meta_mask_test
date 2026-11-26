@@ -78,7 +78,7 @@ class TestVerifiedPaymentRecords(unittest.TestCase):
         self.client.cookies.clear()
         # Ensure default authorized destination is set
         platform_db.update_platform_settings(
-            {"authorized_payment_destination": AUTH_DESTINATION},
+            {"authorized_payment_destination": AUTH_DESTINATION, "default_balance_chain_id": 1},
             actor_user_id="test_setup",
         )
 
@@ -773,3 +773,19 @@ class TestVerifiedPaymentRecords(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestActiveNetworkOnly(unittest.TestCase):
+    """Security: a payment is valid ONLY on the network the admin selected (no free-testnet-ETH bypass)."""
+
+    def test_only_active_chain_is_allowed(self):
+        platform_db.update_platform_settings({"default_balance_chain_id": 1}, actor_user_id="t")
+        self.assertEqual(platform_db.get_allowed_payment_chain_ids(), [1])
+        platform_db.update_platform_settings({"default_balance_chain_id": 11155111}, actor_user_id="t")
+        self.assertEqual(platform_db.get_allowed_payment_chain_ids(), [11155111])
+
+    def test_unsupported_chain_rejected_by_settings(self):
+        with self.assertRaises(ValueError):
+            platform_db.update_platform_settings({"default_balance_chain_id": 137}, actor_user_id="t")
+
+    def test_destination_empty_by_default_fails_closed(self):
+        self.assertIsNone(platform_db.DEFAULT_PLATFORM_SETTINGS["authorized_payment_destination"])

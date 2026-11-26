@@ -1,8 +1,10 @@
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-pydantic==2.9.2
+# Pinned versions (Python 3.11+). Upgraded to clear known security issues in Starlette and python-dotenv.
+fastapi==0.165.0
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
 web3==7.4.0
-python-dotenv==1.0.1
+python-dotenv==1.2.4
 gunicorn==23.0.0
 psycopg2-binary>=2.9.9
 cryptography>=43.0.0

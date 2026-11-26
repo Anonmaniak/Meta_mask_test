@@ -24,7 +24,6 @@ flowchart LR
 
     SecurityMW --> PlatRouter["/api/platform/*\n(platform_routes.py)"]
     SecurityMW --> E2EERouter["/api/e2ee/*\n(e2ee_routes.py)"]
-    SecurityMW --> ChatRouter["/api/chat/*\n(chat_routes.py)"]
 
     PlatRouter --> AdminAuth["admin_auth.py\n(/Admin456 Login & Sessions)"]
     PlatRouter --> PlatDB["platform_db.py\n(Pricing, Payments, Support, RBAC)"]
@@ -32,7 +31,7 @@ flowchart LR
     PlatRouter --> Oracle["price_oracle.py\n(Coinbase / Kraken ETH/USD)"]
     PlatRouter --> EthRPC["eth_rpc.py\n(Mainnet / Sepolia JSON-RPC)"]
     E2EERouter --> E2EEDB["e2ee_db.py"]
-    ChatRouter --> ChatDB["chat_db.py"]
+    PlatRouter --> ChatDB["chat_db.py"]
 
     PlatDB --> PG[("Neon PostgreSQL / SQLite")]
     SupportDB --> PG
@@ -72,7 +71,7 @@ flowchart LR
    - Dropped Neon/PostgreSQL connections caught by `detailed_request_logger` purge idle pool connections and respond with `503 Service Temporarily Unavailable` + `Retry-After: 1` (`retryable: true`).
 7. **Hardened Standalone Admin Console Authentication & Fast Overview Queries (`admin_auth.py`, `platform_db.py`)**:
    - Credentials (`ADMIN_LOGIN_ID`, `ADMIN_LOGIN_PASSWORD`) live exclusively in server-side `.env` / host secrets and are never bundled into frontend code; login fails closed (`503`) if either variable is unset.
-   - `attempt_login` performs constant-time `hmac.compare_digest` over `SHA-256` digests of both fields, applies a per-IP brute-force lockout (`5` failures -> `15`-min lockout), a fixed delay on failure and a cap of `4` simultaneous attempts (there is intentionally no global lockout, so strangers cannot lock the real admin out), refuses to run at all while the configured credentials fail the strength policy (`credential_problems`), executes zero SQL queries, and stores issued 256-bit random session tokens in memory strictly as `SHA-256` hashes with `30`-minute idle and `4`-hour absolute expiry (`POST /api/platform/admin/logout` revokes immediately). Emergency `ADMIN_TOKEN` headers are ignored unless at least `24` characters long.
+   - `attempt_login` performs constant-time `hmac.compare_digest` over `SHA-256` digests of both fields, applies a global slowdown (each failed attempt waits longer, up to 8 s) and a cap of `4` simultaneous attempts. It reads no IP or other visitor data, and there is intentionally no lockout, so a stranger can never lock the real admin out, refuses to run at all while the configured credentials fail the strength policy (`credential_problems`), executes zero SQL queries, and stores issued 256-bit random session tokens in memory strictly as `SHA-256` hashes with `30`-minute idle and `4`-hour absolute expiry (`POST /api/platform/admin/logout` revokes immediately). Emergency `ADMIN_TOKEN` headers are ignored unless at least `24` characters long.
    - `platform_db.admin_list_users` runs a single SQL query (eliminating N+1 per-user queries) to keep the auto-polling `/Admin456` console fast.
 
 ---

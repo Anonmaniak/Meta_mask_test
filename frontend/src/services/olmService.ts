@@ -7,7 +7,7 @@
  * - Canonical Ed25519 self-signed device key bundles (`account.sign(...)`).
  * - Outbound & Inbound Olm v2 (`SessionConfigVersion.V2`) Double Ratchet sessions
  *   across multiple recipient and sender devices, encrypted at rest in `e2eeVault.ts`.
- * - Deterministic 60-digit Safety Numbers + interactive Vodozemac SAS verification.
+ * - Deterministic 60-digit Safety Numbers for key verification.
  * - Peer identity-key change & device addition/revocation/reset detection.
  */
 
@@ -73,7 +73,29 @@ export interface E2EEPlaintextEnvelope {
     mime_type: string;
     size_bytes: number;
   }>;
+  /** Reply to an earlier message (WhatsApp / Instagram style). Encrypted like the rest of the message. */
+  reply_to?: {
+    message_id: string;
+    sender_user_id: string;
+    /** Short excerpt of the original, so the quote shows even if the original is not loaded. */
+    preview: string;
+    has_files?: boolean;
+  };
   sent_at: string;
+  /**
+   * Chat events, encrypted like everything else (see services/chatEvents.ts):
+   * 'message' (default) or 'reaction' | 'edit' | 'poll_vote', which point at `target_id`.
+   */
+  kind?: 'message' | 'reaction' | 'edit' | 'poll_vote';
+  target_id?: string;
+  /** reaction: the emoji ('' removes it) */
+  emoji?: string;
+  /** A poll message: question + 2..10 options */
+  poll?: { question: string; options: string[]; multi?: boolean };
+  /** poll_vote: chosen option numbers ([] withdraws) */
+  vote?: number[];
+  /** @mentioned member ids */
+  mentions?: string[];
 }
 
 let wasmInitPromise: Promise<void> | null = null;
@@ -135,6 +157,78 @@ const deviceInflightPromises = new Map<
   }>
 >();
 
+/** Generates a brand-new local Olm device identity; optionally persists it to the vault. */
+export async function generateFreshLocalOlmDevice(
+  userId: string,
+  deviceLabel = 'Browser E2EE Vault',
+  persist = false
+): Promise<{
+  record: StoredDeviceVaultRecord;
+  isNewDevice: boolean;
+  registrationBundle: DeviceBundleRegistrationData;
+}> {
+  await ensureVodozemacReady();
+  const pickleKey = crypto.getRandomValues(new Uint8Array(32));
+  const account = new Vodozemac.Account();
+  try {
+    const deviceId = generateRandomDeviceId();
+    account.generate_one_time_keys(DEFAULT_OTK_BATCH);
+    account.generate_fallback_key();
+
+    const otks = mapToRecord(account.one_time_keys);
+    const fallbackMap = mapToRecord(account.fallback_key);
+    const fallbackEntries = Object.entries(fallbackMap);
+    const fallbackKeyId = fallbackEntries.length > 0 ? fallbackEntries[0][0] : null;
+    const fallbackPublicKey = fallbackEntries.length > 0 ? fallbackEntries[0][1] : null;
+
+    const ed25519Key = account.ed25519_key;
+    const curve25519Key = account.curve25519_key;
+    const canonical = buildCanonicalDeviceBundleString(
+      userId,
+      deviceId,
+      ed25519Key,
+      curve25519Key,
+      fallbackKeyId,
+      fallbackPublicKey
+    );
+    const bundleSignature = account.sign(canonical);
+
+    const record: StoredDeviceVaultRecord = {
+      userId,
+      deviceId,
+      deviceLabel,
+      pickleKeyB64: bytesToBase64(pickleKey),
+      accountPickle: account.pickle(pickleKey),
+      ed25519Key,
+      curve25519Key,
+      fallbackKeyId,
+      fallbackPublicKey,
+      createdAt: new Date().toISOString(),
+    };
+    if (persist) {
+      await saveDeviceVaultRecord(record);
+    }
+
+    return {
+      record,
+      isNewDevice: true,
+      registrationBundle: {
+        device_id: deviceId,
+        device_label: deviceLabel,
+        ed25519_identity_key: ed25519Key,
+        curve25519_identity_key: curve25519Key,
+        fallback_key_id: fallbackKeyId,
+        fallback_public_key: fallbackPublicKey,
+        bundle_signature: bundleSignature,
+        one_time_keys: otks,
+      },
+    };
+  } finally {
+    pickleKey.fill(0);
+    account.free();
+  }
+}
+
 /**
  * Loads an existing device identity for `userId` from the encrypted vault, or
  * generates a brand-new on-device `Vodozemac.Account` using WebCrypto CSPRNG.
@@ -192,64 +286,7 @@ export async function getOrCreateLocalOlmDevice(
         }
       }
 
-      // Generate fresh cryptographic identity on-device
-      const pickleKey = crypto.getRandomValues(new Uint8Array(32));
-      const account = new Vodozemac.Account();
-      try {
-        const deviceId = generateRandomDeviceId();
-        account.generate_one_time_keys(DEFAULT_OTK_BATCH);
-        account.generate_fallback_key();
-
-        const otks = mapToRecord(account.one_time_keys);
-        const fallbackMap = mapToRecord(account.fallback_key);
-        const fallbackEntries = Object.entries(fallbackMap);
-        const fallbackKeyId = fallbackEntries.length > 0 ? fallbackEntries[0][0] : null;
-        const fallbackPublicKey = fallbackEntries.length > 0 ? fallbackEntries[0][1] : null;
-
-        const ed25519Key = account.ed25519_key;
-        const curve25519Key = account.curve25519_key;
-        const canonical = buildCanonicalDeviceBundleString(
-          userId,
-          deviceId,
-          ed25519Key,
-          curve25519Key,
-          fallbackKeyId,
-          fallbackPublicKey
-        );
-        const bundleSignature = account.sign(canonical);
-
-        const record: StoredDeviceVaultRecord = {
-          userId,
-          deviceId,
-          deviceLabel,
-          pickleKeyB64: bytesToBase64(pickleKey),
-          accountPickle: account.pickle(pickleKey),
-          ed25519Key,
-          curve25519Key,
-          fallbackKeyId,
-          fallbackPublicKey,
-          createdAt: new Date().toISOString(),
-        };
-        await saveDeviceVaultRecord(record);
-
-        return {
-          record,
-          isNewDevice: true,
-          registrationBundle: {
-            device_id: deviceId,
-            device_label: deviceLabel,
-            ed25519_identity_key: ed25519Key,
-            curve25519_identity_key: curve25519Key,
-            fallback_key_id: fallbackKeyId,
-            fallback_public_key: fallbackPublicKey,
-            bundle_signature: bundleSignature,
-            one_time_keys: otks,
-          },
-        };
-      } finally {
-        pickleKey.fill(0);
-        account.free();
-      }
+      return await generateFreshLocalOlmDevice(userId, deviceLabel, true);
     } finally {
       deviceInflightPromises.delete(userId);
     }
@@ -339,7 +376,7 @@ const olmVaultLocks = new Map<string, Promise<unknown>>();
 
 function withOlmVaultLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   const prev = olmVaultLocks.get(userId) ?? Promise.resolve();
-  const next = prev.catch(() => {}).then(fn);
+  const next = prev.catch(() => { }).then(fn);
   const cleanup = () => {
     if (olmVaultLocks.get(userId) === tracked) {
       olmVaultLocks.delete(userId);
@@ -641,7 +678,7 @@ export async function resetOlmSessionWithPeerDevice(
 }
 
 // ============================================================================
-// Key Verification: 60-Digit Safety Numbers & Vodozemac SAS
+// Key Verification: 60-Digit Safety Numbers
 // ============================================================================
 
 async function computeHalfFingerprintDigits(
@@ -699,71 +736,6 @@ export async function computeSafetyNumber(
     groups.push(combined.slice(i, i + 5));
   }
   return groups.join(' ');
-}
-
-/**
- * Interactive Short Authentication String (SAS) helper backed by Vodozemac's
- * Curve25519 + HKDF SAS implementation.
- */
-export async function performInteractiveSasCheck(
-  theirSasPublicKey: string,
-  contextInfo: string
-): Promise<{
-  ourPublicKey: string;
-  decimals: [number, number, number];
-  emojiIndices: number[];
-}> {
-  await ensureVodozemacReady();
-  const sas = new Vodozemac.Sas();
-  const ourPublicKey = sas.public_key;
-  const established = sas.diffie_hellman(theirSasPublicKey);
-  try {
-    const sasBytes = established.bytes(contextInfo);
-    try {
-      const decArr = Array.from(sasBytes.decimals);
-      const emojiArr = Array.from(sasBytes.emoji_indices);
-      return {
-        ourPublicKey,
-        decimals: [decArr[0] || 0, decArr[1] || 0, decArr[2] || 0],
-        emojiIndices: emojiArr,
-      };
-    } finally {
-      sasBytes.free();
-    }
-  } finally {
-    established.free();
-  }
-}
-
-export async function createSasInitiator(): Promise<{
-  publicKey: string;
-  finish: (
-    theirPublicKey: string,
-    contextInfo: string
-  ) => { decimals: [number, number, number]; emojiIndices: number[]; mac: (input: string) => string };
-}> {
-  await ensureVodozemacReady();
-  const sas = new Vodozemac.Sas();
-  const publicKey = sas.public_key;
-  return {
-    publicKey,
-    finish(theirPublicKey: string, contextInfo: string) {
-      const est = sas.diffie_hellman(theirPublicKey);
-      const sb = est.bytes(contextInfo);
-      const decArr = Array.from(sb.decimals);
-      const emojiArr = Array.from(sb.emoji_indices);
-      sb.free();
-      return {
-        decimals: [decArr[0] || 0, decArr[1] || 0, decArr[2] || 0],
-        emojiIndices: emojiArr,
-        mac(input: string) {
-          const tag = est.calculate_mac(input, contextInfo);
-          est.free();
-          return tag;
-        },
-      };
-    },
-  };
 }
 
 // ============================================================================

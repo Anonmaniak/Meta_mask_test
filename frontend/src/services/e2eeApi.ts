@@ -9,7 +9,7 @@
  */
 
 import { getBaseApiUrl } from './api.ts';
-import { resilientFetch, backoffDelay, onWake } from './resilientFetch.ts';
+import { resilientFetch, backoffDelay, onWake, reconnectJitterMs, serverFullDelayMs } from './resilientFetch.ts';
 import type { ClaimedPeerPrekeyBundle, PeerActiveDeviceDescriptor } from './olmService.ts';
 
 export interface E2EEAccountProfile {
@@ -17,7 +17,6 @@ export interface E2EEAccountProfile {
   username: string | null;
   display_name?: string | null;
   bio?: string | null;
-  avatar_url?: string | null;
   current_level?: number;
   highest_level?: number;
   qualifying_balance_wei?: string;
@@ -26,6 +25,7 @@ export interface E2EEAccountProfile {
   level_grace_expires_at?: string | null;
   account_status?: string;
   is_platform_paid?: boolean;
+  platform_paid_until?: string | null;
   show_online_presence?: boolean;
   send_read_receipts?: boolean;
   admin_role?: 'superadmin' | 'moderator' | null;
@@ -54,13 +54,18 @@ export interface E2EEDmCiphertextRecord {
   device_ciphertexts: Record<string, { message_type: number; ciphertext_b64: string }>;
   attachment_ids: string[];
   timestamp: string;
+  /** 'control' = an encrypted reaction / edit / poll vote (never shown as a bubble). */
+  event_kind?: 'message' | 'control';
+  /** Deleted for everyone: show "This message was deleted", never keep its text. */
+  deleted?: boolean;
+  /** Disappeared: hide it. A remaining copy only keeps this device's encrypted session working. */
+  expired?: boolean;
+  expires_at?: string | null;
 }
 
 export interface E2EEGroupAccessPolicy {
   description: string;
-  avatar_url: string | null;
   visibility: 'public' | 'invite_only';
-  min_level: number;
   min_eth_balance_wei: string;
   min_eth_balance_eth?: string;
   require_invitation: boolean;
@@ -96,23 +101,63 @@ export interface E2EEGroupRecord {
 
 const SESSION_STORAGE_KEY = 'zyphra_e2ee_token';
 const LOCAL_STORAGE_KEY = 'zyphra_e2ee_session_token';
+const SESSION_ID_KEY = 'zyphra_e2ee_session_id';
 
-function getStoredSessionToken(): string | null {
-  if (typeof sessionStorage !== 'undefined') {
-    const s = sessionStorage.getItem(SESSION_STORAGE_KEY);
-    if (s && s.trim()) return s.trim();
-  }
-  if (typeof localStorage !== 'undefined') {
-    const l = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (l && l.trim()) return l.trim();
+function readStoredValue(keys: string[]): string | null {
+  for (const key of keys) {
+    if (typeof sessionStorage !== 'undefined') {
+      const s = sessionStorage.getItem(key);
+      if (s && s.trim()) return s.trim();
+    }
+    if (typeof localStorage !== 'undefined') {
+      const l = localStorage.getItem(key);
+      if (l && l.trim()) return l.trim();
+    }
   }
   return null;
 }
 
+function getStoredSessionToken(): string | null {
+  return readStoredValue([SESSION_STORAGE_KEY, LOCAL_STORAGE_KEY]);
+}
+
+function getStoredSessionId(): string | null {
+  return readStoredValue([SESSION_ID_KEY]);
+}
+
 let inMemorySessionToken: string | null = getStoredSessionToken();
+let inMemorySessionId: string | null = getStoredSessionId();
+
+export function setE2EESessionId(sessionId: string | null): void {
+  inMemorySessionId = sessionId ? sessionId.trim() : null;
+  if (typeof sessionStorage !== 'undefined') {
+    if (inMemorySessionId) {
+      sessionStorage.setItem(SESSION_ID_KEY, inMemorySessionId);
+    } else {
+      sessionStorage.removeItem(SESSION_ID_KEY);
+    }
+  }
+  if (typeof localStorage !== 'undefined') {
+    if (inMemorySessionId) {
+      localStorage.setItem(SESSION_ID_KEY, inMemorySessionId);
+    } else {
+      localStorage.removeItem(SESSION_ID_KEY);
+    }
+  }
+}
+
+export function getE2EESessionId(): string | null {
+  if (!inMemorySessionId) {
+    inMemorySessionId = getStoredSessionId();
+  }
+  return inMemorySessionId;
+}
 
 export function setE2EESessionToken(token: string | null): void {
   inMemorySessionToken = token ? token.trim() : null;
+  if (!inMemorySessionToken) {
+    setE2EESessionId(null);
+  }
   if (typeof sessionStorage !== 'undefined') {
     if (inMemorySessionToken) {
       sessionStorage.setItem(SESSION_STORAGE_KEY, inMemorySessionToken);
@@ -137,7 +182,7 @@ export function getE2EESessionToken(): string | null {
 }
 
 export function hasStoredSessionToken(): boolean {
-  return Boolean(getE2EESessionToken());
+  return Boolean(getE2EESessionToken() || getE2EESessionId());
 }
 
 function buildAuthHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -148,6 +193,10 @@ function buildAuthHeaders(extra?: Record<string, string>): Record<string, string
   const token = getE2EESessionToken();
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
+  }
+  const sessionId = getE2EESessionId();
+  if (sessionId) {
+    headers['X-Session-Id'] = sessionId;
   }
   return headers;
 }
@@ -177,6 +226,13 @@ async function e2eeFetch<T>(path: string, init?: RequestInit): Promise<T> {
     );
     err.status = res.status;
     err.detail = json.detail;
+    // 402 = membership / subscription expired: the app re-checks and sends the member to Payments.
+    // A paid GROUP refusal (code 'group_payment_required' + group id) is handled by the caller, which
+    // opens that group's payment window instead, so do not also navigate away (same as platformFetch).
+    const isGroupPayment = Boolean(json.detail && json.detail.code === 'group_payment_required' && json.detail.group_id);
+    if (res.status === 402 && !isGroupPayment) {
+      window.dispatchEvent(new CustomEvent('zyphra:payment-required', { detail: { message: err.message } }));
+    }
     throw err;
   }
   return json as T;
@@ -204,6 +260,7 @@ export async function verifyE2EEAuthChallenge(
 ): Promise<{
   success: boolean;
   created_account: boolean;
+  session_id?: string;
   session_token: string;
   user: E2EEAccountProfile;
   devices: PeerActiveDeviceDescriptor[];
@@ -211,6 +268,7 @@ export async function verifyE2EEAuthChallenge(
   const res = await e2eeFetch<{
     success: boolean;
     created_account: boolean;
+    session_id?: string;
     session_token: string;
     user: E2EEAccountProfile;
     devices: PeerActiveDeviceDescriptor[];
@@ -223,6 +281,9 @@ export async function verifyE2EEAuthChallenge(
     }),
   });
   setE2EESessionToken(res.session_token);
+  if (res.session_id) {
+    setE2EESessionId(res.session_id);
+  }
   return res;
 }
 
@@ -235,14 +296,26 @@ export async function logoutE2EESession(): Promise<void> {
 }
 
 export async function fetchMyE2EEAccount(): Promise<{
+  session_id?: string | null;
+  session_expires_at?: string | null;
   user: E2EEAccountProfile;
   devices: PeerActiveDeviceDescriptor[];
 }> {
   const token = getE2EESessionToken();
-  if (!token) {
-    throw Object.assign(new Error('No active authentication session token'), { status: 401 });
+  const sessionId = getE2EESessionId();
+  if (!token && !sessionId) {
+    throw Object.assign(new Error('No active authentication session'), { status: 401 });
   }
-  return e2eeFetch('/me');
+  const res = await e2eeFetch<{
+    session_id?: string | null;
+    session_expires_at?: string | null;
+    user: E2EEAccountProfile;
+    devices: PeerActiveDeviceDescriptor[];
+  }>('/me');
+  if (res.session_id) {
+    setE2EESessionId(res.session_id);
+  }
+  return res;
 }
 
 export async function checkUsernameAvailability(username: string): Promise<{
@@ -270,17 +343,21 @@ export async function linkNewWalletToE2EEAccount(payload: {
   signature: string;
   make_primary: boolean;
   revoke_previous_wallets: boolean;
-}): Promise<{ success: boolean; user: E2EEAccountProfile; session_token?: string | null }> {
+}): Promise<{ success: boolean; user: E2EEAccountProfile; session_token?: string | null; session_id?: string | null }> {
   const res = await e2eeFetch<{
     success: boolean;
     user: E2EEAccountProfile;
     session_token?: string | null;
+    session_id?: string | null;
   }>('/account/wallets/link', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
   if (res.session_token) {
     setE2EESessionToken(res.session_token);
+  }
+  if (res.session_id) {
+    setE2EESessionId(res.session_id);
   }
   return res;
 }
@@ -336,9 +413,18 @@ export async function replenishE2EEPrekeys(
     }>;
   }
 ): Promise<{ available_counts: { one_time_prekeys: number; mls_key_packages: number } }> {
+  // Strip any extra caller fields (such as device_id from generateMoreOlmPrekeys) because
+  // PrekeyReplenishRequest enforces extra="forbid".
+  const body = {
+    fallback_key_id: payload.fallback_key_id,
+    fallback_public_key: payload.fallback_public_key,
+    bundle_signature: payload.bundle_signature,
+    one_time_keys: payload.one_time_keys,
+    mls_key_packages: payload.mls_key_packages,
+  };
   return e2eeFetch(`/devices/${encodeURIComponent(deviceId)}/prekeys`, {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
 }
 
@@ -394,7 +480,8 @@ export async function submitOlmDmCiphertext(payload: {
   protocol: string;
   device_ciphertexts: Record<string, { message_type: number; ciphertext_b64: string }>;
   attachment_ids?: string[];
-}): Promise<{ success: boolean; seq: number; conversation_id: string; timestamp: string }> {
+  event_kind?: 'message' | 'control';
+}): Promise<{ success: boolean; seq: number; conversation_id: string; timestamp: string; expires_at?: string | null }> {
   return e2eeFetch('/dm/messages', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -453,21 +540,72 @@ export async function createServerMlsGroup(payload: {
   ciphersuite: string;
   description?: string;
   visibility?: 'public' | 'invite_only';
-  min_level?: number;
   min_eth_balance_wei?: string;
   require_invitation?: boolean;
   /** Platform superadmin only: create the group as a paid group (price in USD). */
   is_paid?: boolean;
+  /** MONTHLY price in USD. */
   entry_fee_usd?: number;
+  /** YEARLY price in USD (0 / empty = automatic, 12 x monthly). */
+  entry_fee_yearly_usd?: number;
 }): Promise<{ success: boolean; group: E2EEGroupRecord }> {
   return e2eeFetch('/groups', {
     method: 'POST',
-    body: JSON.stringify({ ...payload, history_sharing_mode: 'none' }),
+    body: JSON.stringify(payload),
   });
 }
 
 export async function fetchMyServerMlsGroups(): Promise<{ groups: E2EEGroupRecord[] }> {
   return e2eeFetch('/groups');
+}
+
+/** Unread messages from other people, per private chat and group (notification badges). */
+export interface UnreadCounts {
+  dm: Array<{ conversation_id: string; peer_user_id: string; peer_username: string | null; unread: number; last_seq: number }>;
+  groups: Array<{ group_id: string; name: string; unread: number; last_seq: number }>;
+  total: number;
+}
+
+export async function fetchUnreadCounts(): Promise<UnreadCounts> {
+  return e2eeFetch('/unread');
+}
+
+/** Remembers how far I have read a private chat (by the other person's member ID) or a group. */
+export async function markConversationReadOnServer(
+  target: { scope_type: 'dm'; peer_user_id: string } | { scope_type: 'group'; group_id: string },
+  lastReadSeq: number
+): Promise<{ success: boolean }> {
+  return e2eeFetch('/read-markers', {
+    method: 'POST',
+    body: JSON.stringify({ ...target, last_read_seq: Math.max(0, Math.floor(lastReadSeq)) }),
+  });
+}
+
+/** A group an admin added me to, waiting for my Accept / Reject (like Instagram group invites). */
+export interface GroupInvitationRecord {
+  group_id: string;
+  group_name: string;
+  description: string;
+  is_paid: boolean;
+  member_count: number;
+  invited_by_user_id: string;
+  invited_by_username: string | null;
+  creator_username: string | null;
+  invited_at: string;
+}
+
+export async function fetchMyGroupInvitations(): Promise<{ invitations: GroupInvitationRecord[] }> {
+  return e2eeFetch('/groups/invitations');
+}
+
+export async function acceptGroupInvitation(
+  groupId: string
+): Promise<{ success: boolean; status: 'joined'; group: E2EEGroupRecord | null }> {
+  return e2eeFetch(`/groups/${encodeURIComponent(groupId)}/invitation/accept`, { method: 'POST' });
+}
+
+export async function declineGroupInvitation(groupId: string): Promise<{ success: boolean; status: 'declined' }> {
+  return e2eeFetch(`/groups/${encodeURIComponent(groupId)}/invitation/decline`, { method: 'POST' });
 }
 
 export async function fetchPendingServerMlsWelcomes(
@@ -533,6 +671,9 @@ export async function submitServerMlsGroupMessage(
     epoch: number;
     mls_ciphertext_b64: string;
     attachment_ids?: string[];
+    event_kind?: 'message' | 'control';
+    /** Who the message @mentions (ids only), so they get a "mentioned you" notice. */
+    mention_user_ids?: string[];
   }
 ): Promise<{ success: boolean; message: any }> {
   return e2eeFetch(`/groups/${encodeURIComponent(groupId)}/messages`, {
@@ -557,11 +698,100 @@ export async function fetchServerMlsGroupMessages(
     mls_ciphertext_b64: string;
     attachment_ids: string[];
     timestamp: string;
+    event_kind?: 'message' | 'control';
+    deleted?: boolean;
+    expires_at?: string | null;
   }>;
 }> {
   return e2eeFetch(
     `/groups/${encodeURIComponent(groupId)}/messages?after_seq=${afterSeq}&limit=${limit}`
   );
+}
+
+// ============================================================================
+// CHAT FEATURES: delete for everyone, typing, pins, disappearing messages,
+// announcement groups, mute / archive (message text never reaches the server)
+// ============================================================================
+
+export type ConversationRef =
+  | { scope_type: 'dm'; peer_user_id: string }
+  | { scope_type: 'group'; group_id: string };
+
+export interface PinnedMessageRef {
+  message_id: string;
+  pinned_by: string;
+  pinned_at: string | null;
+}
+
+export interface ConversationPref {
+  muted: boolean;
+  muted_until: string | null;
+  muted_forever: boolean;
+  archived: boolean;
+}
+
+export interface ConversationState {
+  scope_type: 'dm' | 'group';
+  pins: PinnedMessageRef[];
+  /** Seconds new messages live (0 = off). */
+  disappearing_ttl: number;
+  /** Announcement group: only admins post. */
+  admins_only: boolean;
+  /** May pin / set the timer (group admin, or either person in a private chat). */
+  can_manage: boolean;
+  pref: ConversationPref;
+}
+
+export type MuteChoice = 'off' | '8h' | '1w' | 'always';
+
+/** Delete for everyone (private chat: the sender within 48 hours). */
+export async function deleteDmMessageForEveryone(messageId: string): Promise<{ success: boolean }> {
+  return e2eeFetch(`/dm/messages/${encodeURIComponent(messageId)}/delete`, { method: 'POST' });
+}
+
+/** Delete for everyone (group: the sender within 48 hours, or a group admin). */
+export async function deleteGroupMessageForEveryone(groupId: string, messageId: string): Promise<{ success: boolean }> {
+  return e2eeFetch(`/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/delete`, { method: 'POST' });
+}
+
+export async function sendTypingSignal(ref: ConversationRef): Promise<{ success: boolean; sent: boolean }> {
+  return e2eeFetch('/typing', { method: 'POST', body: JSON.stringify(ref) });
+}
+
+export async function fetchConversationState(ref: ConversationRef): Promise<ConversationState> {
+  const qs = new URLSearchParams(ref as Record<string, string>);
+  return e2eeFetch(`/conversations/state?${qs.toString()}`);
+}
+
+export async function setMessagePinned(
+  ref: ConversationRef,
+  messageId: string,
+  pinned: boolean
+): Promise<{ success: boolean; pins: PinnedMessageRef[]; replaced: string | null }> {
+  return e2eeFetch('/pins', { method: 'POST', body: JSON.stringify({ ...ref, message_id: messageId, pinned }) });
+}
+
+export async function setDisappearingTimer(ref: ConversationRef, ttlSeconds: number): Promise<{ success: boolean; disappearing_ttl: number }> {
+  return e2eeFetch('/disappearing', { method: 'POST', body: JSON.stringify({ ...ref, ttl_seconds: ttlSeconds }) });
+}
+
+export async function setGroupAdminsOnly(groupId: string, adminsOnly: boolean): Promise<{ success: boolean; admins_only: boolean }> {
+  return e2eeFetch(`/groups/${encodeURIComponent(groupId)}/settings`, {
+    method: 'POST',
+    body: JSON.stringify({ admins_only_posting: adminsOnly }),
+  });
+}
+
+/** Keys: 'dm:<peer_user_id>', 'group:<group_id>', 'room'. Only muted / archived chats are listed. */
+export async function fetchConversationPrefs(): Promise<{ prefs: Record<string, ConversationPref> }> {
+  return e2eeFetch('/conversation-prefs');
+}
+
+export async function setConversationPref(
+  scopeKey: string,
+  change: { mute?: MuteChoice; archived?: boolean }
+): Promise<{ success: boolean; scope_key: string; pref: ConversationPref }> {
+  return e2eeFetch('/conversation-prefs', { method: 'POST', body: JSON.stringify({ scope_key: scopeKey, ...change }) });
 }
 
 export async function uploadEncryptedAttachmentBlob(payload: {
@@ -586,6 +816,20 @@ export async function downloadEncryptedAttachmentBlob(attachmentId: string): Pro
   };
 }> {
   return e2eeFetch(`/attachments/${encodeURIComponent(attachmentId)}`);
+}
+
+/** The uploader removes a file they sent: the encrypted blob is deleted and later downloads answer 410. */
+export async function revokeEncryptedAttachment(
+  attachmentId: string
+): Promise<{ success: boolean; attachment_id: string; revoked: boolean }> {
+  return e2eeFetch(`/attachments/${encodeURIComponent(attachmentId)}/revoke`, { method: 'POST' });
+}
+
+/** How many one-time prekeys and MLS KeyPackages this device still has on the server. */
+export async function fetchDevicePrekeyCounts(
+  deviceId: string
+): Promise<{ one_time_prekeys: number; mls_key_packages: number }> {
+  return e2eeFetch(`/devices/${encodeURIComponent(deviceId)}/prekey-count`);
 }
 
 export async function fetchIdentitySecurityEvents(
@@ -625,10 +869,10 @@ export function connectE2EEWebSocket(onEvent: (evt: Record<string, any>) => void
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   let reconnectAttempts = 0;
-  const scheduleReconnect = () => {
+  const scheduleReconnect = (delayMs?: number) => {
     if (closedByCaller) return;
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(openSocket, backoffDelay(reconnectAttempts++, 15000));
+    reconnectTimer = setTimeout(openSocket, delayMs ?? backoffDelay(reconnectAttempts++, 15000) + reconnectJitterMs());
   };
   // Laptop woke up / network is back / tab visible again: reconnect right away.
   const stopWake = onWake(() => {
@@ -679,7 +923,8 @@ export function connectE2EEWebSocket(onEvent: (evt: Record<string, any>) => void
       };
       ws.onclose = (ev) => {
         if (pingInterval) clearInterval(pingInterval);
-        if (ev.code !== 4401) scheduleReconnect();
+        if (ev.code === 4503) scheduleReconnect(serverFullDelayMs());
+        else if (ev.code !== 4401) scheduleReconnect();
       };
     } catch {
       scheduleReconnect();
@@ -695,10 +940,28 @@ export function connectE2EEWebSocket(onEvent: (evt: Record<string, any>) => void
       if (pingInterval) clearInterval(pingInterval);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) {
-        try {
-          ws.close();
-        } catch {
-          // ignore
+        const target = ws;
+        ws = null;
+        target.onmessage = null;
+        target.onclose = null;
+        target.onerror = null;
+        if (target.readyState === WebSocket.CONNECTING) {
+          target.onopen = () => {
+            try {
+              target.close();
+            } catch {
+              // ignore
+            }
+          };
+        } else {
+          target.onopen = null;
+          if (target.readyState === WebSocket.OPEN) {
+            try {
+              target.close();
+            } catch {
+              // ignore
+            }
+          }
         }
       }
     },

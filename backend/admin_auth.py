@@ -9,9 +9,10 @@ Security properties:
 - Credential strength policy (fail closed): login stays DISABLED while the configured ID/password are weak
   (see `credential_problems`). A weak password is the easiest way into an admin console, so the server refuses
   to accept it instead of merely warning.
-- Brute-force protection: per-client-IP failure counters with temporary lockout, a fixed delay on every failed
-  attempt, and a cap on simultaneous login attempts. There is deliberately NO global lockout: a global lockout
-  would let any stranger lock the real admin out just by failing logins on purpose.
+- Brute-force protection WITHOUT any visitor data: the server never reads or stores client IPs. Every failed
+  attempt is delayed, the delay grows while failures keep coming (a global slowdown, never a lockout), and only a
+  few attempts may be evaluated at the same time. There is deliberately NO lockout: a lockout would let any
+  stranger lock the real admin out just by failing logins on purpose.
   Generic error message only ("Invalid credentials").
 - Sessions are 256-bit random bearer tokens held server-side in memory as SHA-256 hashes, with an
   absolute expiry and an idle timeout; logout revokes immediately. No SQL is used by this module.
@@ -34,9 +35,9 @@ SESSION_ABSOLUTE_TTL_SEC = 4 * 3600
 SESSION_IDLE_TTL_SEC = 30 * 60
 MAX_ACTIVE_SESSIONS = 20
 
-MAX_FAILURES_PER_IP = 5
-IP_LOCKOUT_SEC = 15 * 60
-IP_FAILURE_WINDOW_SEC = 15 * 60
+FAILURE_WINDOW_SEC = 15 * 60
+SLOWDOWN_AFTER_FAILURES = 5        # failures (any source) inside the window before the delay starts growing
+MAX_ATTEMPT_DELAY_SEC = 8.0
 FAILED_ATTEMPT_DELAY_SEC = 0.6
 # At most this many login attempts are evaluated at the same time. Excess attempts get an immediate 429, so
 # an attacker spraying logins can neither lock the real admin out nor tie up the server's worker threads.
@@ -55,18 +56,13 @@ _COMMON_FRAGMENTS = (
 _lock = threading.Lock()
 # token_hash -> (created_monotonic, last_seen_monotonic)
 _sessions: Dict[str, Tuple[float, float]] = {}
-# ip_hash -> list of failure timestamps
-_ip_failures: Dict[str, list] = {}
-_ip_locked_until: Dict[str, float] = {}
+# timestamps of recent failed logins (global; contains no client information at all)
+_recent_failures: List[float] = []
 _attempt_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ATTEMPTS)
 
 
 def _digest(value: str) -> bytes:
     return hashlib.sha256(value.encode("utf-8")).digest()
-
-
-def _ip_key(client_ip: str) -> str:
-    return hashlib.sha256(("admin-login:" + (client_ip or "unknown")).encode("utf-8")).hexdigest()
 
 
 def _configured_raw() -> Tuple[str, str]:
@@ -134,8 +130,14 @@ class LoginError(Exception):
         self.retry_after = retry_after
 
 
-def attempt_login(login_id: str, password: str, client_ip: str) -> str:
-    """Return a new session token or raise LoginError."""
+def _failure_delay(now: float) -> float:
+    """Delay for the next failed attempt: base delay, doubling for each failure beyond the threshold."""
+    over = max(0, len(_recent_failures) - SLOWDOWN_AFTER_FAILURES)
+    return min(FAILED_ATTEMPT_DELAY_SEC * (2 ** min(over, 10)), MAX_ATTEMPT_DELAY_SEC)
+
+
+def attempt_login(login_id: str, password: str) -> str:
+    """Return a new session token or raise LoginError. Takes NO client information (no IP)."""
     raw_id, raw_pw = _configured_raw()
     if not raw_id or not raw_pw:
         raise LoginError(503, "Admin login is not configured on the server")
@@ -146,61 +148,36 @@ def attempt_login(login_id: str, password: str, client_ip: str) -> str:
             "See the server log for what to change.",
         )
 
-    now = time.monotonic()
-    ip_key = _ip_key(client_ip)
-
-    with _lock:
-        if now < _ip_locked_until.get(ip_key, 0.0):
-            raise LoginError(
-                429, "Too many attempts. Try again later.", int(_ip_locked_until[ip_key] - now) + 1
-            )
-
     # Cap simultaneous attempts (protects worker threads; cannot lock the real admin out).
     if not _attempt_slots.acquire(blocking=False):
         raise LoginError(429, "Server is busy. Try again in a few seconds.", 3)
     try:
         ok = _check_credentials(login_id or "", password or "")
         if not ok:
-            time.sleep(FAILED_ATTEMPT_DELAY_SEC)
+            with _lock:
+                now = time.monotonic()
+                _recent_failures[:] = [t for t in _recent_failures if now - t < FAILURE_WINDOW_SEC]
+                _recent_failures.append(now)
+                delay = _failure_delay(now)
+            time.sleep(delay)
     finally:
         _attempt_slots.release()
 
     if not ok:
-        with _lock:
-            now = time.monotonic()
-            hits = [t for t in _ip_failures.get(ip_key, []) if now - t < IP_FAILURE_WINDOW_SEC]
-            hits.append(now)
-            _ip_failures[ip_key] = hits
-            locked = len(hits) >= MAX_FAILURES_PER_IP
-            if locked:
-                _ip_locked_until[ip_key] = now + IP_LOCKOUT_SEC
-                _ip_failures[ip_key] = []
-
-            # Bound memory used by tracking tables safely without wiping active lockouts.
-            if len(_ip_failures) > 5000:
-                expired_f = [k for k, v in _ip_failures.items() if not v or (now - v[-1] >= IP_FAILURE_WINDOW_SEC)]
-                for k in expired_f:
-                    _ip_failures.pop(k, None)
-            if len(_ip_locked_until) > 5000:
-                expired_l = [k for k, v in _ip_locked_until.items() if now >= v]
-                for k in expired_l:
-                    _ip_locked_until.pop(k, None)
-        # Log a short, non-reversible client marker (never the credentials) so attacks are visible in the logs.
-        logger.warning("admin login FAILED client=%s%s", ip_key[:8], " (locked out)" if locked else "")
+        logger.warning("admin login FAILED")  # nothing about the caller is logged
         raise LoginError(401, "Invalid credentials")
 
     token = secrets.token_urlsafe(48)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with _lock:
         now = time.monotonic()
-        _ip_failures.pop(ip_key, None)
-        _ip_locked_until.pop(ip_key, None)
+        _recent_failures.clear()
         _purge_expired(now)
         if len(_sessions) >= MAX_ACTIVE_SESSIONS:
             oldest = min(_sessions, key=lambda h: _sessions[h][0])
             _sessions.pop(oldest, None)
         _sessions[token_hash] = (now, now)
-    logger.info("admin login OK client=%s", ip_key[:8])
+    logger.info("admin login OK")
     return token
 
 
@@ -229,5 +206,4 @@ def revoke_session(token: Optional[str]) -> None:
 def _reset_for_tests() -> None:
     with _lock:
         _sessions.clear()
-        _ip_failures.clear()
-        _ip_locked_until.clear()
+        _recent_failures.clear()

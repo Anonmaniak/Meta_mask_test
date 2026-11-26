@@ -8,7 +8,7 @@ Covers Master Development Prompt Sections 3–16:
 3. Configurable Wallet-Based Levels (7+) via server-side Ethereum RPC snapshots + grace-period downgrades.
 4. Open Public Chat (guest & verified modes, edit/delete, malicious URI guard, duplicate guard, WS, moderation).
 5. Username search, privacy toggles, server-enforced user blocking, optional read receipts, and abuse reports.
-6. Group access policies (`min_level` & `min_eth_balance_wei`), discovery, invite links, join requests, and leave-group.
+6. Group access policies (`min_eth_balance_wei`, public/invite-only, paid/free), discovery, join requests, and leave-group (invite links answer 410).
 7. RBAC Admin (`superadmin` vs `moderator`), account mute/suspend/restore, and immutable audit logs.
 """
 
@@ -369,7 +369,14 @@ class TestChatPlatformFeatures(unittest.TestCase):
             self.assertIn("active_live", welcome["online"])
             ws_mem.send_json({"type": "presence_status", "wallet_address": alice_wallet})
             ws_mem.send_json({"type": "ping"})
-            seen = [ws_mem.receive_json() for _ in range(2)]
+            # Presence updates may arrive before the pong (order depends on the server's event loop):
+            # read frames until the pong shows up, with a small cap so a missing pong still fails.
+            seen = []
+            for _ in range(6):
+                frame = ws_mem.receive_json()
+                seen.append(frame)
+                if frame.get("type") == "pong":
+                    break
             self.assertTrue(any(f["type"] == "pong" for f in seen), seen)
 
     # -------------------------------------------------------------------------
@@ -507,14 +514,17 @@ class TestChatPlatformFeatures(unittest.TestCase):
         self.assertEqual(g_res.status_code, 200, g_res.text)
         gid = g_res.json()["group"]["group_id"]
 
-        # Create invite link
-        inv = self.client.post(
-            f"/api/platform/groups/{gid}/invites",
-            headers=self._auth_headers(c_tok),
-            json={"expires_hours": 24, "max_uses": 5},
-        ).json()["invite"]
+        # Invite links were removed (410): admins add people, who Accept or Reject.
+        self.assertEqual(
+            self.client.post(
+                f"/api/platform/groups/{gid}/invites",
+                headers=self._auth_headers(c_tok),
+                json={"expires_hours": 24, "max_uses": 5},
+            ).status_code,
+            410,
+        )
 
-        # Level 7 candidate is rejected on discovery eligibility, invite link join, AND MLS add commit!
+        # Level 7 candidate is rejected on discovery eligibility, join request, AND MLS add commit!
         disc = self.client.get(
             "/api/platform/groups/discover", headers=self._auth_headers(u_tok)
         ).json()["groups"]
@@ -523,7 +533,7 @@ class TestChatPlatformFeatures(unittest.TestCase):
 
         self.assertEqual(
             self.client.post(
-                f"/api/platform/groups/join-by-invite/{inv['invite_code']}",
+                f"/api/platform/groups/{gid}/join-request",
                 headers=self._auth_headers(u_tok),
             ).status_code,
             403,
@@ -543,7 +553,7 @@ class TestChatPlatformFeatures(unittest.TestCase):
             403,
         )
 
-        # Candidate verifies 1.0 ETH -> reaches Level 8 -> invite join & MLS add commit succeed!
+        # Candidate verifies 1.0 ETH -> reaches Level 8 -> join request & MLS add commit succeed!
         platform_db.record_verified_balance_snapshot(
             user_id=u_uid,
             wallet_address=candidate["user"]["primary_wallet"],
@@ -552,7 +562,7 @@ class TestChatPlatformFeatures(unittest.TestCase):
             block_number=19500010,
         )
         j_ok = self.client.post(
-            f"/api/platform/groups/join-by-invite/{inv['invite_code']}",
+            f"/api/platform/groups/{gid}/join-request",
             headers=self._auth_headers(u_tok),
         )
         self.assertEqual(j_ok.status_code, 200, j_ok.text)

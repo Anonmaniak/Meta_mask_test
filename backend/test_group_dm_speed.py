@@ -172,7 +172,7 @@ class GroupDmSpeedTests(unittest.TestCase):
     # ------------------------------------------------------------------ groups
     def test_group_create_response_matches_a_fresh_read(self):
         a = self._user()
-        created = self._group(a, description="hello", visibility="public", min_level=7)
+        created = self._group(a, description="hello", visibility="public")
         auth_cache.invalidate_all()
         fetched = self.client.get(f"/api/e2ee/groups/{created['group_id']}", headers=a["h"]).json()["group"]
         self.assertEqual(created, fetched)
@@ -206,9 +206,7 @@ class GroupDmSpeedTests(unittest.TestCase):
         platform_db.upsert_group_access_policy(
             group_id=gid,
             description="",
-            avatar_url=None,
             visibility="invite_only",
-            min_level=7,
             min_eth_balance_wei="999999999999999999999",
             require_invitation=True,
             actor_user_id=a["id"],

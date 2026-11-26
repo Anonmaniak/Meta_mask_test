@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { LifeBuoy, Plus, Loader2, ArrowLeft } from 'lucide-react';
+import { friendlyError } from '../services/friendlyError';
+import { LifeBuoy, Plus, ArrowLeft } from 'lucide-react';
+import { ChatMessagesSkeleton, ListRowsSkeleton } from './Skeleton';
 import {
   createSupportThread,
   fetchMySupportThreads,
@@ -51,7 +53,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
       onUnreadChange?.(res.unread_total);
       setError(null);
     } catch (err: any) {
-      if (aliveRef.current) setError(err?.message || 'Could not load your conversations.');
+      if (aliveRef.current) setError(friendlyError(err, 'Could not load your conversations.'));
     } finally {
       if (aliveRef.current) setLoading(false);
     }
@@ -64,7 +66,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
       setSelected(res.thread);
       setMessages(res.messages);
     } catch (err: any) {
-      if (aliveRef.current) setError(err?.message || 'Could not open this conversation.');
+      if (aliveRef.current) setError(friendlyError(err, 'Could not open this conversation.'));
     }
   }, []);
 
@@ -79,6 +81,16 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
       clearInterval(t);
     };
   }, [loadList]);
+
+  // An admin replied (pushed live over the socket): refresh the list and the open conversation now.
+  useEffect(() => {
+    const onLiveReply = () => {
+      void loadList();
+      if (selectedId) void loadThread(selectedId);
+    };
+    window.addEventListener('zyphra:support-reply', onLiveReply);
+    return () => window.removeEventListener('zyphra:support-reply', onLiveReply);
+  }, [selectedId, loadList, loadThread]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -102,7 +114,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
       await loadList();
       setSelectedId(res.thread.thread_id);
     } catch (err: any) {
-      setError(err?.message || 'Could not send your message.');
+      setError(friendlyError(err, 'Could not send your message.'));
     } finally {
       setBusy(false);
     }
@@ -114,24 +126,24 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
     <div className="deck-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div className="deck-title" style={{ justifyContent: 'space-between' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <LifeBuoy size={18} /> Talk to admin
+          <LifeBuoy size={18} /> Your concierge
         </span>
         <button
           type="button"
           className="btn-solid"
-          style={{ padding: '6px 12px', fontSize: '0.78rem', borderRadius: 9999 }}
+          style={{ padding: '9px 18px' }}
           onClick={() => {
             setComposing(true);
             setSelectedId(null);
             setError(null);
           }}
         >
-          <Plus size={14} /> New message
+          <Plus size={16} /> New message
         </button>
       </div>
 
       {error && (
-        <div role="alert" style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+        <div role="alert" style={{ fontSize: '0.9rem', fontWeight: 600 }}>
           {error}
         </div>
       )}
@@ -147,13 +159,11 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
         {/* Conversation list */}
         <div style={{ display: showThread ? undefined : 'block' }}>
           {loading ? (
-            <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-              <Loader2 size={14} className="wg__spin" /> Loading...
-            </div>
+            <ListRowsSkeleton count={3} compact />
           ) : threads.length === 0 && !composing ? (
             <div style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', lineHeight: 1.5 }}>
-              No conversations yet. Write to the admin team about payments, access, groups, or anything else. Press
-              <strong> New message</strong> to start.
+              No conversations yet. Write to our team about payments, access, groups or anything else. Choose
+              <strong> New message</strong> to begin.
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -192,7 +202,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
                             display: 'inline-flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            fontSize: '0.7rem',
+                            fontSize: '0.9rem',
                             fontWeight: 700,
                             background: 'var(--bg-pill-active)',
                             color: 'var(--text-inverse)',
@@ -202,7 +212,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
                         </span>
                       )}
                     </div>
-                    <div style={{ marginTop: 3, fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    <div style={{ marginTop: 3, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
                       {t.status === 'closed' ? 'Closed' : t.last_sender_role === 'admin' ? 'Admin replied' : 'Waiting for admin'}{' '}
                       · {formatSupportTime(t.last_message_at)}
                     </div>
@@ -217,7 +227,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
         <div>
           {composing ? (
             <form onSubmit={startConversation} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+              <label style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
                 What is this about?
                 <input
                   type="text"
@@ -229,7 +239,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
                   style={{ ...inputStyle, marginTop: 5 }}
                 />
               </label>
-              <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+              <label style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
                 Your message
                 <textarea
                   value={firstMessage}
@@ -259,6 +269,8 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
                 </button>
               </div>
             </form>
+          ) : selectedId && (!selected || selected.thread_id !== selectedId) ? (
+            <ChatMessagesSkeleton count={3} />
           ) : selectedId && selected ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -273,7 +285,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
                 </button>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{selected.subject}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                  <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
                     {selected.status === 'closed'
                       ? 'Closed. Reply to reopen it.'
                       : 'Open. The admin team will reply here.'}

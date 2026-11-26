@@ -60,6 +60,7 @@ class TestPaidMembershipAndGroups(unittest.TestCase):
         platform_db.update_platform_settings(
             {
                 "authorized_payment_destination": AUTH_DESTINATION,
+                "default_balance_chain_id": 1,  # payments are accepted only on the active network
                 "platform_entry_fee_usd": 0,  # membership free by default; paywall tests switch it on
                 "use_live_eth_price": False,  # never hit the network in tests
                 "eth_usd_price": 2500.0,
@@ -303,8 +304,13 @@ class TestPaidMembershipAndGroups(unittest.TestCase):
         # Not admitted before paying; join request is refused
         meets, reason = platform_db.verify_user_meets_group_policy(group_id, cand_uid)
         self.assertFalse(meets)
-        self.assertIn("entry fee", reason)
-        self.assertEqual(self.client.post(f"/api/platform/groups/{group_id}/join-request", headers=cand_h).status_code, 403)
+        self.assertIn("subscription", reason)
+        self.assertIn("$20.00/month", reason)
+        self.assertIn("$240.00/year", reason)  # yearly defaults to 12 x monthly
+        refused = self.client.post(f"/api/platform/groups/{group_id}/join-request", headers=cand_h)
+        self.assertEqual(refused.status_code, 402)  # 402 + group id/name so the app opens the payment window
+        self.assertEqual(refused.json()["detail"]["code"], "group_payment_required")
+        self.assertEqual(refused.json()["detail"]["group_id"], group_id)
 
         # Underpayment is rejected for the group too
         with patch("eth_rpc.verify_onchain_payment_transaction", return_value=self._tx_result(cand_acc.address, "0.002")):
@@ -331,12 +337,12 @@ class TestPaidMembershipAndGroups(unittest.TestCase):
                 "transaction_reference": "0x" + "8c" * 32, "chain_id": 1, "purpose": "group_entry", "group_id": free_id})
         self.assertEqual(r.status_code, 400)
 
-    def test_03b_only_superadmin_changes_price_and_members_are_grandfathered(self):
+    def test_03b_only_superadmin_changes_price_and_membership_alone_is_not_enough(self):
         self._enable_paywall(usd=0, rate=2000.0)
         _, admin_data, admin_h, admin_dev = self._make_admin()
         g = self._create_group(admin_h, admin_dev, visibility="public")  # starts FREE
         group_id = g.json()["group"]["group_id"]
-        policy = {"description": "x", "visibility": "public", "min_level": 7, "require_invitation": False}
+        policy = {"description": "x", "visibility": "public", "require_invitation": False}
 
         # A regular group owner (not platform admin) cannot make their own group paid
         owner_acc = Account.create()
@@ -366,11 +372,12 @@ class TestPaidMembershipAndGroups(unittest.TestCase):
         admin_uid = admin_data["user"]["user_id"]
         self.assertTrue(platform_db.verify_user_meets_group_policy(group_id, admin_uid)[0])
 
-        # Someone who was already a member when the group turned paid keeps their place
+        # Paid groups are a subscription: being a member is NOT enough, an active subscription is required.
+        # (Existing paying members are given 30 days by the one-time migration 010.)
         old_member = self._siwe_login(Account.create())["user"]["user_id"]
         self.assertFalse(platform_db.verify_user_meets_group_policy(group_id, old_member)[0])
         with patch("e2ee_db.is_active_group_member", return_value=True):
-            self.assertTrue(platform_db.verify_user_meets_group_policy(group_id, old_member)[0])
+            self.assertFalse(platform_db.verify_user_meets_group_policy(group_id, old_member)[0])
 
         # Paid with no price is rejected; making it free again works
         bad = self.client.put(f"/api/platform/groups/{group_id}/policy", headers=admin_h,

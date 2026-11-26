@@ -11,7 +11,7 @@ import uuid
 import json
 import secrets
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
 import chat_db
@@ -147,6 +147,7 @@ def ensure_e2ee_tables() -> None:
                         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
                     );
                     CREATE INDEX IF NOT EXISTS idx_sessions_user ON chat_auth_sessions(user_id);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON chat_auth_sessions(expires_at);
 
                     CREATE TABLE IF NOT EXISTS chat_devices (
                         device_id VARCHAR(64) PRIMARY KEY,
@@ -296,6 +297,14 @@ def ensure_e2ee_tables() -> None:
                         created_bucket VARCHAR(40) NOT NULL
                     );
                 """)
+                # Chat features (reactions/edits as encrypted events, delete for everyone, disappearing messages):
+                # event_kind 'message' | 'control' (control = an encrypted reaction / edit / poll vote: never unread,
+                # never notified); deleted_at = deleted for everyone; expires_at = disappearing-message deadline.
+                for _tbl in ("chat_dm_messages", "chat_group_messages"):
+                    cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS event_kind VARCHAR(16) NOT NULL DEFAULT 'message';")
+                    cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITH TIME ZONE;")
+                    cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;")
+                    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{_tbl}_expires ON {_tbl}(expires_at) WHERE expires_at IS NOT NULL;")
             conn.commit()
             _e2ee_tables_initialized = True
         finally:
@@ -351,6 +360,7 @@ def ensure_e2ee_tables() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON chat_auth_sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_expires ON chat_auth_sessions(expires_at);
 
             CREATE TABLE IF NOT EXISTS chat_devices (
                 device_id TEXT PRIMARY KEY,
@@ -500,6 +510,12 @@ def ensure_e2ee_tables() -> None:
                 created_bucket TEXT NOT NULL
             );
         """)
+        for _tbl in ("chat_dm_messages", "chat_group_messages"):
+            for _col in ("event_kind TEXT NOT NULL DEFAULT 'message'", "deleted_at TEXT", "expires_at TEXT"):
+                try:
+                    cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col}")
+                except Exception:
+                    pass  # already there
         chat_db._sqlite_conn.commit()
         _e2ee_tables_initialized = True
 
@@ -1042,6 +1058,99 @@ def link_wallet_to_user(
     return get_user_by_id(user_id)  # type: ignore[return-value]
 
 
+# ---- Session housekeeping -------------------------------------------------------------------------
+# Every sign-in adds a session row. Without limits the table only grew, and a person who signed in
+# again and again without signing out kept every old token valid for 24 hours.
+MAX_ACTIVE_SESSIONS_PER_USER = 10   # signing in beyond this signs out the OLDEST sessions
+SESSION_KEEP_DAYS = 7               # expired / signed-out sessions are deleted after this many days
+_SESSION_PURGE_EVERY_SECS = 3600.0
+_last_session_purge = 0.0
+
+
+def _cap_user_sessions(user_id: str, max_active: int = MAX_ACTIVE_SESSIONS_PER_USER) -> None:
+    """Signs out this user's oldest live sessions beyond `max_active` (the newest ones are kept)."""
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE chat_auth_sessions SET revoked = TRUE
+                    WHERE session_id IN (
+                        SELECT session_id FROM chat_auth_sessions
+                        WHERE user_id = %s AND revoked = FALSE AND expires_at > CURRENT_TIMESTAMP
+                        ORDER BY created_at DESC, session_id DESC
+                        OFFSET %s
+                    );
+                    """,
+                    (user_id, max_active),
+                )
+            conn.commit()
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(
+                """
+                UPDATE chat_auth_sessions SET revoked = 1
+                WHERE session_id IN (
+                    SELECT session_id FROM chat_auth_sessions
+                    WHERE user_id = ? AND revoked = 0 AND expires_at > ?
+                    ORDER BY created_at DESC, session_id DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (user_id, now_iso(), max_active),
+            )
+            chat_db._sqlite_conn.commit()
+
+
+def purge_stale_auth_sessions(keep_days: int = SESSION_KEEP_DAYS) -> int:
+    """Deletes sessions that expired more than `keep_days` ago, and signed-out ones older than that.
+    Returns how many rows were removed."""
+    _ready()
+    from datetime import timedelta as _td
+
+    cutoff = (now_utc() - _td(days=keep_days)).isoformat()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM chat_auth_sessions WHERE expires_at < %s OR (revoked = TRUE AND created_at < %s);",
+                    (cutoff, cutoff),
+                )
+                removed = cur.rowcount
+            conn.commit()
+            return int(removed or 0)
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute(
+            "DELETE FROM chat_auth_sessions WHERE expires_at < ? OR (revoked = 1 AND created_at < ?)",
+            (cutoff, cutoff),
+        )
+        chat_db._sqlite_conn.commit()
+        return int(cur.rowcount or 0)
+
+
+def _housekeep_sessions_after_login(user_id: str) -> None:
+    """Runs after every sign-in. Never lets a housekeeping problem block a login."""
+    import logging
+    import time as _time
+
+    global _last_session_purge
+    try:
+        _cap_user_sessions(user_id)
+        if _time.monotonic() - _last_session_purge > _SESSION_PURGE_EVERY_SECS:
+            _last_session_purge = _time.monotonic()
+            purge_stale_auth_sessions()
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning("Session housekeeping skipped: %s", exc)
+
+
 def create_auth_session(user_id: str, wallet_address: str, expires_at: str) -> Tuple[str, Dict[str, Any]]:
     """Creates an opaque random session token; stores only its SHA-256 hash."""
     _ready()
@@ -1078,6 +1187,7 @@ def create_auth_session(user_id: str, wallet_address: str, expires_at: str) -> T
             )
             chat_db._sqlite_conn.commit()
 
+    _housekeep_sessions_after_login(user_id)
     return raw_token, {
         "session_id": session_id,
         "user_id": user_id,
@@ -2055,9 +2165,12 @@ def insert_dm_ciphertext(
     protocol: str,
     device_ciphertexts: Dict[str, Dict[str, Any]],
     attachment_ids: Optional[List[str]] = None,
+    event_kind: str = "message",
+    expires_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     _ready()
     assert_zero_plaintext(device_ciphertexts, "device_ciphertexts")
+    event_kind = _clean_event_kind(event_kind)
     conv_id = make_dm_conversation_id(sender_user_id, recipient_user_id)
     bucket = coarse_timestamp_iso()
     att_list = attachment_ids or []
@@ -2074,8 +2187,9 @@ def insert_dm_ciphertext(
                     INSERT INTO chat_dm_messages (
                         message_id, conversation_id, sender_user_id, sender_device_id,
                         sender_curve25519_key, sender_ed25519_key, recipient_user_id,
-                        protocol, ciphertexts_json, attachment_ids_json, created_bucket
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        protocol, ciphertexts_json, attachment_ids_json, created_bucket,
+                        event_kind, expires_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (message_id) DO NOTHING
                     RETURNING seq;
                     """,
@@ -2083,6 +2197,7 @@ def insert_dm_ciphertext(
                         message_id, conv_id, sender_user_id, sender_device_id,
                         sender_curve25519_key, sender_ed25519_key, recipient_user_id,
                         protocol, json.dumps(device_ciphertexts), json.dumps(att_list), bucket,
+                        event_kind, expires_at,
                     ),
                 )
                 row = cur.fetchone()
@@ -2103,13 +2218,15 @@ def insert_dm_ciphertext(
                 INSERT OR IGNORE INTO chat_dm_messages (
                     message_id, conversation_id, sender_user_id, sender_device_id,
                     sender_curve25519_key, sender_ed25519_key, recipient_user_id,
-                    protocol, ciphertexts_json, attachment_ids_json, created_bucket
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    protocol, ciphertexts_json, attachment_ids_json, created_bucket,
+                    event_kind, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id, conv_id, sender_user_id, sender_device_id,
                     sender_curve25519_key, sender_ed25519_key, recipient_user_id,
                     protocol, json.dumps(device_ciphertexts), json.dumps(att_list), bucket,
+                    event_kind, expires_at,
                 ),
             )
             if cur.rowcount == 0:
@@ -2131,6 +2248,8 @@ def insert_dm_ciphertext(
         "device_ciphertexts": device_ciphertexts,
         "attachment_ids": att_list,
         "timestamp": bucket,
+        "event_kind": event_kind,
+        "expires_at": expires_at,
     }
 
 
@@ -2158,7 +2277,8 @@ def list_dm_ciphertexts(
                     """
                     SELECT seq, message_id, conversation_id, sender_user_id, sender_device_id,
                            sender_curve25519_key, sender_ed25519_key, recipient_user_id,
-                           protocol, ciphertexts_json, attachment_ids_json, created_bucket
+                           protocol, ciphertexts_json, attachment_ids_json, created_bucket,
+                           event_kind, deleted_at, expires_at
                     FROM chat_dm_messages
                     WHERE conversation_id = %s
                       AND (sender_user_id = %s OR recipient_user_id = %s)
@@ -2178,7 +2298,8 @@ def list_dm_ciphertexts(
                 """
                 SELECT seq, message_id, conversation_id, sender_user_id, sender_device_id,
                        sender_curve25519_key, sender_ed25519_key, recipient_user_id,
-                       protocol, ciphertexts_json, attachment_ids_json, created_bucket
+                       protocol, ciphertexts_json, attachment_ids_json, created_bucket,
+                       event_kind, deleted_at, expires_at
                 FROM chat_dm_messages
                 WHERE conversation_id = ?
                   AND (sender_user_id = ? OR recipient_user_id = ?)
@@ -2191,6 +2312,7 @@ def list_dm_ciphertexts(
             rows = cur.fetchall()
 
     results: List[Dict[str, Any]] = []
+    now = now_utc()
     for r in rows:
         ct_map = _parse_json(r["ciphertexts_json"], {})
         if requester_device_id and isinstance(ct_map, dict):
@@ -2201,6 +2323,15 @@ def list_dm_ciphertexts(
             )
         else:
             scoped_ct = ct_map
+        deleted = bool(r["deleted_at"])
+        expires = _as_dt(r["expires_at"])
+        expired = bool(expires and expires <= now)
+        if deleted or expired:
+            # Enforced here, not only by the periodic purge: after expiry / deletion a device may only get
+            # an undelivered session-setup copy, never a normal readable one.
+            scoped_ct = _setup_copies_only(scoped_ct)
+        if expired and not scoped_ct:
+            continue  # gone for good: nothing left for this device
         results.append({
             "seq": int(r["seq"]),
             "message_id": r["message_id"],
@@ -2212,8 +2343,14 @@ def list_dm_ciphertexts(
             "recipient_user_id": r["recipient_user_id"],
             "protocol": r["protocol"],
             "device_ciphertexts": scoped_ct,
-            "attachment_ids": _parse_json(r["attachment_ids_json"], []),
+            "attachment_ids": [] if (deleted or expired) else _parse_json(r["attachment_ids_json"], []),
             "timestamp": r["created_bucket"],
+            "event_kind": r["event_kind"] or "message",
+            # Deleted / expired: only a never-delivered session-setup copy may remain. The device uses it to
+            # keep its encrypted session working and must NOT show or keep the text.
+            "deleted": deleted,
+            "expired": expired,
+            "expires_at": expires.isoformat() if expires else None,
         })
     return results
 
@@ -2284,13 +2421,12 @@ def create_mls_group(
     creator_user_id: str,
     creator_device_id: str,
     ciphersuite: str,
-    history_sharing_mode: str = "none",
     return_group: bool = True,
     creator_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     _ready()
-    if history_sharing_mode not in ("none", "explicit_export"):
-        raise ValueError("Invalid history_sharing_mode")
+    # New members never see messages from before they joined (enforced in list_group_ciphertexts).
+    history_sharing_mode = "none"
     group_id = f"grp_{secrets.token_hex(12)}"
     bucket = coarse_timestamp_iso()
 
@@ -2377,9 +2513,7 @@ def create_mls_group(
         "policy": {
             "group_id": group_id,
             "description": "",
-            "avatar_url": None,
             "visibility": "invite_only",
-            "min_level": 7,
             "min_eth_balance_wei": "0",
             "require_invitation": True,
         },
@@ -2611,6 +2745,15 @@ def list_groups_for_user(user_id: str) -> List[Dict[str, Any]]:
     return out
 
 
+GROUP_INVITED_STATUS = "invited"
+GROUP_DECLINED_STATUS = "declined"
+
+
+def _added_member_status(am: Dict[str, Any]) -> str:
+    """'invited' = an admin added this person and they still have to Accept; anything else = 'active'."""
+    return GROUP_INVITED_STATUS if am.get("status") == GROUP_INVITED_STATUS else "active"
+
+
 @auth_cache.invalidates_auth_cache(namespaces=('group', 'user_groups'))
 def submit_mls_commit_atomic(
     group_id: str,
@@ -2690,9 +2833,9 @@ def submit_mls_commit_atomic(
                         INSERT INTO chat_group_members (
                             group_id, user_id, device_id, role, leaf_index,
                             status, joined_epoch, removed_epoch, updated_bucket
-                        ) VALUES (%s, %s, %s, %s, %s, 'active', %s, NULL, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s)
                         ON CONFLICT (group_id, user_id, device_id) DO UPDATE SET
-                            status = 'active',
+                            status = EXCLUDED.status,
                             role = EXCLUDED.role,
                             leaf_index = EXCLUDED.leaf_index,
                             joined_epoch = EXCLUDED.joined_epoch,
@@ -2705,6 +2848,7 @@ def submit_mls_commit_atomic(
                             am["device_id"],
                             am.get("role", "member"),
                             am.get("leaf_index"),
+                            _added_member_status(am),
                             new_epoch,
                             bucket,
                         ),
@@ -2819,9 +2963,9 @@ def submit_mls_commit_atomic(
                         INSERT INTO chat_group_members (
                             group_id, user_id, device_id, role, leaf_index,
                             status, joined_epoch, removed_epoch, updated_bucket
-                        ) VALUES (?, ?, ?, ?, ?, 'active', ?, NULL, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
                         ON CONFLICT(group_id, user_id, device_id) DO UPDATE SET
-                            status = 'active',
+                            status = excluded.status,
                             role = excluded.role,
                             leaf_index = excluded.leaf_index,
                             joined_epoch = excluded.joined_epoch,
@@ -2834,6 +2978,7 @@ def submit_mls_commit_atomic(
                             am["device_id"],
                             am.get("role", "member"),
                             am.get("leaf_index"),
+                            _added_member_status(am),
                             new_epoch,
                             bucket,
                         ),
@@ -2912,10 +3057,15 @@ def list_pending_welcomes(user_id: str, device_id: str, consume: bool = True) ->
             with conn.cursor(cursor_factory=chat_db.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT welcome_id, group_id, epoch, mls_welcome_b64, ratchet_tree_b64, created_bucket
-                    FROM chat_group_welcomes
-                    WHERE target_user_id = %s AND target_device_id = %s AND consumed = FALSE
-                    ORDER BY epoch ASC;
+                    SELECT w.welcome_id, w.group_id, w.epoch, w.mls_welcome_b64, w.ratchet_tree_b64, w.created_bucket
+                    FROM chat_group_welcomes w
+                    WHERE w.target_user_id = %s AND w.target_device_id = %s AND w.consumed = FALSE
+                      AND EXISTS (
+                          SELECT 1 FROM chat_group_members m
+                          WHERE m.group_id = w.group_id AND m.user_id = w.target_user_id
+                            AND m.device_id = w.target_device_id AND m.status = 'active'
+                      )
+                    ORDER BY w.epoch ASC;
                     """,
                     (user_id, device_id),
                 )
@@ -2934,10 +3084,15 @@ def list_pending_welcomes(user_id: str, device_id: str, consume: bool = True) ->
             cur = chat_db._sqlite_conn.cursor()
             cur.execute(
                 """
-                SELECT welcome_id, group_id, epoch, mls_welcome_b64, ratchet_tree_b64, created_bucket
-                FROM chat_group_welcomes
-                WHERE target_user_id = ? AND target_device_id = ? AND consumed = 0
-                ORDER BY epoch ASC
+                SELECT w.welcome_id, w.group_id, w.epoch, w.mls_welcome_b64, w.ratchet_tree_b64, w.created_bucket
+                FROM chat_group_welcomes w
+                WHERE w.target_user_id = ? AND w.target_device_id = ? AND w.consumed = 0
+                  AND EXISTS (
+                      SELECT 1 FROM chat_group_members m
+                      WHERE m.group_id = w.group_id AND m.user_id = w.target_user_id
+                        AND m.device_id = w.target_device_id AND m.status = 'active'
+                  )
+                ORDER BY w.epoch ASC
                 """,
                 (user_id, device_id),
             )
@@ -3002,6 +3157,162 @@ def ack_welcome_consumed(welcome_id: str, user_id: str, device_id: str) -> bool:
         updated = cur.rowcount > 0
         chat_db._sqlite_conn.commit()
         return updated
+
+
+def list_group_invitations_for_user(user_id: str) -> List[Dict[str, Any]]:
+    """Groups an admin added this user to that are waiting for the user's Accept / Reject."""
+    _ready()
+    sql = """
+        SELECT DISTINCT m.group_id, m.joined_epoch, m.updated_bucket
+        FROM chat_group_members m
+        WHERE m.user_id = {ph} AND m.status = 'invited'
+    """
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=chat_db.RealDictCursor) as cur:
+                cur.execute(sql.format(ph="%s"), (user_id,))
+                rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(sql.format(ph="?"), (user_id,))
+            rows = [dict(r) for r in cur.fetchall()]
+
+    by_group: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        prev = by_group.get(r["group_id"])
+        if not prev or int(r["joined_epoch"]) < int(prev["joined_epoch"]):
+            by_group[r["group_id"]] = r
+    if not by_group:
+        return []
+
+    loaded = _load_groups_batch(list(by_group.keys()))
+    out: List[Dict[str, Any]] = []
+    for gid, r in by_group.items():
+        g = loaded.get(gid)
+        if not g:
+            continue
+        inviter_id = _committer_of_epoch(gid, int(r["joined_epoch"])) or g["creator_user_id"]
+        inviter = get_user_by_id(inviter_id) or {}
+        creator = inviter if inviter_id == g["creator_user_id"] else (get_user_by_id(g["creator_user_id"]) or {})
+        active_users = {m["user_id"] for m in g["members"] if m["status"] == "active"}
+        pol = g.get("policy") or {}
+        out.append({
+            "group_id": gid,
+            "group_name": g["name"],
+            "description": pol.get("description") or "",
+            "is_paid": bool(pol.get("is_paid")),
+            "member_count": len(active_users),
+            "invited_by_user_id": inviter_id,
+            "invited_by_username": inviter.get("username"),
+            "creator_username": creator.get("username"),
+            "invited_at": r["updated_bucket"],
+        })
+    out.sort(key=lambda x: x["invited_at"] or "", reverse=True)
+    return out
+
+
+def _committer_of_epoch(group_id: str, epoch: int) -> Optional[str]:
+    sql = "SELECT committer_user_id FROM chat_group_commits WHERE group_id = {ph} AND epoch = {ph}"
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql.format(ph="%s"), (group_id, epoch))
+                row = cur.fetchone()
+        finally:
+            chat_db._pg_pool.putconn(conn)
+        return row[0] if row else None
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute(sql.format(ph="?"), (group_id, epoch))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def has_group_invitation(group_id: str, user_id: str) -> bool:
+    return any(r["status"] == GROUP_INVITED_STATUS for r in get_member_record(group_id, user_id))
+
+
+@auth_cache.invalidates_auth_cache(namespaces=('group', 'user_groups'))
+def respond_to_group_invitation(group_id: str, user_id: str, accept: bool) -> bool:
+    """
+    Accept: the member becomes active and their waiting Welcome is released, so the app joins the group.
+    Reject: the member is marked declined and the waiting Welcome is deleted; they never get the group keys.
+    Returns False when there was no open invitation.
+    """
+    _ready()
+    bucket = coarse_timestamp_iso()
+    new_status = "active" if accept else GROUP_DECLINED_STATUS
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                if accept:
+                    cur.execute(
+                        """
+                        UPDATE chat_group_members SET status = %s, updated_bucket = %s
+                        WHERE group_id = %s AND user_id = %s AND status = 'invited';
+                        """,
+                        (new_status, bucket, group_id, user_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE chat_group_members
+                        SET status = %s, removed_epoch = joined_epoch - 1, updated_bucket = %s
+                        WHERE group_id = %s AND user_id = %s AND status = 'invited';
+                        """,
+                        (new_status, bucket, group_id, user_id),
+                    )
+                changed = cur.rowcount
+                if changed and not accept:
+                    cur.execute(
+                        "DELETE FROM chat_group_welcomes WHERE group_id = %s AND target_user_id = %s AND consumed = FALSE;",
+                        (group_id, user_id),
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            chat_db._pg_pool.putconn(conn)
+        return changed > 0
+
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        try:
+            if accept:
+                cur.execute(
+                    """
+                    UPDATE chat_group_members SET status = ?, updated_bucket = ?
+                    WHERE group_id = ? AND user_id = ? AND status = 'invited'
+                    """,
+                    (new_status, bucket, group_id, user_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE chat_group_members
+                    SET status = ?, removed_epoch = joined_epoch - 1, updated_bucket = ?
+                    WHERE group_id = ? AND user_id = ? AND status = 'invited'
+                    """,
+                    (new_status, bucket, group_id, user_id),
+                )
+            changed = cur.rowcount
+            if changed and not accept:
+                cur.execute(
+                    "DELETE FROM chat_group_welcomes WHERE group_id = ? AND target_user_id = ? AND consumed = 0",
+                    (group_id, user_id),
+                )
+            chat_db._sqlite_conn.commit()
+        except Exception:
+            chat_db._sqlite_conn.rollback()
+            raise
+    return changed > 0
 
 
 def list_group_commits(
@@ -3104,6 +3415,8 @@ def insert_group_ciphertext(
     sender_device_id: str,
     mls_ciphertext_b64: str,
     attachment_ids: Optional[List[str]] = None,
+    event_kind: str = "message",
+    expires_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Validates that `sender_user_id`/`sender_device_id` is an active member of `group_id`
@@ -3120,6 +3433,7 @@ def insert_group_ciphertext(
 
     bucket = coarse_timestamp_iso()
     att_list = attachment_ids or []
+    event_kind = _clean_event_kind(event_kind)
 
     if _is_pg():
         conn = chat_db._pg_pool.getconn()
@@ -3131,14 +3445,14 @@ def insert_group_ciphertext(
                     """
                     INSERT INTO chat_group_messages (
                         message_id, group_id, epoch, sender_user_id, sender_device_id,
-                        mls_ciphertext_b64, attachment_ids_json, created_bucket
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        mls_ciphertext_b64, attachment_ids_json, created_bucket, event_kind, expires_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (message_id) DO NOTHING
                     RETURNING seq;
                     """,
                     (
                         message_id, group_id, epoch, sender_user_id, sender_device_id,
-                        mls_ciphertext_b64, json.dumps(att_list), bucket,
+                        mls_ciphertext_b64, json.dumps(att_list), bucket, event_kind, expires_at,
                     ),
                 )
                 row = cur.fetchone()
@@ -3158,12 +3472,12 @@ def insert_group_ciphertext(
                 """
                 INSERT OR IGNORE INTO chat_group_messages (
                     message_id, group_id, epoch, sender_user_id, sender_device_id,
-                    mls_ciphertext_b64, attachment_ids_json, created_bucket
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    mls_ciphertext_b64, attachment_ids_json, created_bucket, event_kind, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id, group_id, epoch, sender_user_id, sender_device_id,
-                    mls_ciphertext_b64, json.dumps(att_list), bucket,
+                    mls_ciphertext_b64, json.dumps(att_list), bucket, event_kind, expires_at,
                 ),
             )
             if cur.rowcount == 0:
@@ -3182,6 +3496,8 @@ def insert_group_ciphertext(
         "mls_ciphertext_b64": mls_ciphertext_b64,
         "attachment_ids": att_list,
         "timestamp": bucket,
+        "event_kind": event_kind,
+        "expires_at": expires_at,
     }
 
 
@@ -3223,7 +3539,8 @@ def list_group_ciphertexts(
                 cur.execute(
                     """
                     SELECT seq, message_id, group_id, epoch, sender_user_id, sender_device_id,
-                           mls_ciphertext_b64, attachment_ids_json, created_bucket
+                           mls_ciphertext_b64, attachment_ids_json, created_bucket,
+                           event_kind, deleted_at, expires_at
                     FROM chat_group_messages
                     WHERE group_id = %s AND epoch >= %s AND seq > %s
                     ORDER BY seq ASC
@@ -3240,7 +3557,8 @@ def list_group_ciphertexts(
             cur.execute(
                 """
                 SELECT seq, message_id, group_id, epoch, sender_user_id, sender_device_id,
-                       mls_ciphertext_b64, attachment_ids_json, created_bucket
+                       mls_ciphertext_b64, attachment_ids_json, created_bucket,
+                       event_kind, deleted_at, expires_at
                 FROM chat_group_messages
                 WHERE group_id = ? AND epoch >= ? AND seq > ?
                 ORDER BY seq ASC
@@ -3250,25 +3568,61 @@ def list_group_ciphertexts(
             )
             rows = cur.fetchall()
 
-    return [
-        {
+    now = now_utc()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        expires = _as_dt(r["expires_at"])
+        if expires and expires <= now:
+            continue  # disappeared (group encryption tolerates gaps, so nothing has to be kept)
+        deleted = bool(r["deleted_at"])
+        out.append({
             "seq": int(r["seq"]),
             "message_id": r["message_id"],
             "group_id": r["group_id"],
             "epoch": int(r["epoch"]),
             "sender_user_id": r["sender_user_id"],
             "sender_device_id": r["sender_device_id"],
-            "mls_ciphertext_b64": r["mls_ciphertext_b64"],
-            "attachment_ids": _parse_json(r["attachment_ids_json"], []),
+            "mls_ciphertext_b64": "" if deleted else r["mls_ciphertext_b64"],
+            "attachment_ids": [] if deleted else _parse_json(r["attachment_ids_json"], []),
             "timestamp": r["created_bucket"],
-        }
-        for r in rows
-    ]
+            "event_kind": r["event_kind"] or "message",
+            "deleted": deleted,
+            "expires_at": expires.isoformat() if expires else None,
+        })
+    return out
 
 
 # ============================================================================
 # 6. ENCRYPTED FILE ATTACHMENTS (CIPHERTEXT-ONLY STORAGE & REVOCATION)
 # ============================================================================
+
+def encrypted_attachment_usage_since(uploader_user_id: str, since_iso: str) -> Dict[str, int]:
+    """How many encrypted files (and bytes) this member uploaded since `since_iso` (for the daily limit)."""
+    _ready()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(byte_length), 0) FROM chat_encrypted_attachments "
+                    "WHERE uploader_user_id = %s AND created_bucket >= %s;",
+                    (uploader_user_id, since_iso),
+                )
+                n, b = cur.fetchone()
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(byte_length), 0) AS b FROM chat_encrypted_attachments "
+                "WHERE uploader_user_id = ? AND created_bucket >= ?",
+                (uploader_user_id, since_iso),
+            )
+            row = cur.fetchone()
+            n, b = row[0], row[1]
+    return {"files": int(n or 0), "bytes": int(b or 0)}
+
 
 def store_encrypted_attachment(
     scope_type: str,
@@ -3437,3 +3791,254 @@ def revoke_encrypted_attachment(attachment_id: str, requester_user_id: str) -> b
         )
         chat_db._sqlite_conn.commit()
         return True
+
+# ============================================================================
+# 7. DELETE FOR EVERYONE & DISAPPEARING MESSAGES
+# ============================================================================
+# The server never sees message text. It can still really remove the encrypted copy it stores:
+# - Group messages (MLS) are removed outright: MLS copes with a missing message.
+# - Private messages (Olm) keep only per-device copies of type 0 ("pre-key"): such a copy sets up a
+#   device's encrypted session, and dropping one a device has not fetched yet would leave that device
+#   unable to read the rest of the conversation. It stays encrypted (the server cannot read it) and the
+#   app never shows or stores its text. Every normal copy (type 1) is removed.
+
+EVENT_KINDS = ("message", "control")
+DELETE_FOR_EVERYONE_HOURS = 48
+
+
+class MessageDeleteError(Exception):
+    def __init__(self, message: str, status: int = 403):
+        super().__init__(message)
+        self.status = status
+
+
+def _clean_event_kind(kind: Any) -> str:
+    k = str(kind or "message").strip().lower()
+    if k not in EVENT_KINDS:
+        raise ValueError("event_kind must be 'message' or 'control'")
+    return k
+
+
+def _as_dt(val: Any) -> Optional[datetime]:
+    """A stored timestamp (datetime from PostgreSQL, ISO text from SQLite) as an aware datetime."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, datetime):
+        return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _setup_copies_only(ct_map: Any) -> Dict[str, Any]:
+    """Keeps only the session-setup (type 0) per-device copies of a private message."""
+    if not isinstance(ct_map, dict):
+        return {}
+    return {d: c for d, c in ct_map.items() if isinstance(c, dict) and int(c.get("message_type", 1)) == 0}
+
+
+def _within_delete_window(created_bucket: Any) -> bool:
+    created = _as_dt(created_bucket)
+    # created_bucket is rounded down to the minute: allow that minute on top of the window
+    return bool(created and now_utc() - created <= timedelta(hours=DELETE_FOR_EVERYONE_HOURS, minutes=1))
+
+
+def delete_dm_message(message_id: str, requester_user_id: str) -> Dict[str, Any]:
+    """Delete for everyone (private chat): only the sender, within 48 hours. Idempotent."""
+    _ready()
+    q = (
+        "SELECT message_id, conversation_id, sender_user_id, recipient_user_id, ciphertexts_json, "
+        "created_bucket, deleted_at, event_kind FROM chat_dm_messages WHERE message_id = {p}"
+    )
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=chat_db.RealDictCursor) as cur:
+                cur.execute(q.format(p="%s") + " FOR UPDATE;", (message_id,))
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    raise MessageDeleteError("Message not found", 404)
+                _check_dm_delete(row, requester_user_id)
+                if not row["deleted_at"]:
+                    cur.execute(
+                        "UPDATE chat_dm_messages SET deleted_at = %s, ciphertexts_json = %s, attachment_ids_json = '[]' "
+                        "WHERE message_id = %s;",
+                        (now_utc().isoformat(), json.dumps(_setup_copies_only(_parse_json(row["ciphertexts_json"], {}))), message_id),
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(q.format(p="?"), (message_id,))
+            row = cur.fetchone()
+            if not row:
+                raise MessageDeleteError("Message not found", 404)
+            _check_dm_delete(row, requester_user_id)
+            if not row["deleted_at"]:
+                cur.execute(
+                    "UPDATE chat_dm_messages SET deleted_at = ?, ciphertexts_json = ?, attachment_ids_json = '[]' "
+                    "WHERE message_id = ?",
+                    (now_utc().isoformat(), json.dumps(_setup_copies_only(_parse_json(row["ciphertexts_json"], {}))), message_id),
+                )
+                chat_db._sqlite_conn.commit()
+    return {
+        "message_id": message_id,
+        "conversation_id": row["conversation_id"],
+        "sender_user_id": row["sender_user_id"],
+        "recipient_user_id": row["recipient_user_id"],
+    }
+
+
+def _check_dm_delete(row: Any, requester_user_id: str) -> None:
+    if row["sender_user_id"] != requester_user_id:
+        raise MessageDeleteError("Only the sender can delete this message for everyone", 403)
+    if (row["event_kind"] or "message") != "message":
+        raise MessageDeleteError("Only messages can be deleted", 400)
+    if not row["deleted_at"] and not _within_delete_window(row["created_bucket"]):
+        raise MessageDeleteError(f"Messages can be deleted for everyone within {DELETE_FOR_EVERYONE_HOURS} hours", 403)
+
+
+def delete_group_message(group_id: str, message_id: str, requester_user_id: str, requester_is_admin: bool) -> Dict[str, Any]:
+    """Delete for everyone (group): the sender within 48 hours, or a group admin at any time. Idempotent."""
+    _ready()
+    q = (
+        "SELECT message_id, group_id, sender_user_id, created_bucket, deleted_at, event_kind "
+        "FROM chat_group_messages WHERE message_id = {p} AND group_id = {p}"
+    )
+
+    def check(row: Any) -> None:
+        if (row["event_kind"] or "message") != "message":
+            raise MessageDeleteError("Only messages can be deleted", 400)
+        if requester_is_admin or row["deleted_at"]:
+            return
+        if row["sender_user_id"] != requester_user_id:
+            raise MessageDeleteError("Only the sender or a group admin can delete this message for everyone", 403)
+        if not _within_delete_window(row["created_bucket"]):
+            raise MessageDeleteError(f"Messages can be deleted for everyone within {DELETE_FOR_EVERYONE_HOURS} hours", 403)
+
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=chat_db.RealDictCursor) as cur:
+                cur.execute(q.format(p="%s") + " FOR UPDATE;", (message_id, group_id))
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    raise MessageDeleteError("Message not found", 404)
+                check(row)
+                if not row["deleted_at"]:
+                    cur.execute(
+                        "UPDATE chat_group_messages SET deleted_at = %s, mls_ciphertext_b64 = '', attachment_ids_json = '[]' "
+                        "WHERE message_id = %s;",
+                        (now_utc().isoformat(), message_id),
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    else:
+        with chat_db._sqlite_lock:
+            cur = chat_db._sqlite_conn.cursor()
+            cur.execute(q.format(p="?"), (message_id, group_id))
+            row = cur.fetchone()
+            if not row:
+                raise MessageDeleteError("Message not found", 404)
+            check(row)
+            if not row["deleted_at"]:
+                cur.execute(
+                    "UPDATE chat_group_messages SET deleted_at = ?, mls_ciphertext_b64 = '', attachment_ids_json = '[]' "
+                    "WHERE message_id = ?",
+                    (now_utc().isoformat(), message_id),
+                )
+                chat_db._sqlite_conn.commit()
+    return {"message_id": message_id, "group_id": group_id, "sender_user_id": row["sender_user_id"]}
+
+
+def message_exists_in_scope(scope_type: str, scope_id: str, message_id: str) -> bool:
+    """True when the (not deleted) message belongs to that private chat (conversation id) or group."""
+    _ready()
+    if scope_type == "dm":
+        q = "SELECT 1 FROM chat_dm_messages WHERE message_id = {p} AND conversation_id = {p} AND deleted_at IS NULL"
+    else:
+        q = "SELECT 1 FROM chat_group_messages WHERE message_id = {p} AND group_id = {p} AND deleted_at IS NULL"
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(q.format(p="%s") + ";", (message_id, scope_id))
+                return cur.fetchone() is not None
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute(q.format(p="?"), (message_id, scope_id))
+        return cur.fetchone() is not None
+
+
+def purge_expired_messages() -> Dict[str, int]:
+    """Removes the stored encrypted copies of disappearing messages whose time is up.
+    Group rows are deleted. Private rows keep only undelivered session-setup copies (see above),
+    and are deleted once none is left."""
+    _ready()
+    now_iso = now_utc().isoformat()
+    removed = {"group": 0, "dm_rows": 0, "dm_trimmed": 0}
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=chat_db.RealDictCursor) as cur:
+                cur.execute("DELETE FROM chat_group_messages WHERE expires_at IS NOT NULL AND expires_at <= %s;", (now_iso,))
+                removed["group"] = int(cur.rowcount or 0)
+                cur.execute(
+                    "SELECT message_id, ciphertexts_json FROM chat_dm_messages "
+                    "WHERE expires_at IS NOT NULL AND expires_at <= %s FOR UPDATE;",
+                    (now_iso,),
+                )
+                for r in cur.fetchall():
+                    keep = _setup_copies_only(_parse_json(r["ciphertexts_json"], {}))
+                    if keep:
+                        cur.execute(
+                            "UPDATE chat_dm_messages SET ciphertexts_json = %s, attachment_ids_json = '[]' WHERE message_id = %s;",
+                            (json.dumps(keep), r["message_id"]),
+                        )
+                        removed["dm_trimmed"] += 1
+                    else:
+                        cur.execute("DELETE FROM chat_dm_messages WHERE message_id = %s;", (r["message_id"],))
+                        removed["dm_rows"] += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            chat_db._pg_pool.putconn(conn)
+        return removed
+    with chat_db._sqlite_lock:
+        cur = chat_db._sqlite_conn.cursor()
+        cur.execute("DELETE FROM chat_group_messages WHERE expires_at IS NOT NULL AND expires_at <= ?", (now_iso,))
+        removed["group"] = int(cur.rowcount or 0)
+        cur.execute(
+            "SELECT message_id, ciphertexts_json FROM chat_dm_messages WHERE expires_at IS NOT NULL AND expires_at <= ?",
+            (now_iso,),
+        )
+        for r in cur.fetchall():
+            keep = _setup_copies_only(_parse_json(r["ciphertexts_json"], {}))
+            if keep:
+                cur.execute(
+                    "UPDATE chat_dm_messages SET ciphertexts_json = ?, attachment_ids_json = '[]' WHERE message_id = ?",
+                    (json.dumps(keep), r["message_id"]),
+                )
+                removed["dm_trimmed"] += 1
+            else:
+                cur.execute("DELETE FROM chat_dm_messages WHERE message_id = ?", (r["message_id"],))
+                removed["dm_rows"] += 1
+        chat_db._sqlite_conn.commit()
+    return removed

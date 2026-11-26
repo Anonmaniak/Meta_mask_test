@@ -1,32 +1,31 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { friendlyError } from '../services/friendlyError';
 import {
   Globe,
-  Lock,
-  Users,
   Award,
   Wallet,
   AlertTriangle,
-  Send,
   Edit3,
   Trash2,
   Ban,
   Flag,
-  Search,
   RefreshCw,
   Copy,
   Check,
   KeyRound,
-  Link2,
+  UserCog,
   Settings as SettingsIcon,
-  Sun,
-  Moon,
   History,
   User,
   Menu,
   AlertCircle,
+  Reply,
+  Pin,
+  PinOff,
+  Search,
 } from 'lucide-react';
-import { getBaseApiUrl, setBaseApiUrl } from '../services/api';
 import { formatAddress, formatEth } from '../services/web3';
+import { ChatMessagesSkeleton } from './Skeleton';
 import {
   requestE2EEAuthChallenge,
   updateMyE2EEUsername,
@@ -40,7 +39,6 @@ import {
   editPublicChatMessage,
   deletePublicChatMessage,
   connectPublicChatWebSocket,
-  searchUsers,
   updateMyProfile,
   fetchMyIdentityHistory,
   fetchBlockedUsers,
@@ -48,14 +46,34 @@ import {
   unblockUser,
   submitAbuseReport,
   verifyMyWalletBalance,
-  discoverPublicGroups,
-  requestJoinPublicGroup,
-  joinGroupByInviteCode,
+  uploadPublicChatAttachment,
+  fetchPublicChatAttachmentBlob,
   type PublicChatMessageRecord,
-  type DirectoryUserRecord,
-  type DiscoverableGroupRecord,
-  formatGroupFee,
 } from '../services/platformApi';
+import { ChatTimeline, TextBubble, initialsFor, QuotedReply } from './chat/ChatTimeline';
+import { jumpToMessage } from './chat/jumpToMessage';
+import { ChatComposer } from './chat/ChatComposer';
+import { ReactionChips, ReactButton, PinnedBar, TypingLine, ChatSearchBar } from './chat/MessageExtras';
+import { searchMessages } from '../services/chatEvents';
+import { reactToRoomMessage, sendRoomTyping, setRoomMessagePinned, type RoomPin } from '../services/platformApi';
+import { AttachmentTile } from './chat/AttachmentTile';
+import {
+  attachmentKind,
+  DAILY_LIMIT_TEXT_ROOM,
+  MAX_FILES_PER_MESSAGE,
+  MAX_ROOM_FILE_BYTES,
+} from '../services/attachmentLimits';
+
+type RoomMessage = PublicChatMessageRecord & { isOptimistic?: boolean; localFiles?: File[] };
+
+/** Short one-line excerpt of a Members' room message, for the reply bar and live quote updates. */
+function roomReplyPreview(m: Pick<RoomMessage, 'content' | 'attachments'>): string {
+  const text = (m.content || '').replace(/\s+/g, ' ').trim();
+  if (text) return text.length > 120 ? `${text.slice(0, 117)}\u2026` : text;
+  const f = m.attachments?.[0];
+  if (f) return f.kind === 'image' ? 'Photo' : `File: ${f.file_name}`;
+  return 'Message';
+}
 
 // ============================================================================
 // 1. OPEN PUBLIC CHAT VIEW (Real-Time WebSocket + Guest/Verified Modes)
@@ -84,12 +102,30 @@ export const OpenPublicChatView: React.FC<{
   isPlatformPaid,
   onOpenAdmissionModal,
 }) => {
-    const [messages, setMessages] = useState<
-      (PublicChatMessageRecord & { isOptimistic?: boolean })[]
-    >([]);
+    const [messages, setMessages] = useState<RoomMessage[]>([]);
+    // Members' room extras: pinned messages, who is typing, in-room search
+    const [roomPins, setRoomPins] = useState<RoomPin[]>([]);
+    const [roomTyping, setRoomTyping] = useState<Record<string, { name: string; until: number }>>({});
+    const [roomNow, setRoomNow] = useState(() => Date.now());
+    const [roomSearchOpen, setRoomSearchOpen] = useState(false);
+    const [roomQuery, setRoomQuery] = useState('');
+    const [roomSearchIndex, setRoomSearchIndex] = useState(0);
+    const lastRoomTypingRef = useRef(0);
+    const myRoomIdRef = useRef<string | null>(null);
+    myRoomIdRef.current = e2eeProfile?.user_id || null;
+    // Files picked for the next message (uploaded when the member presses Send)
+    const [pendingFiles, setPendingFiles] = useState<File[]>([]);
     const [nextBeforeSeq, setNextBeforeSeq] = useState<number | null>(null);
     const [onlineStats, setOnlineStats] = useState({ watching: 0, active_live: 0 });
-    const [policy, setPolicy] = useState({
+    const [policy, setPolicy] = useState<{
+      guest_read_enabled: boolean;
+      guest_posting_enabled: boolean;
+      max_length: number;
+      edit_window_seconds: number;
+      retention_days?: number;
+      max_file_bytes?: number;
+      max_files_per_message?: number;
+    }>({
       guest_read_enabled: true,
       guest_posting_enabled: true,
       max_length: 1000,
@@ -101,6 +137,10 @@ export const OpenPublicChatView: React.FC<{
     const [editText, setEditText] = useState('');
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const [lastFailedText, setLastFailedText] = useState<string | null>(null);
+    // Message being replied to, and a short "original not loaded" note after tapping a quote
+    const [replyTarget, setReplyTarget] = useState<{ message_id: string; author_user_id: string | null; display_name: string; preview: string } | null>(null);
+    const [replyJumpMissId, setReplyJumpMissId] = useState<string | null>(null);
+    const [initialLoading, setInitialLoading] = useState(true);
     const streamRef = useRef<HTMLDivElement>(null);
     const initialScrolledRef = useRef(false);
     const accountRef = useRef<string | null>(account);
@@ -118,6 +158,7 @@ export const OpenPublicChatView: React.FC<{
       try {
         const feed = await fetchPublicChatFeed(null, 50, walletAddr ?? accountRef.current);
         setMessages(feed.messages);
+        setRoomPins(feed.pins || []);
         setNextBeforeSeq(feed.next_before_seq);
         setOnlineStats(normalizeOnlineStats(feed.online));
         setPolicy(feed.policy);
@@ -129,13 +170,26 @@ export const OpenPublicChatView: React.FC<{
           }, 40);
         }
       } catch (err: any) {
-        setErrorMsg(err?.message || 'Unable to load Open Public Chat');
+        setErrorMsg(friendlyError(err, 'Unable to load Open Public Chat'));
+      } finally {
+        setInitialLoading(false);
       }
     }, []);
 
     useEffect(() => {
       loadFeed(accountRef.current);
+      // If the server is full, live updates pause; refresh the feed every 10 s until the socket is back.
+      let capacityPoll: ReturnType<typeof setInterval> | null = null;
+      const stopCapacityPoll = () => {
+        if (capacityPoll) clearInterval(capacityPoll);
+        capacityPoll = null;
+      };
       const wsSub = connectPublicChatWebSocket((evt) => {
+        if (evt.type === 'ws_capacity') {
+          if (!capacityPoll) capacityPoll = setInterval(() => void loadFeed(accountRef.current), 10000);
+          return;
+        }
+        if (evt.type === 'ws_reconnected' || evt.type === 'public_connected') stopCapacityPoll();
         if (evt.online) {
           setOnlineStats(normalizeOnlineStats(evt.online));
         }
@@ -143,6 +197,28 @@ export const OpenPublicChatView: React.FC<{
           // Socket was down (sleep / offline / server restart): re-sync anything we missed.
           void loadFeed(accountRef.current);
           return;
+        }
+        if (evt.type === 'public_reactions_updated' && evt.message_id) {
+          setMessages((prev) => prev.map((m) => (m.message_id === evt.message_id ? { ...m, reactions: evt.reactions || {} } : m)));
+          return;
+        }
+        if (evt.type === 'public_pins_updated') {
+          setRoomPins(Array.isArray(evt.pins) ? evt.pins : []);
+          return;
+        }
+        if (evt.type === 'public_typing' && evt.user_id) {
+          if (evt.user_id !== myRoomIdRef.current) {
+            setRoomTyping((prev) => ({ ...prev, [evt.user_id]: { name: String(evt.name || 'A member'), until: Date.now() + 6000 } }));
+          }
+          return;
+        }
+        if (evt.type === 'public_message_created' && evt.message?.author_user_id) {
+          setRoomTyping((prev) => {
+            if (!prev[evt.message.author_user_id]) return prev;
+            const next = { ...prev };
+            delete next[evt.message.author_user_id];
+            return next;
+          });
         }
         if (evt.type === 'public_message_created' && evt.message) {
           setMessages((prev) => {
@@ -167,18 +243,36 @@ export const OpenPublicChatView: React.FC<{
           }, 40);
         } else if (evt.type === 'public_message_edited' && evt.update) {
           setMessages((prev) =>
-            prev.map((m) =>
-              m.message_id === evt.update.message_id
-                ? { ...m, content: evt.update.content, edited_at: evt.update.edited_at }
-                : m
-            )
+            prev.map((m) => {
+              if (m.message_id === evt.update.message_id) {
+                return { ...m, content: evt.update.content, edited_at: evt.update.edited_at };
+              }
+              if (m.reply_to?.available && m.reply_to.message_id === evt.update.message_id) {
+                return { ...m, reply_to: { ...m.reply_to, preview: roomReplyPreview({ content: evt.update.content, attachments: [] }) } };
+              }
+              return m;
+            })
           );
         } else if (evt.type === 'public_message_deleted' && evt.message_id) {
-          setMessages((prev) => prev.filter((m) => m.message_id !== evt.message_id));
+          // Remove it, and blank its text in any reply that quotes it (like the server does).
+          setMessages((prev) =>
+            prev
+              .filter((m) => m.message_id !== evt.message_id)
+              .map((m) =>
+                m.reply_to && m.reply_to.message_id === evt.message_id
+                  ? { ...m, reply_to: { message_id: evt.message_id, author_user_id: null, display_name: null, preview: null, available: false } }
+                  : m
+              )
+          );
+          setReplyTarget((cur) => (cur?.message_id === evt.message_id ? null : cur));
+        } else if (evt.type === 'public_policy_updated' && evt.policy) {
+          setPolicy(evt.policy);
+          void loadFeed(accountRef.current);
         }
       }, accountRef.current);
       wsSubRef.current = wsSub;
       return () => {
+        stopCapacityPoll();
         wsSubRef.current = null;
         wsSub.close();
       };
@@ -199,7 +293,7 @@ export const OpenPublicChatView: React.FC<{
         setMessages((prev) => [...older.messages, ...prev]);
         setNextBeforeSeq(older.next_before_seq);
       } catch (err: any) {
-        setErrorMsg(err?.message || 'Failed to load older messages');
+        setErrorMsg(friendlyError(err, 'Failed to load older messages'));
       }
     };
 
@@ -211,8 +305,8 @@ export const OpenPublicChatView: React.FC<{
       )
     );
 
-    const handleSend = async (e: React.FormEvent) => {
-      e.preventDefault();
+    const handleSend = async (e?: React.FormEvent) => {
+      e?.preventDefault();
       if (!account) {
         onConnectWallet();
         return;
@@ -222,13 +316,16 @@ export const OpenPublicChatView: React.FC<{
         return;
       }
       const trimmed = input.trim();
-      if (!trimmed || sending) return;
+      const files = pendingFiles;
+      if ((!trimmed && files.length === 0) || sending) return;
+      const reply = replyTarget;
       setSending(true);
       setErrorMsg(null);
       setLastFailedText(null);
 
+      // Shown straight away (with local previews of the picked files) while the upload runs.
       const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const optimisticMsg: PublicChatMessageRecord & { isOptimistic?: boolean } = {
+      const optimisticMsg: RoomMessage = {
         seq: Date.now(),
         message_id: tempId,
         author_user_id: e2eeProfile.user_id,
@@ -242,32 +339,63 @@ export const OpenPublicChatView: React.FC<{
         edited_at: null,
         created_at: new Date().toISOString(),
         isOptimistic: true,
+        localFiles: files,
+        reply_to_message_id: reply?.message_id || null,
+        reply_to: reply
+          ? {
+            message_id: reply.message_id,
+            author_user_id: reply.author_user_id,
+            display_name: reply.display_name,
+            preview: reply.preview,
+            available: true,
+          }
+          : null,
+        attachments: files.map((f, i) => ({
+          attachment_id: `${tempId}_${i}`,
+          file_name: f.name,
+          mime_type: f.type || 'application/octet-stream',
+          kind: attachmentKind(f.type, f.name),
+          size_bytes: f.size,
+        })),
       };
 
       setMessages((prev) => [...prev, optimisticMsg]);
       setInput('');
+      setPendingFiles([]);
+      setReplyTarget(null);
       setTimeout(() => {
         streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: 'smooth' });
       }, 20);
 
       try {
+        const attachmentIds: string[] = [];
+        for (const f of files) {
+          const up = await uploadPublicChatAttachment(f);
+          attachmentIds.push(up.attachment.attachment_id);
+        }
         const res = await postPublicChatMessage(
           trimmed,
-          Boolean(account && e2eeProfile && !isWalletMismatch)
+          Boolean(account && e2eeProfile && !isWalletMismatch),
+          attachmentIds,
+          reply?.message_id || null
         );
         setMessages((prev) =>
-          prev.map((m) =>
-            m.message_id === tempId || m.message_id === res.message.message_id ? res.message : m
-          )
+          // The live socket may have delivered it first: then just drop the placeholder.
+          prev.some((m) => m.message_id === res.message.message_id)
+            ? prev.filter((m) => m.message_id !== tempId)
+            : prev.map((m) => (m.message_id === tempId ? res.message : m))
         );
         setTimeout(() => {
           streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: 'smooth' });
         }, 30);
       } catch (err: any) {
         setMessages((prev) => prev.filter((m) => m.message_id !== tempId));
-        setErrorMsg(err?.message || 'Message was not sent (server rejected or storage failed)');
-        setLastFailedText(trimmed);
+        setErrorMsg(friendlyError(err, 'Message was not sent (server rejected or storage failed)'));
+        setLastFailedText(trimmed || (files.length ? `${files.length} file(s)` : null));
         setInput(trimmed);
+        setPendingFiles(files);
+        // Keep the reply unless its original is gone
+        if (reply && !/no longer available/i.test(String(err?.message || ''))) setReplyTarget(reply);
       } finally {
         setSending(false);
       }
@@ -282,6 +410,55 @@ export const OpenPublicChatView: React.FC<{
 
     const canPost = Boolean(account && e2eeProfile && !isWalletMismatch);
     const isModerator = Boolean(e2eeProfile?.admin_role);
+
+    // ---- Members' room extras ----
+    const roomSearchItems = React.useMemo(() => messages.map((m) => ({ id: m.message_id, message: m.content || '' })), [messages]);
+    const roomHits = roomSearchOpen ? searchMessages(roomSearchItems, roomQuery) : [];
+    const roomNameFor = (uid: string) => {
+      if (uid === e2eeProfile?.user_id) return 'You';
+      const m = messages.find((x) => x.author_user_id === uid);
+      return m?.display_name || 'A member';
+    };
+    const roomMentionCandidates = React.useMemo(() => {
+      const seen = new Map<string, string>();
+      for (const m of messages) {
+        if (m.author_user_id && m.author_user_id !== e2eeProfile?.user_id && m.display_name?.startsWith('@')) {
+          seen.set(m.author_user_id, m.display_name.slice(1));
+        }
+      }
+      return Array.from(seen, ([id, username]) => ({ id, username }));
+    }, [messages, e2eeProfile?.user_id]);
+    useEffect(() => {
+      const ends = Object.values(roomTyping).map((t) => t.until).filter((t) => t > Date.now());
+      if (!ends.length) return;
+      const t = window.setTimeout(() => setRoomNow(Date.now()), Math.min(...ends) - Date.now() + 50);
+      return () => window.clearTimeout(t);
+    }, [roomTyping, roomNow]);
+    const reactInRoom = async (m: RoomMessage, emoji: string | null) => {
+      const myId = e2eeProfile?.user_id || '';
+      const mineNow = emoji && (m.reactions?.[emoji] || []).includes(myId);
+      try {
+        const res = await reactToRoomMessage(m.message_id, mineNow ? null : emoji);
+        setMessages((prev) => prev.map((x) => (x.message_id === m.message_id ? { ...x, reactions: res.reactions } : x)));
+      } catch (err: any) {
+        setErrorMsg(friendlyError(err, 'Your reaction was not saved.'));
+      }
+    };
+    const pinRoomMessage = async (messageId: string, pinned: boolean) => {
+      try {
+        const res = await setRoomMessagePinned(messageId, pinned);
+        setRoomPins(res.pins);
+      } catch (err: any) {
+        setErrorMsg(friendlyError(err, pinned ? 'The message was not pinned.' : 'The message was not unpinned.'));
+      }
+    };
+    const signalRoomTyping = () => {
+      if (e2eeProfile?.show_online_presence === false) return;
+      const now = Date.now();
+      if (now - lastRoomTypingRef.current < 3000) return;
+      lastRoomTypingRef.current = now;
+      sendRoomTyping().catch(() => { });
+    };
 
     return (
       <div
@@ -307,38 +484,33 @@ export const OpenPublicChatView: React.FC<{
                 type="button"
                 className="mobile-channels-toggle-btn"
                 onClick={onToggleChannels}
-                title="Chats Menu"
-                aria-label="Chats Menu"
+                title="Conversations"
+                aria-label="Conversations"
               >
-                <Menu size={14} />
-                <span>Chats</span>
+                <Menu size={16} />
+                <span>Conversations</span>
               </button>
             )}
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, flexWrap: 'wrap' }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                  <Globe size={18} />
-                  <span>Open Public Chat Room</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontWeight: 600, fontSize: '1.08rem', flexWrap: 'wrap' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                  <Globe size={18} style={{ color: 'var(--accent)' }} />
+                  <span>Members&rsquo; room</span>
                 </span>
-                <span className="audit-status">PUBLIC</span>
               </div>
               <div
                 style={{
-                  fontSize: '0.75rem',
+                  fontSize: '0.9rem',
                   color: 'var(--text-muted)',
-                  marginTop: '2px',
+                  marginTop: '4px',
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                 }}
               >
-                {onlineStats.watching} Watching
-                {account && (
-                  <>
-                    {' '}&bull; {onlineStats.active_live} Active Live
-                  </>
-                )}{' '}
-                &bull;{' '}
+                {onlineStats.watching} viewing
+                {account && <>, {onlineStats.active_live} online now</>}
+                {' · '}
                 {account ? (
                   <>
                     Posting as{' '}
@@ -352,7 +524,7 @@ export const OpenPublicChatView: React.FC<{
                   </>
                 ) : (
                   <strong style={{ color: 'var(--text-secondary)' }}>
-                    Connect MetaMask to Chat
+                    Connect your wallet to write
                   </strong>
                 )}
               </div>
@@ -364,12 +536,12 @@ export const OpenPublicChatView: React.FC<{
               <button
                 type="button"
                 className="btn-solid"
-                style={{ padding: '6px 12px', fontSize: '0.76rem' }}
+                style={{ padding: '6px 12px', fontSize: '0.86rem' }}
                 disabled={siweLoading}
                 onClick={onAuthenticateSiwe}
               >
                 <KeyRound size={13} />
-                <span>{siweLoading ? 'Signing...' : 'Verify Wallet (SIWE)'}</span>
+                <span>{siweLoading ? 'Signing...' : 'Verify your wallet'}</span>
               </button>
             </div>
           )}
@@ -378,22 +550,38 @@ export const OpenPublicChatView: React.FC<{
         {/* Honest Security Disclosure Banner */}
         <div
           style={{
-            padding: '8px 20px',
+            padding: '11px 26px',
             background: 'var(--bg-surface)',
             borderBottom: '1px solid var(--border-subtle)',
-            fontSize: '0.75rem',
+            fontSize: '0.86rem',
             color: 'var(--text-secondary)',
             display: 'flex',
             alignItems: 'center',
-            gap: '8px',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '8px 16px',
           }}
         >
-          <AlertTriangle size={14} style={{ flexShrink: 0 }} />
-          <span>
-            <strong>Non-Confidential Public Channel:</strong> Readable by all members and subject to
-            platform moderation. For end-to-end encryption, use <strong>Private</strong> or{' '}
-            <strong>Groups</strong>.
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+            <AlertTriangle size={16} style={{ flexShrink: 0, color: 'var(--warn)' }} />
+            <span>
+              <strong>Everyone in the club can read this room</strong>, and it is moderated. For private
+              conversations, use a private chat or a group.
+            </span>
           </span>
+          {policy.retention_days != null && (
+            <span
+              style={{
+                fontSize: '0.8rem',
+                color: 'var(--text-muted)',
+                whiteSpace: 'nowrap',
+              }}
+              title={`Older messages are no longer shown after ${policy.retention_days} ${policy.retention_days === 1 ? 'day' : 'days'}`}
+            >
+              Messages kept for <strong>{policy.retention_days}</strong>{' '}
+              {policy.retention_days === 1 ? 'day' : 'days'}
+            </span>
+          )}
         </div>
 
         {errorMsg && (
@@ -401,8 +589,8 @@ export const OpenPublicChatView: React.FC<{
             style={{
               padding: '8px 20px',
               borderBottom: '1px solid var(--border-strong)',
-              fontSize: '0.78rem',
-              color: 'var(--color-danger, #ef4444)',
+              fontSize: '0.86rem',
+              color: 'var(--danger)',
               background: 'rgba(239, 68, 68, 0.08)',
               display: 'flex',
               alignItems: 'center',
@@ -418,7 +606,7 @@ export const OpenPublicChatView: React.FC<{
                 onClick={handleRetryPublicSend}
                 style={{
                   padding: '2px 8px',
-                  fontSize: '0.72rem',
+                  fontSize: '0.9rem',
                   borderRadius: '4px',
                   borderColor: 'currentColor',
                   color: 'inherit',
@@ -431,22 +619,88 @@ export const OpenPublicChatView: React.FC<{
           </div>
         )}
 
+        {/* Room toolbar: search and pinned messages */}
+        <div className="chat-extras-bar">
+          <div className="chat-extras-row">
+            <span style={{ flex: 1 }} />
+            <button
+              type="button"
+              className="chat-icon-btn"
+              aria-label="Search the Members' room"
+              aria-pressed={roomSearchOpen}
+              onClick={() => {
+                setRoomSearchOpen((v) => !v);
+                setRoomQuery('');
+              }}
+            >
+              <Search size={15} />
+            </button>
+          </div>
+          {roomSearchOpen && (
+            <ChatSearchBar
+              query={roomQuery}
+              onQuery={(q) => {
+                setRoomQuery(q);
+                setRoomSearchIndex(Math.max(0, searchMessages(roomSearchItems, q).length - 1));
+              }}
+              count={roomHits.length}
+              index={roomSearchIndex}
+              onStep={(dir) => {
+                const n = roomHits.length;
+                if (!n) return;
+                const next = (roomSearchIndex + dir + n) % n;
+                setRoomSearchIndex(next);
+                jumpToMessage(roomHits[next]);
+              }}
+              onClose={() => {
+                setRoomSearchOpen(false);
+                setRoomQuery('');
+              }}
+            />
+          )}
+          {roomPins.length > 0 && (
+            <PinnedBar
+              pins={roomPins}
+              previewFor={(id) => {
+                const m = messages.find((x) => x.message_id === id);
+                return m ? roomReplyPreview(m) : null;
+              }}
+              onJump={(id) => {
+                if (!jumpToMessage(id)) setErrorMsg('That pinned message is older than what is loaded. Scroll up to load more.');
+              }}
+              onUnpin={isModerator ? (id) => void pinRoomMessage(id, false) : undefined}
+            />
+          )}
+        </div>
+
         {/* Stream */}
         <div className="chat-stream-body" ref={streamRef} style={{ flex: 1, overflowY: 'auto' }}>
+          {roomHits.length > 0 && (
+            <style>
+              {roomHits
+                .map(
+                  (id, i) =>
+                    `.ig-row[data-msg-id="${CSS.escape(id)}"] .ig-bubble{outline:2px solid ${i === roomSearchIndex ? 'var(--accent)' : 'var(--warn)'};outline-offset:1px}`
+                )
+                .join('\n')}
+            </style>
+          )}
           {nextBeforeSeq && (
             <div style={{ textAlign: 'center', marginBottom: '12px' }}>
               <button
                 type="button"
                 className="btn-outline"
-                style={{ padding: '5px 14px', fontSize: '0.75rem' }}
+                style={{ padding: '5px 14px', fontSize: '0.86rem' }}
                 onClick={handleLoadOlder}
               >
-                Load Older Messages
+                Show earlier messages
               </button>
             </div>
           )}
 
-          {messages.length === 0 ? (
+          {initialLoading && messages.length === 0 ? (
+            <ChatMessagesSkeleton count={5} />
+          ) : messages.length === 0 ? (
             <div
               style={{
                 height: '100%',
@@ -458,264 +712,255 @@ export const OpenPublicChatView: React.FC<{
                 gap: '8px',
               }}
             >
-              <Globe size={34} strokeWidth={1.5} />
-              <div>Open Public Chat is ready — start the conversation!</div>
+              <Globe size={38} strokeWidth={1.3} style={{ color: 'var(--accent)' }} />
+              <div style={{ fontFamily: 'var(--font-display)', fontSize: '1.4rem', color: 'var(--text-secondary)' }}>
+                No messages yet
+              </div>
+              <div style={{ fontSize: '0.92rem' }}>Be the first to say something.</div>
             </div>
           ) : (
-            messages.map((m) => {
-              const isMine = Boolean(
-                e2eeProfile && m.author_user_id && m.author_user_id === e2eeProfile.user_id
-              );
-              const isOpt = Boolean((m as any).isOptimistic);
-              const getInitials = (name: string) => {
-                if (!name) return 'U';
-                const clean = name.replace(/^[@~]/, '').trim();
-                if (clean.toLowerCase().startsWith('user-')) {
-                  return clean.slice(5, 7).toUpperCase() || 'U';
-                }
-                return clean.slice(0, 2).toUpperCase() || 'U';
-              };
-              const initials = getInitials(m.display_name);
-
-              return (
-                <div
-                  key={m.message_id}
-                  className={`chat-message-row ${isOpt ? 'is-optimistic' : ''}`}
-                  style={{
-                    display: 'flex',
-                    flexDirection: isMine ? 'row-reverse' : 'row',
-                    alignItems: 'flex-start',
-                    gap: '12px',
-                    marginBottom: '14px',
-                    maxWidth: '85%',
-                    alignSelf: isMine ? 'flex-end' : 'flex-start',
-                  }}
-                >
-                  {/* Modern Avatar */}
-                  <div
-                    className="chat-avatar"
-                    style={{
-                      width: '32px',
-                      height: '32px',
-                      borderRadius: '8px',
-                      fontSize: '0.74rem',
-                      fontWeight: 700,
-                      flexShrink: 0,
-                      background: isMine ? 'var(--text-main)' : 'var(--bg-pill)',
-                      color: isMine ? 'var(--text-inverse)' : 'var(--text-main)',
-                      border: '1px solid var(--border-strong)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontFamily: 'ui-monospace, monospace',
-                    }}
-                  >
-                    {initials}
-                  </div>
-
-                  {/* Packet & Header */}
-                  <div
-                    className="chat-packet"
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: isMine ? 'flex-end' : 'flex-start',
-                      maxWidth: '100%',
-                    }}
-                  >
-                    <div
-                      className="chat-msg-header"
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        fontSize: '0.72rem',
-                        color: 'var(--text-muted)',
-                        marginBottom: '4px',
-                        flexWrap: 'wrap',
-                      }}
-                    >
-                      <strong
-                        style={{
-                          color: 'var(--text-main)',
-                          fontFamily: 'ui-monospace, monospace',
-                          cursor: !m.is_guest && m.author_user_id && !isMine ? 'pointer' : 'default',
-                        }}
+            <ChatTimeline<RoomMessage>
+              items={messages}
+              getKey={(m) => m.message_id}
+              getTime={(m) => m.created_at}
+              getSender={(m) => m.author_user_id || m.guest_id || m.display_name}
+              isMine={(m) => Boolean(e2eeProfile && m.author_user_id && m.author_user_id === e2eeProfile.user_id)}
+              isPending={(m) => Boolean(m.isOptimistic)}
+              getMessageId={(m) => m.message_id}
+              showNames
+              getName={(m) => m.display_name}
+              getInitials={(m) => initialsFor(m.display_name)}
+              onSenderClick={(m) => {
+                if (!m.is_guest && m.author_user_id) onStartPrivateChat(m.author_user_id);
+              }}
+              renderBody={(m, ctx) => (
+                <>
+                  {m.reply_to && (
+                    m.reply_to.available ? (
+                      <QuotedReply
+                        name={
+                          e2eeProfile && m.reply_to.author_user_id === e2eeProfile.user_id
+                            ? 'You'
+                            : m.reply_to.display_name || 'Member'
+                        }
+                        preview={m.reply_to.preview || 'Message'}
                         onClick={() => {
-                          if (!m.is_guest && m.author_user_id && !isMine) {
-                            onStartPrivateChat(m.author_user_id);
+                          if (!jumpToMessage(m.reply_to!.message_id)) {
+                            setReplyJumpMissId(m.message_id);
+                            setTimeout(() => setReplyJumpMissId((cur) => (cur === m.message_id ? null : cur)), 2500);
                           }
                         }}
-                        title={!m.is_guest && !isMine ? 'Click to start E2EE Private Chat' : undefined}
-                      >
-                        {m.display_name}
-                      </strong>
-                      <span className="audit-status" style={{ fontSize: '0.64rem', padding: '1px 6px' }}>
-                        {m.is_guest ? 'GUEST' : 'VERIFIED'}
-                      </span>
-                      <span>
-                        {new Date(m.created_at).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </span>
-                      {m.edited_at && <span>(edited)</span>}
-                      {isOpt && (
-                        <span style={{ fontSize: '0.66rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                          Sending...
-                        </span>
-                      )}
-
-                      {/* Inline Action Buttons with Smooth Hover Cluster */}
-                      {!isOpt && (
-                        <span className="chat-action-cluster">
-                          {isMine && (
-                            <button
-                              type="button"
-                              className="chat-copy-btn"
-                              title="Edit Message"
-                              onClick={() => {
-                                setEditingId(m.message_id);
-                                setEditText(m.content);
-                              }}
-                            >
-                              <Edit3 size={11} />
-                            </button>
-                          )}
-                          {(isMine || isModerator) && (
-                            <button
-                              type="button"
-                              className="chat-copy-btn"
-                              title="Delete Message"
-                              onClick={async () => {
-                                try {
-                                  await deletePublicChatMessage(m.message_id, 'Deleted from UI');
-                                  setMessages((prev) =>
-                                    prev.filter((item) => item.message_id !== m.message_id)
-                                  );
-                                } catch (err: any) {
-                                  setErrorMsg(err?.message || 'Delete window expired or unauthorized');
-                                }
-                              }}
-                            >
-                              <Trash2 size={11} />
-                            </button>
-                          )}
-                          {!isMine && e2eeProfile && m.author_user_id && (
-                            <button
-                              type="button"
-                              className="chat-copy-btn"
-                              title="Block Author"
-                              onClick={async () => {
-                                await blockUser(m.author_user_id!, 'Blocked in Open Public Chat');
-                                await loadFeed();
-                              }}
-                            >
-                              <Ban size={11} />
-                            </button>
-                          )}
-                          {!isMine && e2eeProfile && (
-                            <button
-                              type="button"
-                              className="chat-copy-btn"
-                              title="Report Message"
-                              onClick={async () => {
-                                const reason = prompt('Reason for reporting this public message:');
-                                if (!reason?.trim()) return;
-                                await submitAbuseReport({
-                                  scope_type: 'public_chat',
-                                  scope_id: 'open_public',
-                                  message_id: m.message_id,
-                                  target_user_id: m.author_user_id,
-                                  reason: reason.trim(),
-                                });
-                                alert('Report submitted to moderators.');
-                              }}
-                            >
-                              <Flag size={11} />
-                            </button>
-                          )}
-                        </span>
-                      )}
-                    </div>
-
-                    {editingId === m.message_id ? (
-                      <div style={{ display: 'flex', gap: '6px', width: '100%', maxWidth: '520px' }}>
-                        <input
-                          type="text"
-                          value={editText}
-                          onChange={(e) => setEditText(e.target.value)}
-                          style={{
-                            flex: 1,
-                            background: 'var(--bg-input)',
-                            border: '1px solid var(--border-focus)',
-                            borderRadius: '8px',
-                            padding: '8px 12px',
-                            color: 'var(--text-main)',
-                            fontSize: '0.86rem',
-                          }}
-                        />
-                        <button
-                          type="button"
-                          className="btn-solid"
-                          style={{ padding: '6px 12px', fontSize: '0.76rem' }}
-                          onClick={async () => {
-                            try {
-                              const updated = await editPublicChatMessage(m.message_id, editText);
-                              setMessages((prev) =>
-                                prev.map((item) =>
-                                  item.message_id === m.message_id
-                                    ? {
-                                      ...item,
-                                      content: updated.content,
-                                      edited_at: updated.edited_at,
-                                    }
-                                    : item
-                                )
-                              );
-                              setEditingId(null);
-                            } catch (err: any) {
-                              setErrorMsg(err?.message || 'Edit failed');
-                            }
-                          }}
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-outline"
-                          style={{ padding: '6px 10px', fontSize: '0.76rem' }}
-                          onClick={() => setEditingId(null)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
+                      />
                     ) : (
-                      <div
-                        className={`chat-message-bubble ${isMine ? 'bubble-me' : 'bubble-peer'}`}
+                      <QuotedReply name="Reply" preview="The original message is no longer available." />
+                    )
+                  )}
+                  {replyJumpMissId === m.message_id && (
+                    <span className="ig-footer">The original is older. Tap “Show earlier messages” at the top to load it.</span>
+                  )}
+                  {(m.attachments || []).map((att, i) => (
+                    <AttachmentTile
+                      key={att.attachment_id}
+                      id={att.attachment_id}
+                      name={att.file_name}
+                      mime={att.mime_type}
+                      size={att.size_bytes}
+                      kind={att.kind}
+                      load={() =>
+                        m.isOptimistic && m.localFiles?.[i]
+                          ? Promise.resolve(m.localFiles[i] as Blob)
+                          : fetchPublicChatAttachmentBlob(att.attachment_id, att.mime_type)
+                      }
+                    />
+                  ))}
+                  {editingId === m.message_id ? (
+                    <div style={{ display: 'flex', gap: '6px', width: 'min(520px, 70vw)' }}>
+                      <input
+                        type="text"
+                        value={editText}
+                        maxLength={policy.max_length}
+                        autoFocus
+                        onChange={(e) => setEditText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') setEditingId(null);
+                        }}
+                        aria-label="Edit message"
                         style={{
-                          padding: '11px 16px',
-                          borderRadius: isMine ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-                          background: isMine ? 'var(--text-main)' : 'var(--bg-input)',
-                          color: isMine ? 'var(--text-inverse)' : 'var(--text-main)',
-                          border: '1px solid var(--border-subtle)',
-                          fontSize: '0.88rem',
-                          lineHeight: '1.45',
-                          wordBreak: 'break-word',
-                          boxShadow: isMine
-                            ? '0 3px 12px rgba(255, 255, 255, 0.08)'
-                            : '0 2px 8px rgba(0, 0, 0, 0.35)',
-                          opacity: isOpt ? 0.72 : 1,
-                          transition: 'opacity 0.2s ease, transform 0.2s ease',
+                          flex: 1,
+                          background: 'var(--bg-input)',
+                          border: '1px solid var(--border-focus)',
+                          borderRadius: '18px',
+                          padding: '8px 14px',
+                          color: 'var(--text-main)',
+                          fontSize: '0.9rem',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="btn-solid"
+                        style={{ padding: '6px 14px', fontSize: '0.86rem' }}
+                        onClick={async () => {
+                          try {
+                            const updated = await editPublicChatMessage(m.message_id, editText);
+                            setMessages((prev) =>
+                              prev.map((item) =>
+                                item.message_id === m.message_id
+                                  ? { ...item, content: updated.content, edited_at: updated.edited_at }
+                                  : item
+                              )
+                            );
+                            setEditingId(null);
+                          } catch (err: any) {
+                            setErrorMsg(friendlyError(err, 'Edit failed'));
+                          }
                         }}
                       >
-                        {m.content}
-                      </div>
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-outline"
+                        style={{ padding: '6px 12px', fontSize: '0.86rem' }}
+                        onClick={() => setEditingId(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <TextBubble text={m.content} title={ctx.fullTime} edited={Boolean(m.edited_at)} myUsername={e2eeProfile?.username} />
+                  )}
+                </>
+              )}
+              renderFooter={(m, ctx) => (
+                <>
+                  {m.reactions && Object.keys(m.reactions).length > 0 && (
+                    <ReactionChips
+                      reactions={m.reactions}
+                      myId={e2eeProfile?.user_id || ''}
+                      nameFor={(uid) => roomNameFor(uid)}
+                      onToggle={canPost ? (emoji) => void reactInRoom(m, emoji) : undefined}
+                    />
+                  )}
+                  {ctx.mine && ctx.isRunEnd && m.isOptimistic ? (
+                    <span className="ig-footer">
+                      {m.localFiles && m.localFiles.length > 0 ? 'Uploading…' : 'Sending…'}
+                    </span>
+                  ) : null}
+                </>
+              )}
+              renderActions={(m, ctx) => {
+                if (m.isOptimistic) return null;
+                const mine = ctx.mine;
+                const myId = e2eeProfile?.user_id || '';
+                const myReaction = Object.entries(m.reactions || {}).find(([, ids]) => ids.includes(myId))?.[0];
+                const pinned = roomPins.some((p) => p.message_id === m.message_id);
+                return (
+                  <>
+                    {canPost && <ReactButton current={myReaction} onPick={(emoji) => void reactInRoom(m, emoji || null)} />}
+                    {isModerator && (
+                      <button
+                        type="button"
+                        className="ig-action"
+                        title={pinned ? 'Unpin' : 'Pin for everyone'}
+                        aria-label={pinned ? 'Unpin this message' : 'Pin this message'}
+                        aria-pressed={pinned}
+                        onClick={() => void pinRoomMessage(m.message_id, !pinned)}
+                      >
+                        {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+                      </button>
                     )}
-                  </div>
-                </div>
-              );
-            })
+                    {canPost && (
+                      <button
+                        type="button"
+                        className="ig-action"
+                        title="Reply"
+                        aria-label="Reply to this message"
+                        onClick={() =>
+                          setReplyTarget({
+                            message_id: m.message_id,
+                            author_user_id: m.author_user_id,
+                            display_name: mine ? 'You' : m.display_name,
+                            preview: roomReplyPreview(m),
+                          })
+                        }
+                      >
+                        <Reply size={14} />
+                      </button>
+                    )}
+                    {mine && m.content && (
+                      <button
+                        type="button"
+                        className="ig-action"
+                        title="Edit"
+                        aria-label="Edit message"
+                        onClick={() => {
+                          setEditingId(m.message_id);
+                          setEditText(m.content);
+                        }}
+                      >
+                        <Edit3 size={14} />
+                      </button>
+                    )}
+                    {(mine || isModerator) && (
+                      <button
+                        type="button"
+                        className="ig-action"
+                        title="Delete"
+                        aria-label="Delete message"
+                        onClick={async () => {
+                          if (!confirm('Delete this message for everyone?')) return;
+                          try {
+                            await deletePublicChatMessage(m.message_id, 'Deleted from UI');
+                            setMessages((prev) => prev.filter((item) => item.message_id !== m.message_id));
+                          } catch (err: any) {
+                            setErrorMsg(friendlyError(err, 'Delete window expired or unauthorized'));
+                          }
+                        }}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                    {!mine && e2eeProfile && m.author_user_id && (
+                      <button
+                        type="button"
+                        className="ig-action"
+                        title="Block"
+                        aria-label={`Block ${m.display_name}`}
+                        onClick={async () => {
+                          if (!confirm(`Block ${m.display_name}? You will no longer see their messages.`)) return;
+                          await blockUser(m.author_user_id!, 'Blocked in Open Public Chat');
+                          await loadFeed();
+                        }}
+                      >
+                        <Ban size={14} />
+                      </button>
+                    )}
+                    {!mine && e2eeProfile && (
+                      <button
+                        type="button"
+                        className="ig-action"
+                        title="Report"
+                        aria-label="Report message"
+                        onClick={async () => {
+                          const reason = prompt('Reason for reporting this message:');
+                          if (!reason?.trim()) return;
+                          await submitAbuseReport({
+                            scope_type: 'public_chat',
+                            scope_id: 'open_public',
+                            message_id: m.message_id,
+                            target_user_id: m.author_user_id,
+                            reason: reason.trim(),
+                          });
+                          alert('Report submitted to moderators.');
+                        }}
+                      >
+                        <Flag size={14} />
+                      </button>
+                    )}
+                  </>
+                );
+              }}
+            />
           )}
         </div>
 
@@ -736,84 +981,51 @@ export const OpenPublicChatView: React.FC<{
               }}
             >
               <span style={{ fontSize: '0.86rem', color: 'var(--text-main)' }}>
-                <strong>Platform Admission Required:</strong> Pay the one-time ETH entry fee to chat.
+                <strong>Membership Required:</strong> Pay your monthly or yearly membership in ETH to chat.
               </span>
               <button
                 type="button"
                 className="btn-solid"
-                style={{ padding: '6px 14px', fontSize: '0.8rem', whiteSpace: 'nowrap' }}
+                style={{ padding: '6px 14px', fontSize: '0.9rem', whiteSpace: 'nowrap' }}
                 onClick={onOpenAdmissionModal}
               >
-                Pay Admission Fee
+                Pay / Renew Membership
               </button>
             </div>
           ) : (
-            <form
-              onSubmit={handleSend}
-              onClick={() => {
-                if (!account) {
-                  onConnectWallet();
-                } else if (!e2eeProfile) {
-                  onAuthenticateSiwe();
-                }
-              }}
-              style={{ display: 'flex', gap: '10px', width: '100%' }}
-            >
-              <input
-                type="text"
-                maxLength={policy.max_length}
-                disabled={!canPost || sending}
+            <>
+              <TypingLine names={Object.values(roomTyping).filter((t) => t.until > roomNow).map((t) => (t.name.startsWith('@') ? t.name : `@${t.name}`))} />
+              <ChatComposer
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={setInput}
+                onSubmit={() => void handleSend()}
+                files={pendingFiles}
+                onFilesChange={setPendingFiles}
+                maxFileBytes={policy.max_file_bytes || MAX_ROOM_FILE_BYTES}
+                maxFiles={policy.max_files_per_message || MAX_FILES_PER_MESSAGE}
+                dailyLimitText={DAILY_LIMIT_TEXT_ROOM}
+                maxLength={policy.max_length}
+                disabled={!canPost}
+                sending={sending}
+                mentionCandidates={roomMentionCandidates}
+                onTyping={signalRoomTyping}
                 placeholder={
                   canPost
-                    ? `Message Open Public Chat (max ${policy.max_length} chars)...`
+                    ? 'Message the room'
                     : account
-                      ? 'Click to sign in (SIWE) and chat with your verified wallet identity'
-                      : 'Connect MetaMask wallet to chat in Open Public Chat'
+                      ? 'Sign in with your wallet to write'
+                      : 'Connect your wallet to write'
                 }
-                title={
-                  canPost
-                    ? undefined
-                    : account
-                      ? 'Click to sign EIP-4361 SIWE challenge'
-                      : 'Click to connect MetaMask wallet'
-                }
-                style={{
-                  flex: 1,
-                  background: 'var(--bg-input)',
-                  border: '1px solid var(--border-strong)',
-                  borderRadius: '9999px',
-                  padding: '11px 18px',
-                  color: 'var(--text-main)',
-                  fontSize: '0.9rem',
-                  outline: 'none',
-                  cursor: canPost ? 'text' : 'pointer',
-                  opacity: canPost ? 1 : 0.65,
+                onDisabledClick={() => {
+                  if (!account) onConnectWallet();
+                  else if (!e2eeProfile || isWalletMismatch) onAuthenticateSiwe();
                 }}
+                note="Files in the members’ room are visible to all members and are not end-to-end encrypted."
+                canAttach={false}
+                replyTo={replyTarget ? { name: replyTarget.display_name, preview: replyTarget.preview } : null}
+                onCancelReply={() => setReplyTarget(null)}
               />
-              <button
-                type="submit"
-                className="btn-solid"
-                disabled={!canPost || !input.trim() || sending}
-                title={
-                  !canPost
-                    ? 'Connect MetaMask wallet to send messages'
-                    : !input.trim()
-                      ? 'Enter a message to send'
-                      : 'Send message'
-                }
-                style={{
-                  width: '44px',
-                  height: '44px',
-                  borderRadius: '50%',
-                  padding: 0,
-                  justifyContent: 'center',
-                }}
-              >
-                <Send size={16} />
-              </button>
-            </form>
+            </>
           )}
         </div>
       </div>
@@ -822,350 +1034,6 @@ export const OpenPublicChatView: React.FC<{
 
 // ============================================================================
 // 3. DISCOVER USERS & LEVEL-GATED GROUPS VIEW
-// ============================================================================
-
-export const DiscoverUsersView: React.FC<{
-  e2eeProfile: E2EEAccountProfile | null;
-  onStartPrivateChat: (identifier: string) => void;
-  onNavigateGroups: () => void;
-  onOpenPaidGroupModal?: (groupId: string, groupName?: string) => void;
-}> = ({ e2eeProfile, onStartPrivateChat, onNavigateGroups, onOpenPaidGroupModal }) => {
-  const [query, setQuery] = useState('');
-  const [users, setUsers] = useState<DirectoryUserRecord[]>([]);
-  const [publicGroups, setPublicGroups] = useState<DiscoverableGroupRecord[]>([]);
-  const [inviteCode, setInviteCode] = useState('');
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const runSearch = useCallback(async (q: string) => {
-    setLoading(true);
-    try {
-      const [uRes, gRes] = await Promise.all([searchUsers(q, 30), discoverPublicGroups()]);
-      setUsers(uRes.users);
-      setPublicGroups(gRes.groups);
-    } catch (err: any) {
-      setStatusMsg(err?.message || 'Directory lookup failed');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    runSearch('');
-  }, [runSearch]);
-
-  // A group payment finished somewhere else in the app: refresh so "Pay & Join" updates.
-  useEffect(() => {
-    const refresh = () => void runSearch('');
-    window.addEventListener('zyphra:groups-changed', refresh);
-    return () => window.removeEventListener('zyphra:groups-changed', refresh);
-  }, [runSearch]);
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '22px' }}>
-      {/* Left: Username Search Directory */}
-      <div className="deck-card">
-        <div className="deck-header">
-          <div>
-            <div className="deck-title">
-              <Search size={18} /> Username Directory
-            </div>
-            <div className="deck-subtitle">
-              Search verified accounts by unique <code>@username</code> and launch
-              Private Chats.
-            </div>
-          </div>
-        </div>
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            runSearch(query);
-          }}
-          style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}
-        >
-          <input
-            type="text"
-            placeholder="Search @username or wallet..."
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            style={{
-              flex: 1,
-              background: 'var(--bg-input)',
-              border: '1px solid var(--border-strong)',
-              borderRadius: '10px',
-              padding: '10px 14px',
-              color: 'var(--text-main)',
-              fontSize: '0.86rem',
-            }}
-          />
-          <button type="submit" className="btn-solid" disabled={loading}>
-            Search
-          </button>
-        </form>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {users.length === 0 ? (
-            <div style={{ color: 'var(--text-muted)', fontSize: '0.84rem', padding: '16px 0' }}>
-              {loading ? 'Searching directory...' : 'No matching users found.'}
-            </div>
-          ) : (
-            users.map((u) => (
-              <div
-                key={u.user_id}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '12px 14px',
-                  background: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: '12px',
-                  gap: '12px',
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
-                    <span style={{ fontFamily: 'ui-monospace, monospace' }}>
-                      {u.username ? `@${u.username}` : u.user_id.slice(0, 14)}
-                    </span>
-                    <span className="audit-status" style={{ fontSize: '0.66rem' }}>
-                      Member
-                    </span>
-                    {u.online && (
-                      <span
-                        style={{
-                          fontSize: '0.68rem',
-                          color: '#10b981',
-                          fontWeight: 600,
-                        }}
-                      >
-                        ● Online
-                      </span>
-                    )}
-                  </div>
-                  {u.bio && (
-                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '3px' }}>
-                      {u.bio}
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ display: 'flex', gap: '6px' }}>
-                  <button
-                    type="button"
-                    className="btn-solid"
-                    style={{ padding: '6px 12px', fontSize: '0.76rem' }}
-                    onClick={() => onStartPrivateChat(u.username ? `@${u.username}` : u.user_id)}
-                  >
-                    <Lock size={12} />
-                    <span>Message E2EE</span>
-                  </button>
-                  {e2eeProfile && (
-                    <button
-                      type="button"
-                      className="btn-outline"
-                      style={{ padding: '6px 10px', fontSize: '0.74rem' }}
-                      title="Block User"
-                      onClick={async () => {
-                        await blockUser(u.user_id, 'Blocked from directory');
-                        setStatusMsg(`Blocked ${u.username ? `@${u.username}` : u.user_id}`);
-                      }}
-                    >
-                      <Ban size={12} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-
-      {/* Right: Public Group Discovery + Invite Code Join */}
-      <div className="deck-card">
-        <div className="deck-header">
-          <div>
-            <div className="deck-title">
-              <Users size={18} /> Public &amp; Paid Groups
-            </div>
-            <div className="deck-subtitle">
-              Redeem an invite code or join verified public and paid Ethereum channels.
-            </div>
-          </div>
-        </div>
-
-        {statusMsg && (
-          <div
-            style={{
-              padding: '10px 12px',
-              marginBottom: '12px',
-              background: 'var(--bg-input)',
-              border: '1px solid var(--border-strong)',
-              borderRadius: '8px',
-              fontSize: '0.8rem',
-            }}
-          >
-            {statusMsg}
-          </div>
-        )}
-
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!inviteCode.trim()) return;
-            try {
-              const res = await joinGroupByInviteCode(inviteCode.trim());
-              setInviteCode('');
-              const reqId = res.request_id ? `(${res.request_id.slice(0, 10)})` : '';
-              setStatusMsg(
-                `Eligibility verified! Join request ${reqId} queued for group admin MLS Welcome encryption.`
-              );
-            } catch (err: any) {
-              setStatusMsg(err?.message || 'Invite redemption failed');
-            }
-          }}
-          style={{ display: 'flex', gap: '8px', marginBottom: '18px' }}
-        >
-          <input
-            type="text"
-            placeholder="Paste invite code (zinv_...)"
-            value={inviteCode}
-            onChange={(e) => setInviteCode(e.target.value)}
-            style={{
-              flex: 1,
-              background: 'var(--bg-input)',
-              border: '1px solid var(--border-strong)',
-              borderRadius: '10px',
-              padding: '10px 14px',
-              color: 'var(--text-main)',
-              fontSize: '0.82rem',
-              fontFamily: 'ui-monospace, monospace',
-            }}
-          />
-          <button type="submit" className="btn-solid" disabled={!e2eeProfile || !inviteCode.trim()}>
-            <Link2 size={14} />
-            <span>Redeem</span>
-          </button>
-        </form>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {publicGroups.length === 0 ? (
-            <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-              No public groups listed yet. Create a public MLS group in the Groups tab!
-            </div>
-          ) : (
-            publicGroups.map((g) => (
-              <div
-                key={g.group_id}
-                style={{
-                  padding: '12px 14px',
-                  background: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: '12px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: '10px',
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span>{g.name}</span>
-                    {g.is_paid && (
-                      <span
-                        style={{
-                          fontSize: '0.66rem',
-                          fontWeight: 700,
-                          padding: '1px 6px',
-                          borderRadius: '4px',
-                          backgroundColor: 'rgba(234, 179, 8, 0.15)',
-                          color: '#eab308',
-                          border: '1px solid rgba(234, 179, 8, 0.3)',
-                        }}
-                      >
-                        PAID &bull; {formatGroupFee(g)}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                    {g.is_paid ? (
-                      <>
-                        Paid Group &bull; Entry Fee: <strong>{formatGroupFee(g)}</strong> &bull;{' '}
-                        {g.active_member_count} members
-                      </>
-                    ) : (
-                      <>Free Group &bull; {g.active_member_count} members</>
-                    )}
-                  </div>
-                  {g.description && (
-                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '3px' }}>
-                      {g.description}
-                    </div>
-                  )}
-                </div>
-
-                {g.is_member ? (
-                  <button
-                    type="button"
-                    className="btn-outline"
-                    style={{ padding: '6px 12px', fontSize: '0.75rem' }}
-                    onClick={onNavigateGroups}
-                  >
-                    Open Group
-                  </button>
-                ) : g.is_paid && !g.has_paid ? (
-                  <button
-                    type="button"
-                    className="btn-solid"
-                    disabled={!e2eeProfile}
-                    style={{
-                      padding: '6px 12px',
-                      fontSize: '0.75rem',
-                      backgroundColor: '#eab308',
-                      color: '#000000',
-                      fontWeight: 600,
-                    }}
-                    onClick={() => {
-                      if (onOpenPaidGroupModal) {
-                        onOpenPaidGroupModal(g.group_id, g.name);
-                      }
-                    }}
-                  >
-                    Pay &amp; Join
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn-solid"
-                    disabled={!e2eeProfile}
-                    style={{ padding: '6px 12px', fontSize: '0.75rem' }}
-                    onClick={async () => {
-                      try {
-                        await requestJoinPublicGroup(g.group_id);
-                        setStatusMsg(
-                          `Join request submitted for "${g.name}"! Group admins can now approve your MLS Welcome.`
-                        );
-                      } catch (err: any) {
-                        setStatusMsg(err?.message || 'Join request denied by group policy');
-                      }
-                    }}
-                  >
-                    Request Join
-                  </button>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ============================================================================
-// 4. MY PROFILE & PERMANENT IDENTITY / WALLET MIGRATION VIEW
 // ============================================================================
 
 export const MyProfileView: React.FC<{
@@ -1258,10 +1126,9 @@ export const MyProfileView: React.FC<{
       return (
         <div className="deck-card" style={{ textAlign: 'center', padding: '48px 24px' }}>
           <User size={36} style={{ marginBottom: '12px' }} />
-          <h2 style={{ fontSize: '1.2rem', fontWeight: 700 }}>Authenticate Your Permanent Account</h2>
+          <h2 style={{ fontSize: '1.2rem', fontWeight: 700 }}>Sign in to your account</h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem', maxWidth: '460px', margin: '8px auto 20px' }}>
-            Sign in with MetaMask via EIP-4361 (SIWE) to manage your permanent internal{' '}
-            <code>user_id</code>, unique <code>@username</code>, and wallet history.
+            Sign in with MetaMask to manage your @username and wallets. Signing in is free.
           </p>
           {!account ? (
             <button type="button" className="btn-solid" onClick={onConnectWallet}>
@@ -1271,7 +1138,7 @@ export const MyProfileView: React.FC<{
           ) : (
             <button type="button" className="btn-solid" disabled={siweLoading} onClick={onAuthenticateSiwe}>
               <KeyRound size={15} />
-              <span>{siweLoading ? 'Signing SIWE...' : 'Sign In with Ethereum (SIWE)'}</span>
+              <span>{siweLoading ? 'Signing in...' : 'Sign in with MetaMask'}</span>
             </button>
           )}
         </div>
@@ -1303,12 +1170,12 @@ export const MyProfileView: React.FC<{
         loadHistory();
         setStatusMsg({
           text: revokePrevious
-            ? 'Primary wallet replaced & old wallet sessions revoked! Permanent user_id and messages preserved.'
-            : 'Additional wallet linked to your permanent user_id!',
+            ? 'This is now your main wallet. The old one was removed. Your messages are unchanged.'
+            : 'Wallet added to your account.',
           isError: false,
         });
       } catch (err: any) {
-        setStatusMsg({ text: err?.message || 'Wallet change failed', isError: true });
+        setStatusMsg({ text: friendlyError(err, 'Wallet change failed'), isError: true });
       } finally {
         setBusy(false);
       }
@@ -1327,9 +1194,9 @@ export const MyProfileView: React.FC<{
                 padding: '10px 14px',
                 background: statusMsg.isError ? 'rgba(239, 68, 68, 0.08)' : 'rgba(16, 185, 129, 0.08)',
                 border: `1px solid ${statusMsg.isError ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)'}`,
-                color: statusMsg.isError ? '#ef4444' : '#10b981',
+                color: statusMsg.isError ? 'var(--danger)' : 'var(--ok)',
                 borderRadius: '8px',
-                fontSize: '0.82rem',
+                fontSize: '0.9rem',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '8px',
@@ -1347,7 +1214,7 @@ export const MyProfileView: React.FC<{
               background: 'var(--bg-input)',
               border: '1px solid var(--border-subtle)',
               borderRadius: '12px',
-              fontSize: '0.8rem',
+              fontSize: '0.9rem',
             }}
           >
             <div style={{ color: 'var(--text-secondary)', marginBottom: '4px' }}>
@@ -1360,7 +1227,7 @@ export const MyProfileView: React.FC<{
               <button
                 type="button"
                 className="btn-outline"
-                style={{ padding: '4px 8px', fontSize: '0.72rem' }}
+                style={{ padding: '4px 8px', fontSize: '0.9rem' }}
                 onClick={() => {
                   navigator.clipboard.writeText(e2eeProfile.user_id);
                   setCopiedUid(true);
@@ -1389,14 +1256,14 @@ export const MyProfileView: React.FC<{
                   isError: false,
                 });
               } catch (err: any) {
-                setStatusMsg({ text: err?.message || 'Username update rejected', isError: true });
+                setStatusMsg({ text: friendlyError(err, 'Username update rejected'), isError: true });
               } finally {
                 setBusy(false);
               }
             }}
             style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
           >
-            <label style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
+            <label style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
               UNIQUE @USERNAME (CASE-INSENSITIVE • COOLDOWN &amp; RESERVATION PROTECTED)
             </label>
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -1436,7 +1303,7 @@ export const MyProfileView: React.FC<{
               </button>
             </div>
             {usernameInput.trim() && (
-              <div style={{ fontSize: '0.74rem', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+              <div style={{ fontSize: '0.9rem', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '5px' }}>
                 {usernameCheck.checking ? (
                   <span style={{ color: 'var(--text-muted)' }}>
                     Checking @{usernameInput.trim().replace(/^@/, '')} availability...
@@ -1444,11 +1311,11 @@ export const MyProfileView: React.FC<{
                 ) : usernameCheck.is_current ? (
                   <span style={{ color: 'var(--text-secondary)' }}>(Your current username)</span>
                 ) : usernameCheck.available ? (
-                  <span style={{ color: '#10b981', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                  <span style={{ color: 'var(--ok)', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
                     <Check size={12} /> @{usernameInput.trim().replace(/^@/, '')} is available!
                   </span>
                 ) : (
-                  <span style={{ color: '#ef4444', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                  <span style={{ color: 'var(--danger)', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
                     <AlertCircle size={12} /> {usernameCheck.reason || 'Username is already taken'}
                   </span>
                 )}
@@ -1469,7 +1336,7 @@ export const MyProfileView: React.FC<{
                 onProfileUpdated(res.user);
                 setStatusMsg({ text: 'Bio saved successfully.', isError: false });
               } catch (err: any) {
-                setStatusMsg({ text: err?.message || 'Failed to update bio', isError: true });
+                setStatusMsg({ text: friendlyError(err, 'Failed to update bio'), isError: true });
               } finally {
                 setBusy(false);
               }
@@ -1477,7 +1344,7 @@ export const MyProfileView: React.FC<{
             style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
           >
             <div>
-              <label style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
+              <label style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
                 BIO (MAX 280 CHARS)
               </label>
               <textarea
@@ -1522,11 +1389,11 @@ export const MyProfileView: React.FC<{
                   display: 'flex',
                   justifyContent: 'space-between',
                   fontFamily: 'ui-monospace, monospace',
-                  fontSize: '0.8rem',
+                  fontSize: '0.9rem',
                 }}
               >
                 <span>{formatAddress(w.wallet_address, 6)}</span>
-                <span>{w.is_primary ? 'PRIMARY WALLET' : w.status.toUpperCase()}</span>
+                <span>{w.is_primary ? 'Primary wallet' : w.status.charAt(0).toUpperCase() + w.status.slice(1)}</span>
               </div>
             ))}
           </div>
@@ -1541,13 +1408,12 @@ export const MyProfileView: React.FC<{
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '10px',
-                fontSize: '0.8rem',
+                fontSize: '0.9rem',
               }}
             >
               <div>
-                MetaMask switched to unlinked wallet{' '}
-                <code>{formatAddress(account, 5)}</code>. Sign a fresh SIWE challenge to replace or
-                link it to <code>{e2eeProfile.user_id.slice(0, 14)}...</code>:
+                MetaMask switched to a wallet that is not on your account yet:{' '}
+                <code>{formatAddress(account, 5)}</code>. Choose what to do:
               </div>
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 <button
@@ -1569,21 +1435,21 @@ export const MyProfileView: React.FC<{
               </div>
             </div>
           ) : (
-            <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+            <div style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>
               To replace your wallet, switch to your new account inside MetaMask while signed in—a
               secure SIWE migration button will appear above automatically.
             </div>
           )}
 
           <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-            <div style={{ fontSize: '0.78rem', fontWeight: 700, marginBottom: '6px' }}>
+            <div style={{ fontSize: '0.86rem', fontWeight: 700, marginBottom: '6px' }}>
               Username History ({historyData?.username_history?.length || 0})
             </div>
             {(historyData?.username_history || []).slice(0, 5).map((h: any, idx: number) => (
               <div
                 key={h.history_id || `${h.new_username}-${idx}`}
                 style={{
-                  fontSize: '0.74rem',
+                  fontSize: '0.9rem',
                   color: 'var(--text-secondary)',
                   fontFamily: 'ui-monospace, monospace',
                   padding: '4px 0',
@@ -1596,7 +1462,7 @@ export const MyProfileView: React.FC<{
           </div>
 
           <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-            <div style={{ fontSize: '0.78rem', fontWeight: 700, marginBottom: '6px' }}>
+            <div style={{ fontSize: '0.86rem', fontWeight: 700, marginBottom: '6px' }}>
               Wallet Change Audit Trail ({historyData?.wallet_history?.length || 0})
             </div>
             {(historyData?.wallet_history || []).slice(0, 5).map((wh: any, idx: number) => {
@@ -1606,7 +1472,7 @@ export const MyProfileView: React.FC<{
                 <div
                   key={wh.history_id || `${newAddr || idx}-${idx}`}
                   style={{
-                    fontSize: '0.74rem',
+                    fontSize: '0.9rem',
                     color: 'var(--text-secondary)',
                     fontFamily: 'ui-monospace, monospace',
                     padding: '4px 0',
@@ -1634,8 +1500,6 @@ export const SettingsView: React.FC<{
   siweLoading?: boolean;
   onConnectWallet?: () => void;
   onAuthenticateSiwe?: () => void;
-  theme: 'dark' | 'light';
-  onToggleTheme: () => void;
   onProfileUpdated: (profile: E2EEAccountProfile) => void;
   onNavigateDmVault: () => void;
   initialSubTab?: 'wallet_level' | 'privacy' | 'blocked';
@@ -1645,8 +1509,6 @@ export const SettingsView: React.FC<{
   siweLoading = false,
   onConnectWallet,
   onAuthenticateSiwe,
-  theme,
-  onToggleTheme,
   onProfileUpdated,
   onNavigateDmVault,
   initialSubTab,
@@ -1689,7 +1551,7 @@ export const SettingsView: React.FC<{
           } ETH`
         );
       } catch (err: any) {
-        setVerifyMsg(err?.message || 'Backend RPC balance verification failed');
+        setVerifyMsg(friendlyError(err, 'Backend RPC balance verification failed'));
       } finally {
         setVerifying(false);
       }
@@ -1697,7 +1559,6 @@ export const SettingsView: React.FC<{
 
     // Privacy & Blocks State
     const [blocked, setBlocked] = useState<any[]>([]);
-    const [apiUrl, setApiUrl] = useState(getBaseApiUrl());
     const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
     const loadBlocks = useCallback(() => {
@@ -1717,12 +1578,12 @@ export const SettingsView: React.FC<{
         onProfileUpdated(res.user);
         setStatusMsg('Privacy preferences saved.');
       } catch (err: any) {
-        setStatusMsg(err?.message || 'Failed to update privacy setting');
+        setStatusMsg(friendlyError(err, 'Failed to update privacy setting'));
       }
     };
 
     return (
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', maxWidth: 920, width: '100%', margin: '0 auto' }}>
         {/* Settings Sub-Navigation Tabs */}
         <div
           style={{
@@ -1740,7 +1601,7 @@ export const SettingsView: React.FC<{
             className={`btn-outline ${activeSubTab === 'wallet_level' ? 'active' : ''}`}
             style={{
               padding: '8px 16px',
-              fontSize: '0.82rem',
+              fontSize: '0.9rem',
               gap: '8px',
               fontWeight: 600,
               borderColor:
@@ -1753,7 +1614,7 @@ export const SettingsView: React.FC<{
             onClick={() => setActiveSubTab('wallet_level')}
           >
             <Award size={15} />
-            <span>Wallet &amp; Membership</span>
+            <span>Wallet</span>
           </button>
 
           <button
@@ -1761,7 +1622,7 @@ export const SettingsView: React.FC<{
             className={`btn-outline ${activeSubTab === 'privacy' ? 'active' : ''}`}
             style={{
               padding: '8px 16px',
-              fontSize: '0.82rem',
+              fontSize: '0.9rem',
               gap: '8px',
               fontWeight: 600,
               borderColor:
@@ -1774,7 +1635,7 @@ export const SettingsView: React.FC<{
             onClick={() => setActiveSubTab('privacy')}
           >
             <SettingsIcon size={15} />
-            <span>Privacy &amp; Security</span>
+            <span>Privacy</span>
           </button>
 
           <button
@@ -1782,7 +1643,7 @@ export const SettingsView: React.FC<{
             className={`btn-outline ${activeSubTab === 'blocked' ? 'active' : ''}`}
             style={{
               padding: '8px 16px',
-              fontSize: '0.82rem',
+              fontSize: '0.9rem',
               gap: '8px',
               fontWeight: 600,
               borderColor:
@@ -1795,7 +1656,7 @@ export const SettingsView: React.FC<{
             onClick={() => setActiveSubTab('blocked')}
           >
             <Ban size={15} />
-            <span>Blocked Accounts ({blocked.length})</span>
+            <span>Blocked members{blocked.length > 0 ? ` (${blocked.length})` : ''}</span>
           </button>
         </div>
 
@@ -1814,11 +1675,11 @@ export const SettingsView: React.FC<{
               >
                 <div>
                   <div className="deck-title">
-                    <Award size={20} /> Wallet &amp; On-Chain Balance Verification
+                    <Award size={20} /> Wallet balance
                   </div>
                   <div className="deck-subtitle">
-                    Verify your primary MetaMask wallet’s on-chain ETH balance directly against
-                    Ethereum RPC—browser-reported balances are never trusted.
+                    We check your wallet’s ETH balance directly on the Ethereum network. Some groups
+                    ask for a minimum balance.
                   </div>
                 </div>
 
@@ -1838,7 +1699,7 @@ export const SettingsView: React.FC<{
                       onClick={onAuthenticateSiwe}
                     >
                       <KeyRound size={15} />
-                      <span>{siweLoading ? 'Signing...' : 'Sign SIWE to Verify Wallet'}</span>
+                      <span>{siweLoading ? 'Signing...' : 'Verify your wallet'}</span>
                     </button>
                   )
                 ) : (
@@ -1850,7 +1711,7 @@ export const SettingsView: React.FC<{
                   >
                     <RefreshCw size={14} />
                     <span>
-                      {verifying ? 'Querying Ethereum RPC...' : 'Verify On-Chain ETH Balance'}
+                      {verifying ? 'Checking...' : 'Check my balance'}
                     </span>
                   </button>
                 )}
@@ -1864,7 +1725,7 @@ export const SettingsView: React.FC<{
                     background: 'var(--bg-input)',
                     border: '1px solid var(--border-strong)',
                     borderRadius: '10px',
-                    fontSize: '0.82rem',
+                    fontSize: '0.9rem',
                     fontFamily: 'ui-monospace, monospace',
                   }}
                 >
@@ -1882,13 +1743,13 @@ export const SettingsView: React.FC<{
                   }}
                 >
                   <div className="spec-badge" style={{ textAlign: 'left', padding: '14px' }}>
-                    <strong>MEMBERSHIP STATUS</strong>
+                    <strong>Membership</strong>
                     <span style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                      {e2eeProfile.is_platform_paid || e2eeProfile.admin_role ? 'Paid Member' : 'Member'}
+                      {e2eeProfile.is_platform_paid || e2eeProfile.admin_role ? 'Active' : 'Inactive'}
                     </span>
                   </div>
                   <div className="spec-badge" style={{ textAlign: 'left', padding: '14px' }}>
-                    <strong>LAST RPC VERIFIED BALANCE</strong>
+                    <strong>Wallet balance (last checked)</strong>
                     <span
                       style={{
                         fontSize: '1.1rem',
@@ -1908,7 +1769,7 @@ export const SettingsView: React.FC<{
             {historyData?.balance_snapshots?.length > 0 && (
               <div className="deck-card">
                 <div className="deck-title" style={{ marginBottom: '10px' }}>
-                  Recent On-Chain RPC Balance Snapshots
+                  Recent balance checks
                 </div>
                 {historyData.balance_snapshots.slice(0, 6).map((s: any) => (
                   <div
@@ -1918,7 +1779,7 @@ export const SettingsView: React.FC<{
                       justifyContent: 'space-between',
                       padding: '8px 0',
                       borderBottom: '1px solid var(--border-subtle)',
-                      fontSize: '0.78rem',
+                      fontSize: '0.86rem',
                       fontFamily: 'ui-monospace, monospace',
                     }}
                   >
@@ -1942,7 +1803,7 @@ export const SettingsView: React.FC<{
             style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '780px' }}
           >
             <div className="deck-title">
-              <SettingsIcon size={18} /> Privacy, Appearance &amp; E2EE Security
+              <SettingsIcon size={18} /> Privacy
             </div>
 
             {statusMsg && (
@@ -1952,25 +1813,12 @@ export const SettingsView: React.FC<{
                   background: 'var(--bg-input)',
                   border: '1px solid var(--border-strong)',
                   borderRadius: '8px',
-                  fontSize: '0.8rem',
+                  fontSize: '0.9rem',
                 }}
               >
                 {statusMsg}
               </div>
             )}
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>Interface Theme</div>
-                <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
-                  Switch between Cyber-Monolithic Dark and Light mode
-                </div>
-              </div>
-              <button type="button" className="btn-outline" onClick={onToggleTheme}>
-                {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
-                <span>{theme === 'dark' ? 'Switch to Light' : 'Switch to Dark'}</span>
-              </button>
-            </div>
 
             {e2eeProfile && (
               <>
@@ -1979,14 +1827,12 @@ export const SettingsView: React.FC<{
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
-                    paddingTop: '12px',
-                    borderTop: '1px solid var(--border-subtle)',
                   }}
                 >
                   <div>
                     <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>Show Online Presence</div>
-                    <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
-                      Allow other users in the username directory to see when you are online
+                    <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
+                      Let other members see when you are online.
                     </div>
                   </div>
                   <input
@@ -2007,10 +1853,10 @@ export const SettingsView: React.FC<{
                 >
                   <div>
                     <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>
-                      Send Private Chat Read Receipts
+                      Read receipts in private chats
                     </div>
-                    <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
-                      Notify conversation peers when you have decrypted &amp; viewed their DM
+                    <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
+                      Let people know when you have read their private messages.
                     </div>
                   </div>
                   <input
@@ -2022,47 +1868,12 @@ export const SettingsView: React.FC<{
 
                 <div style={{ paddingTop: '12px', borderTop: '1px solid var(--border-subtle)' }}>
                   <button type="button" className="btn-solid" onClick={onNavigateDmVault}>
-                    <KeyRound size={14} />
-                    <span>Manage E2EE Devices &amp; Prekeys in Enclave</span>
+                    <UserCog size={14} />
+                    <span>Account and devices</span>
                   </button>
                 </div>
               </>
             )}
-
-            <div style={{ paddingTop: '12px', borderTop: '1px solid var(--border-subtle)' }}>
-              <label
-                style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}
-              >
-                BACKEND API BASE URL
-              </label>
-              <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
-                <input
-                  type="text"
-                  value={apiUrl}
-                  onChange={(e) => setApiUrl(e.target.value)}
-                  style={{
-                    flex: 1,
-                    background: 'var(--bg-input)',
-                    border: '1px solid var(--border-strong)',
-                    borderRadius: '8px',
-                    padding: '8px 12px',
-                    color: 'var(--text-main)',
-                    fontSize: '0.82rem',
-                    fontFamily: 'ui-monospace, monospace',
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn-outline"
-                  onClick={() => {
-                    setBaseApiUrl(apiUrl);
-                    setStatusMsg('API Base URL updated.');
-                  }}
-                >
-                  Apply
-                </button>
-              </div>
-            </div>
           </div>
         )}
 
@@ -2073,12 +1884,12 @@ export const SettingsView: React.FC<{
               <Ban size={18} /> Blocked Accounts ({blocked.length})
             </div>
             {!e2eeProfile ? (
-              <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                Sign in with SIWE to view and manage blocked users.
+              <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                Sign in with your wallet to manage blocked members.
               </div>
             ) : blocked.length === 0 ? (
-              <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                You have not blocked any users.
+              <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                You have not blocked anyone.
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -2095,7 +1906,7 @@ export const SettingsView: React.FC<{
                         background: 'var(--bg-input)',
                         border: '1px solid var(--border-subtle)',
                         borderRadius: '10px',
-                        fontSize: '0.8rem',
+                        fontSize: '0.9rem',
                       }}
                     >
                       <span style={{ fontFamily: 'ui-monospace, monospace' }}>
@@ -2104,7 +1915,7 @@ export const SettingsView: React.FC<{
                       <button
                         type="button"
                         className="btn-outline"
-                        style={{ padding: '4px 10px', fontSize: '0.74rem' }}
+                        style={{ padding: '4px 10px', fontSize: '0.9rem' }}
                         onClick={async () => {
                           await unblockUser(targetId);
                           loadBlocks();

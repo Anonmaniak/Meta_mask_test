@@ -147,11 +147,15 @@ async def lifespan(app: FastAPI):
         try:
             from run_migrations import run_all_migrations
             run_all_migrations()
+        except chat_db.DatabaseUnavailableError:
+            raise  # production: refuse to start rather than run on a throwaway local database
         except Exception as exc:
             print(f"[WARN] Database migration/startup note: {exc}")
             try:
                 chat_db.init_chat_db()
                 platform_db.ensure_platform_tables()
+            except chat_db.DatabaseUnavailableError:
+                raise
             except Exception:
                 pass
 
@@ -183,6 +187,10 @@ async def lifespan(app: FastAPI):
         print("[STOP] Zyphra Chat Platform shutting down")
 
 
+# The interactive API docs (/docs, /redoc, /openapi.json) list every endpoint, including admin ones.
+# They are OFF unless ENABLE_API_DOCS=1 is set (e.g. on a developer's machine). Never set it on Render.
+_API_DOCS_ENABLED = os.getenv("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes")
+
 app = FastAPI(
     title="Zyphra Ethereum Wallet-Linked Chat Platform API",
     version="3.0.0",
@@ -191,13 +199,10 @@ app = FastAPI(
         "Olm v2 + MLS RFC 9420 E2EE, Open Public Chat, Verified On-Chain Payments, and RBAC Admin."
     ),
     lifespan=lifespan,
+    docs_url="/docs" if _API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if _API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _API_DOCS_ENABLED else None,
 )
-
-# Public Room Envelope & Key Routers
-from chat_keys import router as chat_keys_router
-from chat_routes import router as chat_e2ee_router
-app.include_router(chat_keys_router)
-app.include_router(chat_e2ee_router)
 
 # High-Security E2EE Router & Authenticated WebSocket (Olm v2 + MLS RFC 9420)
 from e2ee_routes import router as high_sec_e2ee_router, ws_router as high_sec_ws_router
@@ -357,7 +362,7 @@ app.add_middleware(
     allow_origin_regex=_LOCAL_DEV_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-Wallet-Address"],
+    allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-Wallet-Address", "X-Session-Id"],
 )
 
 
@@ -433,6 +438,25 @@ def _cached_rpc_health() -> dict:
         return value
 
 
+def _realtime_health() -> dict:
+    """Live connections and the user limit this server sized itself to (see capacity.py).
+    Check this after every plan change: `max_online_users` should have grown."""
+    try:
+        import capacity
+        from e2ee_routes import realtime_hub
+
+        cap = capacity.get_capacity()
+        return {
+            "connections": realtime_hub.connection_counts(),
+            "max_online_users": cap["max_online_users"] if cap.get("enforced") else None,
+            "capacity_source": cap["source"],
+            "detected_cpu_cores": cap.get("detected_cpu_cores"),
+            "detected_memory_mb": cap.get("detected_memory_mb"),
+        }
+    except Exception as exc:  # health must never fail because of a reporting problem
+        return {"error": str(exc)[:120]}
+
+
 @app.get("/api/health")
 @app.get("/health")
 def health_check(deep: bool = False):
@@ -445,9 +469,14 @@ def health_check(deep: bool = False):
         "service": "zyphra-chat-platform",
         "storage": "postgresql" if is_pg else "sqlite_fallback",
         "networks": _cached_rpc_health(),
+        "realtime": _realtime_health(),
     }
     if deep:
         payload["database"] = "ok" if chat_db.ping_pg_health() else "unavailable"
+    if not is_pg and chat_db.is_production():
+        # Never report healthy in production while on the local fallback (it should be impossible now).
+        payload["status"] = "unhealthy"
+        return JSONResponse(status_code=503, content=payload)
     return payload
 
 
@@ -487,7 +516,7 @@ def main():
 
     import uvicorn
     reload_flag = os.getenv("ENV", "development").lower() == "development"
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=reload_flag)
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=reload_flag, access_log=False)
 
 
 if __name__ == "__main__":

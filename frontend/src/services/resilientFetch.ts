@@ -37,6 +37,16 @@ export class NetworkUnreachableError extends Error {
   }
 }
 
+/** Extra random wait (0 to 2 s) so thousands of browsers do not all reconnect in the same instant after a restart. */
+export function reconnectJitterMs(): number {
+  return Math.random() * 2000;
+}
+
+/** When the server says it is full (close code 4503): try again in 20 to 60 seconds, not every second. */
+export function serverFullDelayMs(): number {
+  return 20000 + Math.random() * 40000;
+}
+
 /** Exponential backoff with jitter: ~0.4s, 0.8s, 1.6s, 3.2s, 5s, 5s ... */
 export function backoffDelay(attempt: number, capMs = 5000): number {
   const base = Math.min(400 * 2 ** Math.max(0, attempt), capMs);
@@ -68,7 +78,7 @@ export async function resilientFetch(
   let attempt = 0;
   let count500 = 0;
 
-  for (;;) {
+  for (; ;) {
     const controller = new AbortController();
     const forwardAbort = () => controller.abort();
     if (callerSignal) {
@@ -106,7 +116,7 @@ export async function resilientFetch(
  * Used so WebSockets reconnect immediately instead of waiting out a backoff timer.
  */
 export function onWake(cb: () => void): () => void {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return () => {};
+  if (typeof window === 'undefined' || typeof document === 'undefined') return () => { };
   const onVisible = () => {
     if (document.visibilityState === 'visible') cb();
   };

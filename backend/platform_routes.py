@@ -6,7 +6,7 @@ Covers:
 2. Username Search Directory, Extended Profiles, Identity/Wallet/Level History, User Blocks,
    Optional DM Read Receipts & Abuse Reporting
 3. Configurable Wallet-Based Levels (starting at Level 7) & Server-Side Ethereum RPC Balance Verification
-4. Group Access Policies (`min_level`, `min_eth_balance_wei`, `visibility`), Invite Links,
+4. Group Access Policies (`min_eth_balance_wei`, `visibility`, paid/free), Invite Links,
    Public Group Discovery, Policy-Gated Join Requests & Leave Group
 5. Role-Based Admin Console (`superadmin`, `moderator`) & Immutable Audit Logs
 """
@@ -30,6 +30,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -40,7 +41,10 @@ import admin_auth
 import e2ee_db
 import platform_db
 import support_db
+import public_attachments_db
+import chat_features_db
 import eth_rpc
+from urllib.parse import quote as _url_quote
 from e2ee_routes import (
     SESSION_COOKIE_NAME,
     StrictModel,
@@ -188,18 +192,11 @@ class AdminLoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=256)
 
 
-def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        # Right-most entry is the one appended by our trusted proxy (Render); never trust the left-most.
-        return fwd.split(",")[-1].strip()[:64]
-    return request.client.host if request.client else "unknown"
-
 
 @router.post("/admin/login")
 def admin_login(body: AdminLoginRequest, request: Request) -> Dict[str, Any]:
     try:
-        token = admin_auth.attempt_login(body.login_id, body.password, _client_ip(request))
+        token = admin_auth.attempt_login(body.login_id, body.password)
     except admin_auth.LoginError as exc:
         headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
         raise HTTPException(status_code=exc.status, detail=exc.detail, headers=headers)
@@ -232,8 +229,19 @@ def admin_logout(
 # ============================================================================
 
 class PublicChatPostRequest(StrictModel):
-    content: str = Field(..., min_length=1, max_length=4000)
+    # Empty content is allowed when the message carries files (checked in the handler).
+    content: str = Field("", max_length=4000)
     guest_token: Optional[str] = Field(None, max_length=64)
+    attachment_ids: List[str] = Field(default_factory=list, max_length=public_attachments_db.MAX_FILES_PER_MESSAGE)
+    # Reply to an earlier Members' room message (its id)
+    reply_to_message_id: Optional[str] = Field(None, min_length=4, max_length=64, pattern=r"^pub_[A-Za-z0-9]+$")
+
+
+class PublicChatAttachmentUploadRequest(StrictModel):
+    file_name: str = Field(..., min_length=1, max_length=255)
+    mime_type: str = Field("application/octet-stream", max_length=255)
+    # base64 of at most MAX_FILE_BYTES (4/3 overhead + padding)
+    data_b64: str = Field(..., min_length=4, max_length=(public_attachments_db.MAX_FILE_BYTES * 4) // 3 + 8)
 
 
 class PublicChatEditRequest(StrictModel):
@@ -241,9 +249,9 @@ class PublicChatEditRequest(StrictModel):
 
 
 class ProfileUpdateRequest(StrictModel):
+    model_config = {"extra": "ignore"}  # older app versions may still send the removed avatar_url
     display_name: Optional[str] = Field(None, max_length=48)
     bio: Optional[str] = Field(None, max_length=280)
-    avatar_url: Optional[str] = Field(None, max_length=500)
     show_online_presence: Optional[bool] = None
     send_read_receipts: Optional[bool] = None
 
@@ -276,23 +284,27 @@ class PaymentVerifyRequest(StrictModel):
     chain_id: Optional[int] = Field(None, ge=1)
     purpose: Optional[str] = Field("platform_entry", max_length=32)
     group_id: Optional[str] = Field(None, max_length=128)
+    billing_period: Optional[str] = Field("monthly", pattern=r"^(monthly|yearly)$")
 
 
 class GroupPolicyUpdateRequest(StrictModel):
+    model_config = {"extra": "ignore"}  # older app versions may still send the removed avatar_url / min_level
     description: str = Field("", max_length=500)
-    avatar_url: Optional[str] = Field(None, max_length=500)
     visibility: str = Field("invite_only", pattern=r"^(public|invite_only)$")
-    min_level: int = Field(7, ge=7, le=100)
     min_eth_balance_wei: Optional[str] = Field(None, pattern=r"^[0-9]{1,36}$")
     min_eth_balance_eth: Optional[str] = Field(None, max_length=32)
     require_invitation: bool = True
-    is_paid: Optional[bool] = False
-    entry_fee_eth: Optional[str] = Field("0", max_length=32)  # legacy fixed-ETH fee
-    entry_fee_usd: Optional[float] = Field(None, ge=0, le=100000)  # preferred: priced in USD
+    # None = "not sent": keep the group's current paid status / legacy fee. (A missing field used to
+    # default to False, so a superadmin saving only the description in the app made a paid group free.)
+    is_paid: Optional[bool] = None
+    entry_fee_eth: Optional[str] = Field(None, max_length=32)  # legacy fixed-ETH fee
+    entry_fee_usd: Optional[float] = Field(None, ge=0, le=100000)  # MONTHLY price in USD
+    entry_fee_yearly_usd: Optional[float] = Field(None, ge=0, le=1000000)  # YEARLY price in USD (0 = 12 x monthly)
 
 
 class AdminPricingUpdateRequest(StrictModel):
     platform_entry_fee_usd: Optional[float] = Field(None, ge=0, le=100000)
+    platform_yearly_fee_usd: Optional[float] = Field(None, ge=0, le=1000000)
     use_live_eth_price: Optional[bool] = None
     platform_entry_fee_eth: Optional[str] = Field(None, max_length=32)  # legacy, ignored for pricing
     eth_usd_price: Optional[float] = Field(None, gt=0)
@@ -318,6 +330,22 @@ class AdminRoleGrantRequest(StrictModel):
     role: Optional[str] = Field(None, pattern=r"^(superadmin|moderator)$")
 
 
+class AdminAccessGrantRequest(StrictModel):
+    """Free access without payment: the whole membership ('platform') or one group ('group')."""
+    user_id: str = Field(..., min_length=3, max_length=64)
+    scope_type: str = Field(..., pattern=r"^(platform|group)$")
+    group_id: Optional[str] = Field(None, min_length=1, max_length=128)
+    # None = no end date (until revoked); otherwise 1..3650 days
+    days: Optional[int] = Field(None, ge=1, le=3650)
+    note: str = Field("", max_length=200)
+
+
+class AdminAccessRevokeRequest(StrictModel):
+    user_id: str = Field(..., min_length=3, max_length=64)
+    scope_type: str = Field(..., pattern=r"^(platform|group)$")
+    group_id: Optional[str] = Field(None, min_length=1, max_length=128)
+
+
 class AdminReportResolveRequest(StrictModel):
     status: str = Field(..., pattern=r"^(resolved|dismissed)$")
     resolution_note: str = Field("", max_length=500)
@@ -329,14 +357,18 @@ class AdminSettingsUpdateRequest(BaseModel):
     public_chat_retention_days: Optional[int] = Field(None, ge=1, le=3650)
     username_cooldown_hours: Optional[int] = Field(None, ge=0, le=720)
     username_reservation_days: Optional[int] = Field(None, ge=0, le=365)
-    balance_reeval_minutes: Optional[int] = Field(None, ge=1, le=1440)
     default_balance_chain_id: Optional[int] = Field(None, ge=1)
     authorized_payment_destination: Optional[str] = Field(None, max_length=42)
     # Membership pricing (previously silently dropped by this model, so the admin
     # dashboard could never actually change the fee)
-    platform_entry_fee_usd: Optional[float] = Field(None, ge=0, le=100000)
+    platform_entry_fee_usd: Optional[float] = Field(None, ge=0, le=100000)  # MONTHLY membership price
+    platform_yearly_fee_usd: Optional[float] = Field(None, ge=0, le=1000000)  # YEARLY price (0 = 12 x monthly)
     use_live_eth_price: Optional[bool] = None
     eth_usd_price: Optional[float] = Field(None, gt=0)
+    # Banner at the top of the app for everyone ("" removes it)
+    announcement_text: Optional[str] = Field(None, max_length=280)
+    announcement_level: Optional[str] = Field(None, pattern=r"^(info|warning)$")
+    announcement_ends_at: Optional[str] = Field(None, max_length=40)
 
 
 class PaymentDestinationUpdateRequest(StrictModel):
@@ -420,6 +452,33 @@ def _require_paid_member_ctx(request: Request, authorization: Optional[str]) -> 
     return ctx
 
 
+def _public_chat_policy_dict(settings: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "guest_read_enabled": False,
+        "guest_posting_enabled": False,
+        "max_length": int(settings.get("public_chat_max_length") or 1000),
+        "edit_window_seconds": int(settings.get("public_chat_edit_window_seconds") or 900),
+        "retention_days": int(settings.get("public_chat_retention_days") or 90),
+        "max_file_bytes": public_attachments_db.MAX_FILE_BYTES,
+        "max_files_per_message": public_attachments_db.MAX_FILES_PER_MESSAGE,
+    }
+
+
+def _attach_reply_quotes(messages: List[Dict[str, Any]], viewer_uid: Optional[str]) -> None:
+    """Adds `reply_to` (who wrote the original + short excerpt) to Members' room replies."""
+    reply_ids = [m.get("reply_to_message_id") for m in messages if m.get("reply_to_message_id")]
+    if not reply_ids:
+        for m in messages:
+            m["reply_to"] = None
+        return
+    blocked = set(platform_db.list_blocked_user_ids(viewer_uid)) if viewer_uid else set()
+    files = public_attachments_db.attachments_for_messages(reply_ids)
+    quotes = platform_db.build_public_reply_quotes(reply_ids, blocked, files)
+    for m in messages:
+        rid = m.get("reply_to_message_id")
+        m["reply_to"] = quotes.get(rid) if rid else None
+
+
 @router.get("/public-chat/messages")
 def get_open_public_chat_feed(
     request: Request,
@@ -439,7 +498,14 @@ def get_open_public_chat_feed(
         limit=limit,
         viewer_user_id=viewer_uid,
     )
+    files = public_attachments_db.attachments_for_messages([m["message_id"] for m in feed["messages"]])
+    reactions = chat_features_db.reactions_for_messages([m["message_id"] for m in feed["messages"]])
+    for m in feed["messages"]:
+        m["attachments"] = files.get(m["message_id"], [])
+        m["reactions"] = reactions.get(m["message_id"], {})
+    _attach_reply_quotes(feed["messages"], viewer_uid)
     return {
+        "pins": chat_features_db.list_pins(chat_features_db.ROOM),
         "room": "open_public",
         "security_notice": (
             "Open Public Chat is readable by all members and moderated. "
@@ -448,12 +514,7 @@ def get_open_public_chat_feed(
         "messages": feed["messages"],
         "next_before_seq": feed["next_before_seq"],
         "online": realtime_hub.get_online_stats(include_active_live=is_connected_member),
-        "policy": {
-            "guest_read_enabled": False,
-            "guest_posting_enabled": False,
-            "max_length": int(settings.get("public_chat_max_length") or 1000),
-            "edit_window_seconds": int(settings.get("public_chat_edit_window_seconds") or 900),
-        },
+        "policy": _public_chat_policy_dict(settings),
     }
 
 
@@ -465,7 +526,12 @@ def post_open_public_chat_message(
 ):
     settings = platform_db.get_platform_settings()
     max_len = int(settings.get("public_chat_max_length") or 1000)
-    cleaned = _sanitize_public_text(payload.content, max_len=max_len)
+    has_files = bool(payload.attachment_ids)
+    cleaned = (
+        _sanitize_public_text(payload.content, max_len=max_len)
+        if (payload.content or "").strip() or not has_files
+        else ""
+    )
 
     opt_ctx = _require_paid_member_ctx(request, authorization)
     user = opt_ctx["user"]
@@ -475,6 +541,18 @@ def post_open_public_chat_message(
             detail="Your account is currently muted by moderation",
         )
     _check_rate_limit("public_chat_post", user["user_id"], max_hits=20, window_sec=60.0)
+    try:
+        attach_ids = public_attachments_db.validate_attachable(user["user_id"], payload.attachment_ids)
+    except public_attachments_db.AttachmentError as ae:
+        raise HTTPException(status_code=ae.status, detail=str(ae))
+    reply_to_id = payload.reply_to_message_id
+    if reply_to_id:
+        original = platform_db.get_public_chat_message_brief(reply_to_id)
+        if not original or bool(original["deleted"]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The message you replied to is no longer available.",
+            )
     uname = user.get("username")
     disp = f"@{uname}" if uname else (user.get("display_name") or f"User-{user['user_id'][4:10]}")
     try:
@@ -485,6 +563,7 @@ def post_open_public_chat_message(
             display_name=disp,
             author_level=int(user.get("current_level") or 7),
             is_guest=False,
+            reply_to_message_id=reply_to_id,
         )
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(ve))
@@ -502,8 +581,76 @@ def post_open_public_chat_message(
             detail="Unable to save chat message",
         )
 
+    msg["attachments"] = public_attachments_db.attach_to_message(user["user_id"], msg["message_id"], attach_ids)
+    _attach_reply_quotes([msg], None)
+    msg["reactions"] = {}
     schedule_public_ws_broadcast({"type": "public_message_created", "message": msg})
+    mentioned = _room_mentioned_user_ids(msg.get("content") or "", user["user_id"])
+    if mentioned:
+        _schedule_ws_notify(
+            mentioned,
+            {"type": "mention", "scope_type": "room", "message_id": msg["message_id"], "sender_user_id": user["user_id"]},
+        )
     return {"success": True, "message": msg}
+
+
+@router.post("/public-chat/attachments")
+def upload_public_chat_attachment(
+    payload: PublicChatAttachmentUploadRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Uploads one file for the Members' room. It is attached when the member posts the message."""
+    opt_ctx = _require_paid_member_ctx(request, authorization)
+    user = opt_ctx["user"]
+    if user.get("account_status") == "muted":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account is currently muted by moderation")
+    _check_rate_limit("public_chat_upload", user["user_id"], max_hits=20, window_sec=60.0)
+    try:
+        att = public_attachments_db.store_upload(user["user_id"], payload.file_name, payload.mime_type, payload.data_b64)
+    except public_attachments_db.AttachmentError as ae:
+        raise HTTPException(status_code=ae.status, detail=str(ae))
+    return {"success": True, "attachment": att}
+
+
+@router.get("/public-chat/attachments/{attachment_id}")
+def download_public_chat_attachment(
+    attachment_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    The file's bytes, for paid members. Only real raster images (checked from their bytes at upload)
+    are served inline; everything else is a download with a neutral type, so the browser never runs
+    or renders an uploaded file (nosniff + sandbox CSP).
+    """
+    opt_ctx = _require_paid_member_ctx(request, authorization)
+    if not re.fullmatch(r"patt_[0-9a-f]{28}", attachment_id or ""):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    row = public_attachments_db.get_for_download(attachment_id, opt_ctx["user"]["user_id"])
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    if row["gone"]:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This file was removed")
+    import base64 as _b64
+
+    data = _b64.b64decode(row["data_b64"])
+    is_image = row["kind"] == "image" and row["mime_type"] in ("image/png", "image/jpeg", "image/gif", "image/webp")
+    ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "_", row["file_name"]) or "file"
+    disposition = "inline" if is_image else "attachment"
+    headers = {
+        "Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{_url_quote(row['file_name'])}",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, max-age=3600",
+        "X-Zyphra-File-Name": _url_quote(row["file_name"]),
+        "X-Zyphra-File-Type": row["mime_type"],
+    }
+    return Response(
+        content=data,
+        media_type=row["mime_type"] if is_image else "application/octet-stream",
+        headers=headers,
+    )
 
 
 @router.patch("/public-chat/messages/{message_id}")
@@ -541,9 +688,18 @@ def delete_open_public_chat_message_endpoint(
     authorization: Optional[str] = Header(None),
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
 ):
-    actor = _resolve_admin_actor(request, authorization, x_admin_token, min_role="moderator")
-    actor_id = actor["actor_user_id"]
-    is_mod = actor["role"] in ("moderator", "superadmin")
+    # Moderators delete anything; members delete their OWN messages (the room showed a Delete button
+    # on your own messages, but this endpoint used to accept moderators only).
+    try:
+        actor = _resolve_admin_actor(request, authorization, x_admin_token, min_role="moderator")
+        actor_id = actor["actor_user_id"]
+        is_mod = actor["role"] in ("moderator", "superadmin")
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            raise
+        member_ctx = _require_paid_member_ctx(request, authorization)
+        actor_id = member_ctx["user"]["user_id"]
+        is_mod = False
 
     try:
         deleted = platform_db.delete_public_chat_message(
@@ -557,6 +713,11 @@ def delete_open_public_chat_message_endpoint(
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))
 
+    public_attachments_db.purge_for_message(message_id)
+    chat_features_db.delete_public_reactions(message_id)
+    if any(p["message_id"] == message_id for p in chat_features_db.list_pins(chat_features_db.ROOM)):
+        res = chat_features_db.set_pin(chat_features_db.ROOM, message_id, actor_id, False)
+        schedule_public_ws_broadcast({"type": "public_pins_updated", "pins": res["pins"]})
     schedule_public_ws_broadcast({"type": "public_message_deleted", "message_id": message_id})
     return {"success": True, **deleted}
 
@@ -565,6 +726,9 @@ def delete_open_public_chat_message_endpoint(
 async def open_public_chat_websocket(websocket: WebSocket):
     """Real-time WebSocket stream for Open Public Chat messages, edits, deletes & presence."""
     await websocket.accept()
+    if realtime_hub.at_capacity("public"):
+        await websocket.close(code=4503)  # server full: the app retries later with a long delay
+        return
     # Premium-only stream: the first frame must authenticate a PAID member
     # ({"type": "auth", "token": "<session token>"}), unless a session cookie/header is present.
     sess_uid = _extract_ws_session_user_id(websocket)
@@ -622,6 +786,9 @@ async def member_system_presence_websocket(websocket: WebSocket):
     (Chats, Groups, Individual Chats, Payments, Settings) powering `Active Live`.
     """
     await websocket.accept()
+    if realtime_hub.at_capacity("presence"):
+        await websocket.close(code=4503)
+        return
     registered = False
     try:
         sess_uid = _extract_ws_session_user_id(websocket)
@@ -694,12 +861,10 @@ def update_my_profile(
     payload: ProfileUpdateRequest,
     ctx: Dict[str, Any] = Depends(require_authenticated_session),
 ):
-    safe_avatar = _validate_safe_optional_url(payload.avatar_url, "avatar_url")
     updated = platform_db.update_user_profile(
         user_id=ctx["user"]["user_id"],
         display_name=payload.display_name,
         bio=payload.bio,
-        avatar_url=safe_avatar if payload.avatar_url is not None else None,
         show_online_presence=payload.show_online_presence,
         send_read_receipts=payload.send_read_receipts,
     )
@@ -995,13 +1160,17 @@ def submit_and_verify_payment(
             detail="purpose must be 'platform_entry' or 'group_entry'",
         )
     req_group_id = payload.group_id
+    try:
+        req_period = platform_db.normalize_billing_period(payload.billing_period)
+    except ValueError as pe:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(pe))
     req_wei = 0
     grp_pol: Optional[Dict[str, Any]] = None
     if req_purpose == "platform_entry":
-        # Minimum acceptable payment = current USD price in ETH, minus a small tolerance
+        # Minimum acceptable payment = the chosen plan's USD price in ETH, minus a small tolerance
         # for ETH price movement between the quote and the transaction being mined.
         tol_pct = float(os.getenv("PAYMENT_PRICE_TOLERANCE_PCT", "5"))
-        quoted_wei = int(platform_db.get_platform_pricing().get("platform_entry_fee_wei") or 0)
+        quoted_wei = int(platform_db.get_platform_pricing()["plans"][req_period]["wei"] or 0)
         req_wei = int(quoted_wei * (100.0 - tol_pct) / 100.0)
     if req_purpose == "group_entry":
         if not req_group_id:
@@ -1016,7 +1185,7 @@ def submit_and_verify_payment(
                 detail="This group is free; no entry payment is needed.",
             )
         tol_pct_g = float(os.getenv("PAYMENT_PRICE_TOLERANCE_PCT", "5"))
-        req_wei = int(int(grp_pol.get("entry_fee_wei") or 0) * (100.0 - tol_pct_g) / 100.0)
+        req_wei = int(int(grp_pol["plans"][req_period]["wei"] or 0) * (100.0 - tol_pct_g) / 100.0)
 
     try:
         payment, created = platform_db.create_or_submit_payment_record(
@@ -1051,6 +1220,13 @@ def submit_and_verify_payment(
             "already_verified": True,
             "user": e2ee_db.get_user_by_id(uid),
         }
+
+    # Remember the minimum amount + period on the record: every later verification (including the admin
+    # retry button) enforces exactly this, so an under-payment can never be credited.
+    try:
+        platform_db.set_payment_requirement(payment["payment_id"], req_wei, req_period)
+    except Exception as req_err:
+        logger.warning("Could not store payment requirement for %s: %s", clean_ref, req_err)
 
     # 4. Authoritative server-side RPC verification
     try:
@@ -1137,11 +1313,7 @@ def submit_and_verify_payment(
             if req_wei > 0:
                 paid_atomic = int(v_res.get("amount_atomic") or 0)
                 if paid_atomic < req_wei:
-                    need_eth = (
-                        grp_pol.get("entry_fee_eth", "0")
-                        if req_purpose == "group_entry" and grp_pol
-                        else str(Web3.from_wei(req_wei, "ether"))
-                    )
+                    need_eth = str(Web3.from_wei(req_wei, "ether"))
                     failed_record = platform_db.record_failed_payment(
                         payment_id=payment["payment_id"],
                         error_message=f"Insufficient payment: expected at least {need_eth} ETH",
@@ -1169,12 +1341,19 @@ def submit_and_verify_payment(
                 purpose=req_purpose,
                 target_id=req_group_id,
             )
+            sub = (
+                platform_db.get_subscription(uid, "group", req_group_id)
+                if req_purpose == "group_entry" and req_group_id
+                else platform_db.get_subscription(uid, "platform", "platform")
+            )
             return {
                 "success": True,
                 "status": "verified",
                 "payment": verified_record,
                 "user": e2ee_db.get_user_by_id(uid),
                 "is_platform_paid": platform_db.has_user_paid_platform_entry(uid),
+                "billing_period": req_period,
+                "subscription": sub,
             }
         elif v_res.get("status") == "failed":
             failed_record = platform_db.record_failed_payment(
@@ -1306,6 +1485,33 @@ def admin_retry_payment_verification_endpoint(
             )
             return {"success": False, "status": "failed", "payment": updated}
 
+        # SECURITY: enforce the amount recorded when the member submitted the payment. (Before, an admin retry
+        # credited access for ANY amount, even 1 wei.) Records without a stored amount are priced afresh.
+        meta = record.get("metadata") or {}
+        try:
+            stored_req = int(meta.get("required_wei")) if meta.get("required_wei") not in (None, "") else None
+        except (TypeError, ValueError):
+            stored_req = None
+        if stored_req is None:
+            try:
+                p_period = platform_db.normalize_billing_period(meta.get("billing_period"))
+            except ValueError:
+                p_period = "monthly"
+            tol = float(os.getenv("PAYMENT_PRICE_TOLERANCE_PCT", "5"))
+            if record.get("purpose") == "group_entry" and record.get("target_id"):
+                base_wei = int(platform_db.get_group_pricing(record["target_id"])["plans"][p_period]["wei"] or 0)
+            else:
+                base_wei = int(platform_db.get_platform_pricing()["plans"][p_period]["wei"] or 0)
+            stored_req = int(base_wei * (100.0 - tol) / 100.0)
+        if stored_req > 0 and int(v_res.get("amount_atomic") or 0) < stored_req:
+            updated = platform_db.record_failed_payment(
+                payment_id=payment_id,
+                error_message=f"Insufficient payment: expected at least {Web3.from_wei(stored_req, 'ether')} ETH",
+                verification_source="admin_rpc_retry",
+                recipient_address=recip,
+            )
+            return {"success": False, "status": "failed", "payment": updated}
+
         updated = platform_db.record_verified_payment(
             payment_id=payment_id,
             wallet_address=v_res.get("wallet_address") or record.get("wallet_address"),
@@ -1360,6 +1566,8 @@ def _public_group_price_fields(group_id: str) -> Dict[str, Any]:
         "entry_fee_usd": gp["entry_fee_usd"],
         "entry_fee_eth": gp["entry_fee_eth"],
         "entry_fee_wei": gp["entry_fee_wei"],
+        "entry_fee_yearly_usd": gp["entry_fee_yearly_usd"],
+        "plans": gp["plans"],
         "eth_usd_price": gp["eth_usd_price"],
         "rate_source": gp["rate_source"],
     }
@@ -1418,7 +1626,6 @@ def update_group_policy_endpoint(
         actor_uid = ctx["user"]["user_id"]
         _require_group_admin_or_platform_admin(group_id, actor_uid)
 
-    safe_avatar = _validate_safe_optional_url(payload.avatar_url, "avatar_url")
     min_wei = _eth_or_wei_to_wei_str(payload.min_eth_balance_wei, payload.min_eth_balance_eth)
 
     # Only the platform's superadmin decides whether a group is paid and what it costs.
@@ -1426,8 +1633,10 @@ def update_group_policy_endpoint(
     is_superadmin = bool(x_admin_token and actor_uid) or platform_db.get_admin_role(actor_uid) == "superadmin"
     current = platform_db.get_group_access_policy(group_id)
     if is_superadmin:
-        eff_paid = bool(payload.is_paid)
-        eff_fee_eth = str(payload.entry_fee_eth or "0")
+        eff_paid = bool(current.get("is_paid")) if payload.is_paid is None else bool(payload.is_paid)
+        eff_fee_eth = (
+            str(current.get("entry_fee_eth") or "0") if payload.entry_fee_eth is None else str(payload.entry_fee_eth or "0")
+        )
         eff_fee_usd = payload.entry_fee_usd
         if eff_paid and eff_fee_usd is None and float(eff_fee_eth or 0) <= 0:
             try:
@@ -1456,15 +1665,15 @@ def update_group_policy_endpoint(
         pol = platform_db.upsert_group_access_policy(
             group_id=group_id,
             description=payload.description,
-            avatar_url=safe_avatar,
             visibility=payload.visibility,
-            min_level=payload.min_level,
             min_eth_balance_wei=min_wei,
             require_invitation=payload.require_invitation,
             actor_user_id=actor_uid,
             is_paid=eff_paid,
             entry_fee_eth=eff_fee_eth,
             entry_fee_usd=eff_fee_usd,
+            # Only the platform admin sets prices; group owners' payload is ignored (None = keep current).
+            entry_fee_yearly_usd=payload.entry_fee_yearly_usd if is_superadmin else None,
         )
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
@@ -1474,41 +1683,42 @@ def update_group_policy_endpoint(
     return {"success": True, "policy": pol}
 
 
+# Invite links were removed: a group admin adds people, and they Accept or Reject the invitation.
+# The endpoints answer 410 Gone so old app versions show a clear message instead of failing oddly.
+INVITE_LINKS_REMOVED = "Invite links have been removed. Ask a group admin to add you; you will get an invitation to accept."
+
+
 @router.post("/groups/{group_id}/invites")
-def create_group_invite_endpoint(
-    group_id: str,
-    payload: GroupInviteCreateRequest,
-    ctx: Dict[str, Any] = Depends(require_paid_member),
-):
-    uid = ctx["user"]["user_id"]
-    _require_group_admin_or_platform_admin(group_id, uid)
-    inv = platform_db.create_group_invite_link(
-        group_id=group_id,
-        creator_user_id=uid,
-        expires_hours=payload.expires_hours,
-        max_uses=payload.max_uses,
-    )
-    return {"success": True, "invite": inv}
+def create_group_invite_endpoint(group_id: str):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=INVITE_LINKS_REMOVED)
 
 
 @router.get("/groups/{group_id}/invites")
-def list_group_invites_endpoint(
-    group_id: str,
-    ctx: Dict[str, Any] = Depends(require_paid_member),
-):
-    _require_group_admin_or_platform_admin(group_id, ctx["user"]["user_id"])
-    return {"invites": platform_db.list_group_invite_links(group_id)}
+def list_group_invites_endpoint(group_id: str):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=INVITE_LINKS_REMOVED)
 
 
 @router.delete("/groups/{group_id}/invites/{invite_code}")
-def revoke_group_invite_endpoint(
-    group_id: str,
-    invite_code: str,
-    ctx: Dict[str, Any] = Depends(require_paid_member),
-):
-    _require_group_admin_or_platform_admin(group_id, ctx["user"]["user_id"])
-    platform_db.revoke_group_invite_link(group_id, invite_code)
-    return {"success": True, "revoked": True}
+def revoke_group_invite_endpoint(group_id: str, invite_code: str):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=INVITE_LINKS_REMOVED)
+
+
+def _group_join_error(exc: Exception) -> HTTPException:
+    """Join-request errors -> HTTP. A paid group the member has not paid for answers 402 with the group's
+    id and name, so the app can open that group's payment window instead of showing a dead-end message."""
+    if isinstance(exc, platform_db.GroupPaymentRequired):
+        return HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "code": "group_payment_required",
+                "message": str(exc),
+                "group_id": exc.group_id,
+                "group_name": exc.group_name,
+            },
+        )
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 @router.post("/groups/{group_id}/join-request")
@@ -1519,10 +1729,8 @@ def request_to_join_public_group(
     uid = ctx["user"]["user_id"]
     try:
         res = platform_db.create_group_join_request(user_id=uid, group_id=group_id)
-    except PermissionError as pe:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(pe))
-    except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except (PermissionError, ValueError) as exc:
+        raise _group_join_error(exc)
 
     grp = e2ee_db.get_mls_group(group_id)
     if grp:
@@ -1532,23 +1740,8 @@ def request_to_join_public_group(
 
 
 @router.post("/groups/join-by-invite/{invite_code}")
-def join_group_with_invite_code(
-    invite_code: str,
-    ctx: Dict[str, Any] = Depends(require_paid_member),
-):
-    uid = ctx["user"]["user_id"]
-    try:
-        res = platform_db.create_group_join_request(user_id=uid, invite_code=invite_code)
-    except PermissionError as pe:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(pe))
-    except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-
-    grp = e2ee_db.get_mls_group(res["group_id"])
-    if grp:
-        admin_uids = [m["user_id"] for m in grp["members"] if m["status"] == "active" and m.get("role") == "admin"]
-        _schedule_ws_notify(admin_uids, {"type": "group_join_request", "group_id": res["group_id"], "requester_user_id": uid})
-    return {"success": True, **res}
+def join_group_with_invite_code(invite_code: str):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=INVITE_LINKS_REMOVED)
 
 
 @router.get("/groups/{group_id}/join-requests")
@@ -1558,6 +1751,67 @@ def get_pending_group_join_requests_endpoint(
 ):
     _require_group_admin_or_platform_admin(group_id, ctx["user"]["user_id"])
     return {"requests": platform_db.list_pending_group_join_requests(group_id)}
+
+
+@router.post("/groups/{group_id}/join-requests/{request_id}/decline")
+def decline_group_join_request_endpoint(
+    group_id: str,
+    request_id: str,
+    ctx: Dict[str, Any] = Depends(require_paid_member),
+):
+    """Group admins can turn a pending join request down (previously they could only approve)."""
+    uid = ctx["user"]["user_id"]
+    _require_group_admin_or_platform_admin(group_id, uid)
+    if not platform_db.decline_group_join_request(group_id, request_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending request with that id")
+    platform_db.record_audit_log(uid, "group_join_request_declined", "group", group_id, {"request_id": request_id})
+    return {"success": True, "request_id": request_id, "status": "declined"}
+
+
+def _delete_group_and_notify(group_id: str, actor_user_id: str) -> Dict[str, Any]:
+    """Deletes the group for good and tells its online members so it disappears from their lists."""
+    result = platform_db.delete_group(group_id, actor_user_id)
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    chat_features_db.delete_group_features(group_id)  # pins, timer, announcement mode, mute/archive
+    if result["member_user_ids"]:
+        _schedule_ws_notify(result["member_user_ids"], {"type": "group_deleted", "group_id": group_id})
+    return {
+        "success": True,
+        "group_id": group_id,
+        "name": result["name"],
+        "removed_messages": result["removed_messages"],
+        "removed_files": result["removed_files"],
+    }
+
+
+@router.delete("/groups/{group_id}")
+def delete_group_endpoint(
+    group_id: str,
+    ctx: Dict[str, Any] = Depends(require_paid_member),
+):
+    """A group admin deletes their own group. Paid groups only by the platform superadmin: the members
+    paid for access, so a group admin cannot take that away."""
+    uid = ctx["user"]["user_id"]
+    if not e2ee_db.get_mls_group(group_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    _require_group_admin_or_platform_admin(group_id, uid)
+    pol = platform_db.get_group_access_policy(group_id)
+    if pol.get("is_paid") and platform_db.get_admin_role(uid) != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Paid groups can only be deleted by the platform admin, because members paid for access.",
+        )
+    return _delete_group_and_notify(group_id, uid)
+
+
+@router.delete("/admin/groups/{group_id}")
+def admin_delete_group_endpoint(
+    group_id: str,
+    admin_ctx: Dict[str, Any] = Depends(require_superadmin),
+):
+    """Admin456: delete any group (free or paid)."""
+    return _delete_group_and_notify(group_id, admin_ctx["actor_user_id"])
 
 
 @router.post("/groups/{group_id}/leave")
@@ -1603,7 +1857,8 @@ def admin_overview_endpoint(admin_ctx: Dict[str, Any] = Depends(require_moderato
         "role": admin_ctx["role"],
         "actor_user_id": admin_ctx["actor_user_id"],
         "stats": platform_db.admin_get_overview_stats(),
-        "online": realtime_hub.get_online_stats(),
+        # The admin view counts admin wallets that are using the chat too (members never see them).
+        "online": realtime_hub.get_online_stats(include_admins=True),
         "networks": eth_rpc.get_rpc_health_status(),
     }
 
@@ -1735,6 +1990,80 @@ def admin_set_user_role_endpoint(
     return {"success": True, "user": e2ee_db.get_user_by_id(target_user_id)}
 
 
+@router.get("/admin/access-grants")
+def admin_list_access_grants_endpoint(
+    scope_type: Optional[str] = Query(None, pattern=r"^(platform|group)$"),
+    group_id: Optional[str] = Query(None, max_length=128),
+    user_id: Optional[str] = Query(None, max_length=64),
+    include_inactive: bool = Query(False),
+    limit: int = Query(200, ge=1, le=500),
+    _admin_ctx: Dict[str, Any] = Depends(require_moderator),
+):
+    """Every member the admin gave free access to (switched-off and expired ones only on request)."""
+    grants = platform_db.admin_list_access_grants(
+        scope_type=scope_type,
+        scope_id=group_id,
+        user_id=user_id,
+        include_inactive=include_inactive,
+        limit=limit,
+    )
+    return {"grants": grants}
+
+
+@router.post("/admin/access-grants")
+def admin_grant_access_endpoint(
+    payload: AdminAccessGrantRequest,
+    admin_ctx: Dict[str, Any] = Depends(require_superadmin),
+):
+    """Admin456: let a member in without paying. Superadmin only, because it gives away paid access."""
+    if payload.scope_type == "group" and not payload.group_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose a group for a group grant.")
+    try:
+        grant = platform_db.grant_access(
+            user_id=payload.user_id,
+            scope_type=payload.scope_type,
+            scope_id=payload.group_id,
+            actor_user_id=admin_ctx["actor_user_id"],
+            days=payload.days,
+            note=payload.note,
+        )
+    except ValueError as ve:
+        code = status.HTTP_404_NOT_FOUND if "not found" in str(ve).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=str(ve))
+    # Tell the member's open screens so the paywall disappears without a reload.
+    _schedule_ws_notify(
+        [payload.user_id],
+        {"type": "access_changed", "scope_type": payload.scope_type, "group_id": payload.group_id, "granted": True},
+    )
+    return {"success": True, "grant": grant}
+
+
+@router.post("/admin/access-grants/revoke")
+def admin_revoke_access_endpoint(
+    payload: AdminAccessRevokeRequest,
+    admin_ctx: Dict[str, Any] = Depends(require_superadmin),
+):
+    """Admin456: switch a free-access grant off. The member must pay again unless they already have a paid period."""
+    if payload.scope_type == "group" and not payload.group_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose a group for a group grant.")
+    try:
+        revoked = platform_db.revoke_access(
+            user_id=payload.user_id,
+            scope_type=payload.scope_type,
+            scope_id=payload.group_id,
+            actor_user_id=admin_ctx["actor_user_id"],
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    if not revoked:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="There is no active free access to switch off.")
+    _schedule_ws_notify(
+        [payload.user_id],
+        {"type": "access_changed", "scope_type": payload.scope_type, "group_id": payload.group_id, "granted": False},
+    )
+    return {"success": True}
+
+
 @router.get("/admin/groups")
 def admin_list_groups_endpoint(
     limit: int = Query(100, ge=1, le=300),
@@ -1785,9 +2114,116 @@ def admin_update_settings_endpoint(
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     try:
         updated = platform_db.update_platform_settings(updates, actor_user_id=admin_ctx["actor_user_id"])
+        schedule_public_ws_broadcast({
+            "type": "public_policy_updated",
+            "policy": _public_chat_policy_dict(updated),
+        })
         return {"success": True, "settings": updated}
     except ValueError as val_err:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(val_err))
+
+
+# ============================================================================
+# MEMBERS' ROOM: reactions, @mentions, typing, pinned messages
+# ============================================================================
+MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{3,32})")
+MAX_ROOM_MENTIONS = 10
+
+
+def _room_mentioned_user_ids(content: str, author_uid: str) -> List[str]:
+    """@username in a Members' room message -> the members to notify (never the author, never across a block)."""
+    found: List[str] = []
+    for name in dict.fromkeys(m.lower() for m in MENTION_RE.findall(content or "")):
+        u = e2ee_db.get_user_by_username(name)
+        if not u or u["user_id"] == author_uid or u["user_id"] in found:
+            continue
+        if platform_db.is_blocked_between(author_uid, u["user_id"]):
+            continue
+        found.append(u["user_id"])
+        if len(found) >= MAX_ROOM_MENTIONS:
+            break
+    return found
+
+
+class PublicReactionRequest(StrictModel):
+    emoji: Optional[str] = Field(None, max_length=32)  # None = remove my reaction
+
+
+class PublicPinRequest(StrictModel):
+    message_id: str = Field(..., min_length=4, max_length=64, pattern=r"^pub_[A-Za-z0-9]+$")
+    pinned: bool = True
+
+
+@router.post("/public-chat/messages/{message_id}/reaction")
+def react_to_public_chat_message(
+    message_id: str,
+    payload: PublicReactionRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """One reaction per member per message; sending another replaces it, null removes it."""
+    ctx = _require_paid_member_ctx(request, authorization)
+    uid = ctx["user"]["user_id"]
+    if ctx["user"].get("account_status") == "muted":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account is currently muted by moderation")
+    _check_rate_limit("public_reaction", uid, max_hits=60, window_sec=60.0)
+    msg = platform_db.get_public_chat_message_brief(message_id)
+    if not msg or msg.get("deleted"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+    try:
+        chat_features_db.set_public_reaction(message_id, uid, payload.emoji)
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    reactions = chat_features_db.reactions_for_messages([message_id]).get(message_id, {})
+    schedule_public_ws_broadcast({"type": "public_reactions_updated", "message_id": message_id, "reactions": reactions})
+    return {"success": True, "message_id": message_id, "reactions": reactions}
+
+
+@router.post("/public-chat/typing")
+def public_chat_typing(request: Request, authorization: Optional[str] = Header(None)):
+    """'@name is typing…' in the Members' room. Skipped for members who hide their online status."""
+    ctx = _require_paid_member_ctx(request, authorization)
+    uid = ctx["user"]["user_id"]
+    _check_rate_limit("public_typing", uid, max_hits=30, window_sec=60.0)
+    ext = platform_db.get_extended_user_fields(uid) or {}
+    if ext.get("show_online_presence") is False or ext.get("account_status") in ("muted", "suspended"):
+        return {"success": True, "sent": False}
+    name = ctx["user"].get("username") or ext.get("display_name") or "A member"
+    schedule_public_ws_broadcast({"type": "public_typing", "user_id": uid, "name": name})
+    return {"success": True, "sent": True}
+
+
+@router.post("/public-chat/pins")
+def pin_public_chat_message(
+    payload: PublicPinRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+):
+    """Moderators and admins pin up to 3 Members' room messages (a 4th replaces the oldest)."""
+    actor = _resolve_admin_actor(request, authorization, x_admin_token, min_role="moderator")
+    if payload.pinned:
+        msg = platform_db.get_public_chat_message_brief(payload.message_id)
+        if not msg or msg.get("deleted"):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+    res = chat_features_db.set_pin(chat_features_db.ROOM, payload.message_id, actor["actor_user_id"], payload.pinned)
+    schedule_public_ws_broadcast({"type": "public_pins_updated", "pins": res["pins"]})
+    return {"success": True, **res}
+
+
+# ============================================================================
+# BANNER FOR EVERYONE & RENEWAL REMINDERS
+# ============================================================================
+@router.get("/announcement")
+def get_platform_announcement():
+    """The admin's banner shown at the top of the app (null when there is none)."""
+    return {"announcement": platform_db.get_active_announcement()}
+
+
+@router.get("/reminders")
+def get_my_renewal_reminders(ctx: Dict[str, Any] = Depends(require_authenticated_session)):
+    """Membership or paid-group access ending within 7 days / 1 day, or ended in the last 14 days."""
+    return {"reminders": platform_db.list_renewal_reminders(ctx["user"]["user_id"])}
 
 
 @router.get("/admin/payment-destination")
@@ -1868,17 +2304,55 @@ def get_public_pricing():
 
 @router.get("/membership/status")
 def get_membership_status(ctx: Dict[str, Any] = Depends(require_authenticated_session)):
-    """Returns the caller's platform membership status and current platform pricing."""
+    """Returns the caller's authoritative platform membership status and current platform pricing."""
     user = ctx["user"]
     uid = user["user_id"]
-    is_paid = platform_db.has_user_paid_platform_entry(uid)
+    is_paid = platform_db.has_user_paid_platform_entry(uid, fresh=True)
     ext = platform_db.get_extended_user_fields(uid)
     pricing = platform_db.get_platform_pricing()
+    platform_sub = platform_db.get_subscription(uid, "platform", "platform")
+    subs = platform_db.list_user_subscriptions(uid)
+    total_verified_wei = platform_db.get_user_verified_payment_total_wei(uid)
+    free_grants = platform_db.list_user_access_grants(uid)
+    platform_grant = next((g for g in free_grants if g["scope_type"] == "platform"), None)
+    group_names: Dict[str, str] = {}
+    for g in free_grants:
+        if g["scope_type"] == "group":
+            gg = e2ee_db.get_mls_group(g["scope_id"])
+            group_names[g["scope_id"]] = (gg or {}).get("name") or "Group"
+    for s in subs:
+        if s["scope_type"] == "group":
+            g = e2ee_db.get_mls_group(s["scope_id"])
+            group_names[s["scope_id"]] = (g or {}).get("name") or "Group"
     return {
         "user_id": uid,
         "wallet_address": user.get("primary_wallet"),
         "is_platform_paid": is_paid,
         "platform_paid_at": ext.get("platform_paid_at"),
+        "platform_paid_until": (platform_sub or {}).get("paid_until"),
+        "platform_period": (platform_sub or {}).get("last_period"),
+        "membership_is_free": float(pricing.get("platform_monthly_fee_usd") or 0) <= 0,
+        # Free access given by an admin (the member sees "Free access", not a payment prompt)
+        "platform_free_access": (
+            {"expires_at": platform_grant["expires_at"], "lifetime": platform_grant["lifetime"]} if platform_grant else None
+        ),
+        "group_free_access": [
+            {
+                "group_id": g["scope_id"],
+                "group_name": group_names.get(g["scope_id"], "Group"),
+                "expires_at": g["expires_at"],
+                "lifetime": g["lifetime"],
+            }
+            for g in free_grants
+            if g["scope_type"] == "group"
+        ],
+        "total_verified_wei": str(total_verified_wei),
+        "total_verified_eth": str(Web3.from_wei(total_verified_wei, "ether")),
+        "group_subscriptions": [
+            {**s, "group_id": s["scope_id"], "group_name": group_names.get(s["scope_id"], "Group")}
+            for s in subs
+            if s["scope_type"] == "group"
+        ],
         "pricing": pricing,
     }
 
@@ -1916,6 +2390,8 @@ def get_group_pricing_endpoint(
         "entry_fee_eth": fee_eth_str,
         "entry_fee_wei": gp["entry_fee_wei"],
         "entry_fee_usd": fee_usd,
+        "entry_fee_yearly_usd": gp.get("entry_fee_yearly_usd"),
+        "plans": gp["plans"],
         "eth_usd_price": eth_usd,
         "rate_source": gp["rate_source"],
         "has_paid": has_paid,
@@ -1936,6 +2412,8 @@ def admin_update_pricing_endpoint(
     updates: Dict[str, Any] = {}
     if payload.platform_entry_fee_usd is not None:
         updates["platform_entry_fee_usd"] = payload.platform_entry_fee_usd
+    if payload.platform_yearly_fee_usd is not None:
+        updates["platform_yearly_fee_usd"] = payload.platform_yearly_fee_usd
     if payload.use_live_eth_price is not None:
         updates["use_live_eth_price"] = payload.use_live_eth_price
     if payload.platform_entry_fee_eth is not None:
@@ -2057,8 +2535,13 @@ def admin_list_support_threads(
     _admin_ctx: Dict[str, Any] = Depends(require_moderator),
 ):
     items = []
-    for t in support_db.admin_list_threads(status_filter):
-        u = e2ee_db.get_user_by_id(t["user_id"]) or {}
+    threads = support_db.admin_list_threads(status_filter)
+    _users_cache: Dict[str, Dict[str, Any]] = {}
+    for t in threads:
+        # one lookup per distinct user (a user with several threads no longer costs several queries)
+        if t["user_id"] not in _users_cache:
+            _users_cache[t["user_id"]] = e2ee_db.get_user_by_id(t["user_id"]) or {}
+        u = _users_cache[t["user_id"]]
         row = _support_thread_public(t, "admin")
         row.update({
             "user_id": t["user_id"],

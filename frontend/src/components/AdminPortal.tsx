@@ -111,7 +111,7 @@ export const AdminPortal: React.FC = () => {
         <header className="console-topbar">
           <div className="brand-block">
             <div className="brand-monolith">Z</div>
-            <div className="brand-title">zyphra.in</div>
+            <div className="brand-title">Zyphra <span style={{ fontFamily: 'var(--font-ui)', fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500, marginLeft: 6 }}>Administration</span></div>
           </div>
           <div className="topbar-actions">{themeButton}</div>
         </header>
@@ -127,7 +127,7 @@ export const AdminPortal: React.FC = () => {
       <header className="console-topbar">
         <div className="brand-block">
           <div className="brand-monolith">Z</div>
-          <div className="brand-title">zyphra.in</div>
+          <div className="brand-title">Zyphra <span style={{ fontFamily: 'var(--font-ui)', fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500, marginLeft: 6 }}>Administration</span></div>
         </div>
         <div className="topbar-actions">{themeButton}</div>
       </header>
@@ -155,7 +155,7 @@ export const AdminPortal: React.FC = () => {
             </div>
           ) : (
             <>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.8rem' }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.9rem' }}>
                 <span>Login ID</span>
                 <input
                   type="text"
@@ -170,7 +170,7 @@ export const AdminPortal: React.FC = () => {
                   style={inputStyle}
                 />
               </label>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.8rem' }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.9rem' }}>
                 <span>Password</span>
                 <input
                   type="password"
@@ -185,7 +185,7 @@ export const AdminPortal: React.FC = () => {
               </label>
 
               {error && (
-                <div role="alert" style={{ fontSize: '0.8rem', color: 'var(--text-danger, #ef4444)' }}>
+                <div role="alert" style={{ fontSize: '0.9rem', color: 'var(--text-danger, #ef4444)' }}>
                   <Lock size={12} style={{ verticalAlign: '-2px', marginRight: '6px' }} />
                   {error}
                 </div>
@@ -209,4 +209,3 @@ export const AdminPortal: React.FC = () => {
 };
 
 export default AdminPortal;
-

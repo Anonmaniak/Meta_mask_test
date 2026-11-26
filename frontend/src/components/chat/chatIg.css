@@ -1,0 +1,918 @@
+/* ==========================================================================
+   Instagram-style conversation (Members' room, private chats, groups)
+   One bold element: your own bubbles in the club's gold. Everything else stays quiet.
+   ========================================================================== */
+
+.ig-timeline {
+  --ig-radius: 22px;
+  --ig-tight: 6px;
+  --ig-me-bg: linear-gradient(160deg, #dcc08a 0%, #c9a86a 55%, #b38f52 100%);
+  --ig-me-text: #1d1708;
+  --ig-peer-bg: var(--bg-pill);
+  --ig-peer-text: var(--text-main);
+  --ig-avatar: 28px;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 4px 4px;
+}
+
+[data-theme='light'] .ig-timeline {
+  --ig-me-bg: linear-gradient(160deg, #9c7b35 0%, #8e6f2e 60%, #765b22 100%);
+  --ig-me-text: #ffffff;
+  --ig-peer-bg: #e6ece3;
+}
+
+/* ---- Session labels: "Today 4:10 PM" ---------------------------------- */
+.ig-label {
+  align-self: center;
+  margin: 18px 0 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+  user-select: none;
+}
+
+.ig-label:first-child {
+  margin-top: 4px;
+}
+
+/* ---- Rows --------------------------------------------------------------- */
+.ig-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(78%, 560px);
+  margin-top: 2px;
+  position: relative;
+  outline: none;
+}
+
+.ig-row.ig-pos-single,
+.ig-row.ig-pos-first {
+  margin-top: 10px;
+}
+
+.ig-row.ig-me {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.ig-row.ig-peer {
+  align-self: flex-start;
+}
+
+.ig-avatar-slot {
+  width: var(--ig-avatar);
+  flex-shrink: 0;
+  align-self: flex-end;
+}
+
+.ig-avatar {
+  width: var(--ig-avatar);
+  height: var(--ig-avatar);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: var(--avatar-peer-bg);
+  color: var(--avatar-peer-text);
+  border: 1px solid var(--border-subtle);
+  cursor: default;
+  user-select: none;
+}
+
+button.ig-avatar {
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+}
+
+.ig-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ig-me .ig-stack {
+  align-items: flex-end;
+}
+
+.ig-peer .ig-stack {
+  align-items: flex-start;
+}
+
+.ig-name {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0 0 2px 12px;
+  font-weight: 600;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  text-align: left;
+}
+
+button.ig-name {
+  cursor: pointer;
+}
+
+button.ig-name:hover {
+  color: var(--text-secondary);
+}
+
+/* ---- Bubbles ------------------------------------------------------------ */
+.ig-bubble {
+  padding: 9px 14px;
+  border-radius: var(--ig-radius);
+  font-size: 0.95rem;
+  line-height: 1.38;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.ig-me .ig-bubble {
+  background: var(--ig-me-bg);
+  color: var(--ig-me-text);
+}
+
+.ig-peer .ig-bubble {
+  background: var(--ig-peer-bg);
+  color: var(--ig-peer-text);
+}
+
+/* Runs: corners on the sender's side tighten between consecutive bubbles. */
+.ig-me.ig-pos-first .ig-bubble,
+.ig-me.ig-pos-middle .ig-bubble {
+  border-bottom-right-radius: var(--ig-tight);
+}
+
+.ig-me.ig-pos-middle .ig-bubble,
+.ig-me.ig-pos-last .ig-bubble {
+  border-top-right-radius: var(--ig-tight);
+}
+
+.ig-peer.ig-pos-first .ig-bubble,
+.ig-peer.ig-pos-middle .ig-bubble {
+  border-bottom-left-radius: var(--ig-tight);
+}
+
+.ig-peer.ig-pos-middle .ig-bubble,
+.ig-peer.ig-pos-last .ig-bubble {
+  border-top-left-radius: var(--ig-tight);
+}
+
+.ig-bubble.ig-locked {
+  font-style: italic;
+  opacity: 0.8;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ig-edited {
+  font-size: 0.72rem;
+  opacity: 0.7;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+/* Emoji-only messages: big, no bubble */
+.ig-emoji-only {
+  font-size: 2.4rem;
+  line-height: 1.15;
+  padding: 2px 2px;
+  user-select: text;
+}
+
+.ig-pending {
+  opacity: 0.6;
+}
+
+/* ---- Under the run: "Seen", "Sending...", failed ------------------------- */
+.ig-footer {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin: 3px 6px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ig-footer.ig-failed {
+  color: var(--danger);
+  flex-wrap: wrap;
+}
+
+.ig-footer button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ---- Hover / tap actions --------------------------------------------- */
+.ig-actions {
+  display: flex;
+  gap: 2px;
+  align-self: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.ig-row:hover .ig-actions,
+.ig-row:focus-within .ig-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ig-action {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.ig-action:hover,
+.ig-action:focus-visible {
+  background: var(--bg-card-hover);
+  color: var(--text-main);
+}
+
+.ig-action:focus-visible,
+.ig-row:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+@media (hover: none) {
+  .ig-actions {
+    opacity: 0.55;
+    pointer-events: auto;
+  }
+}
+
+/* ---- Attachments --------------------------------------------------------- */
+.ig-media {
+  border-radius: 18px;
+  overflow: hidden;
+  max-width: min(280px, 100%);
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.ig-media img,
+.ig-media video {
+  display: block;
+  max-width: 100%;
+  max-height: 340px;
+  width: auto;
+  height: auto;
+  object-fit: cover;
+}
+
+.ig-media button.ig-media-open {
+  display: block;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+}
+
+.ig-media-placeholder {
+  width: 240px;
+  max-width: 100%;
+  height: 180px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  text-align: center;
+  padding: 12px;
+  background: linear-gradient(110deg, var(--bg-surface) 30%, var(--bg-card-hover) 50%, var(--bg-surface) 70%);
+  background-size: 220% 100%;
+  animation: ig-shimmer 1.4s linear infinite;
+}
+
+.ig-media-placeholder.ig-static {
+  animation: none;
+  background: var(--bg-surface);
+}
+
+@keyframes ig-shimmer {
+  to {
+    background-position: -220% 0;
+  }
+}
+
+.ig-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 18px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  max-width: min(320px, 100%);
+  color: var(--text-main);
+}
+
+.ig-file-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ig-file-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ig-file-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.ig-file-sub {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.ig-file-warn {
+  font-size: 0.74rem;
+  color: var(--warn);
+}
+
+.ig-file-btn {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-main);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ig-file-btn:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+}
+
+.ig-file-btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.ig-media-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.ig-file .ig-media-remove {
+  position: static;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.ig-removed {
+  font-size: 0.82rem;
+  font-style: italic;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 18px;
+}
+
+/* ---- Lightbox ------------------------------------------------------------- */
+.ig-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(3, 8, 6, 0.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+}
+
+.ig-lightbox img {
+  max-width: 100%;
+  max-height: calc(100% - 64px);
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.ig-lightbox-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  max-width: 960px;
+  color: #f1ede0;
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+}
+
+.ig-lightbox-bar span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ig-lightbox-bar button {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid rgba(241, 237, 224, 0.25);
+  background: transparent;
+  color: inherit;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+/* ---- Composer -------------------------------------------------------------- */
+.ig-composer {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+}
+
+.ig-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 26px;
+  padding: 5px 6px 5px 6px;
+  transition: border-color 0.15s ease;
+}
+
+.ig-composer-row:focus-within {
+  border-color: var(--border-focus);
+}
+
+.ig-composer.ig-dragging .ig-composer-row {
+  border-style: dashed;
+  border-color: var(--accent);
+}
+
+.ig-composer textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  padding: 8px 4px;
+  max-height: 140px;
+  outline: none;
+}
+
+/* The pill (.ig-composer-row) is the only visible box. The app-wide form styles in index.css give
+   every textarea its own background, border, radius, focus ring (with !important) and the browser
+   adds an outline + scrollbar: inside the pill that showed up as a second box. Reset them here. */
+.ig-composer .ig-composer-row textarea,
+.ig-composer .ig-composer-row textarea:hover,
+.ig-composer .ig-composer-row textarea:focus,
+.ig-composer .ig-composer-row textarea:focus-visible {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: 0 !important;
+  border-radius: 0;
+  box-shadow: none !important;
+  outline: none !important;
+  overflow-y: hidden;
+  /* ChatComposer switches this to auto only past the max height */
+  scrollbar-width: thin;
+}
+
+.ig-composer .ig-composer-row textarea::-webkit-resizer {
+  display: none;
+}
+
+.ig-emoji-search:focus,
+.ig-emoji-search:focus-visible {
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+.ig-composer textarea:disabled {
+  cursor: pointer;
+  opacity: 0.65;
+}
+
+.ig-icon-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ig-icon-btn:hover:not(:disabled),
+.ig-icon-btn[aria-expanded='true'] {
+  color: var(--text-main);
+  background: var(--bg-card-hover);
+}
+
+.ig-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ig-icon-btn:focus-visible,
+.ig-send:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.ig-send {
+  height: 38px;
+  min-width: 38px;
+  padding: 0 14px;
+  border-radius: 19px;
+  border: none;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.ig-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ig-tray {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 2px 4px;
+}
+
+.ig-tray-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--text-secondary);
+}
+
+.ig-tray-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ig-tray-item small {
+  font-size: 0.62rem;
+  max-width: 58px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ig-tray-item button {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.ig-composer-note {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  padding: 0 12px;
+}
+
+.ig-composer-note.ig-error {
+  color: var(--danger);
+}
+
+/* ---- Emoji picker --------------------------------------------------------- */
+.ig-emoji-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 50;
+  width: min(340px, calc(100vw - 32px));
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ig-emoji-search {
+  margin: 10px 10px 6px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.88rem;
+  outline: none;
+}
+
+.ig-emoji-search:focus {
+  border-color: var(--border-focus);
+}
+
+.ig-emoji-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+}
+
+.ig-emoji-tabs button {
+  flex: 1 0 auto;
+  min-width: 34px;
+  height: 32px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  font-size: 1.1rem;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.ig-emoji-tabs button[aria-selected='true'] {
+  opacity: 1;
+  background: var(--accent-soft);
+}
+
+.ig-emoji-section-title {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 8px 12px 4px;
+}
+
+.ig-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  padding: 2px 8px 8px;
+}
+
+.ig-emoji-body {
+  height: 260px;
+  overflow-y: auto;
+}
+
+.ig-emoji-grid button {
+  aspect-ratio: 1;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  font-size: 1.45rem;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.ig-emoji-grid button:hover,
+.ig-emoji-grid button:focus-visible {
+  background: var(--bg-card-hover);
+  outline: none;
+}
+
+.ig-emoji-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+@media (max-width: 640px) {
+  .ig-composer textarea {
+    font-size: 16px;
+    /* below 16px iOS zooms into the field */
+  }
+
+  .ig-row {
+    max-width: 88%;
+  }
+
+  .ig-media img,
+  .ig-media video {
+    max-height: 260px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ig-media-placeholder {
+    animation: none;
+  }
+
+  .ig-actions {
+    transition: none;
+  }
+}
+
+.ig-spin {
+  animation: ig-spin 0.9s linear infinite;
+}
+
+@keyframes ig-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ig-spin {
+    animation: none;
+  }
+}
+
+/* ---- Replies (quote inside a bubble, and the "Replying to" bar) --------------- */
+.ig-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: min(320px, 100%);
+  margin-bottom: 2px;
+  padding: 6px 10px;
+  border: none;
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ig-me .ig-quote {
+  align-self: flex-end;
+}
+
+.ig-quote:hover,
+.ig-quote:focus-visible {
+  background: var(--bg-card-hover);
+}
+
+.ig-quote-name {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.ig-quote-text {
+  font-size: 0.84rem;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  /* Two lines even in browsers without line-clamp (2 x line-height) */
+  max-height: 2.6em;
+  overflow-wrap: anywhere;
+}
+
+.ig-reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 12px;
+  background: var(--bg-input);
+}
+
+.ig-reply-bar-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ig-reply-bar-text strong {
+  font-size: 0.8rem;
+  color: var(--accent-strong);
+}
+
+.ig-reply-bar-text span {
+  font-size: 0.86rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ig-row.ig-flash .ig-bubble,
+.ig-row.ig-flash .ig-emoji-only {
+  animation: ig-flash 1.5s ease-out;
+}
+
+@keyframes ig-flash {
+
+  0%,
+  35% {
+    box-shadow: 0 0 0 3px var(--accent-line);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .ig-row.ig-flash .ig-bubble,
+  .ig-row.ig-flash .ig-emoji-only {
+    animation: none;
+    box-shadow: 0 0 0 3px var(--accent-line);
+  }
+}

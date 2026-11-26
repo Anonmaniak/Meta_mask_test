@@ -11,8 +11,10 @@ import {
   CreditCard,
   KeyRound,
   ChevronDown,
+  Receipt,
 } from 'lucide-react';
 import { formatAddress, formatEth } from '../services/web3';
+import { NotificationBell } from './NotificationBell';
 import type { E2EEAccountProfile } from '../services/e2eeApi';
 
 export type PlatformSection =
@@ -40,73 +42,56 @@ interface HeaderProps {
   serverHealthy?: boolean;
   /** Before access is granted: show only the brand, theme toggle and Connect button. */
   gated?: boolean;
-  /** 'Connect MetaMask' until the wallet has paid, then 'Connect'. */
+  /** Label shown on the gated Connect button. */
   connectLabel?: string;
   connectBusy?: boolean;
   /** Unread admin replies, shown as a badge on the Support tab. */
   supportUnread?: number;
+  /** Total verified ETH paid by the signed-in user (in wei). */
+  totalPaidWei?: string | null;
 }
 
-const AvatarCircle: React.FC<{ address: string; size?: number }> = ({ address, size = 36 }) => {
-  const hash = address.toLowerCase().replace('0x', '');
-  const h1 = parseInt(hash.slice(0, 2) || '0', 16);
-  const h2 = parseInt(hash.slice(2, 4) || '0', 16);
-  const h3 = parseInt(hash.slice(4, 6) || '0', 16);
-  const h4 = parseInt(hash.slice(6, 8) || '0', 16);
-  const initials = address.length >= 4 ? address.slice(2, 4).toUpperCase() : 'Ξ';
-  const angle = (h1 * 360) / 255;
+function formatPaidAmount(weiStr: string): string {
+  try {
+    const wei = BigInt(weiStr || '0');
+    if (wei <= 0n) return '0 ETH';
+    const short4 = formatEth(wei, 4);
+    if (short4 !== '0.0000') return `${short4} ETH`;
+    const short6 = formatEth(wei, 6);
+    return short6 !== '0.000000' ? `${short6} ETH` : '<0.000001 ETH';
+  } catch {
+    return '0 ETH';
+  }
+}
 
+/** Monogram avatar: the first letter of the member's @username (or a quiet "Z"), on a brass-ringed disc. */
+const AvatarCircle: React.FC<{ address: string; size?: number; name?: string | null }> = ({ address, size = 36, name }) => {
+  const hash = address.toLowerCase().replace('0x', '');
+  const hue = 140 + (parseInt(hash.slice(0, 2) || '0', 16) % 40); // keeps every avatar inside the green family
+  const letter = (name || '').replace(/^@/, '').charAt(0).toUpperCase() || 'Z';
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 40 40"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      style={{ borderRadius: '50%', display: 'block' }}
+    <span
+      aria-hidden="true"
+      style={{
+        width: size,
+        height: size,
+        borderRadius: '50%',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+        fontFamily: 'var(--font-display)',
+        fontStyle: 'normal',
+        fontWeight: 600,
+        fontSize: size * 0.5,
+        lineHeight: 1,
+        color: 'var(--accent-strong)',
+        background: `radial-gradient(circle at 30% 25%, hsla(${hue}, 45%, 38%, 0.55), hsla(${hue}, 45%, 14%, 0.9))`,
+        border: '1px solid var(--accent-line)',
+      }}
     >
-      <defs>
-        <linearGradient id={`grad-${address}`} gradientTransform={`rotate(${angle})`}>
-          <stop offset="0%" stopColor="var(--text-main)" stopOpacity="0.85" />
-          <stop offset="100%" stopColor="var(--bg-input)" stopOpacity="0.3" />
-        </linearGradient>
-      </defs>
-      <circle
-        cx="20"
-        cy="20"
-        r="19"
-        fill={`url(#grad-${address})`}
-        stroke="var(--border-strong)"
-        strokeWidth="2"
-      />
-      <circle
-        cx={14 + (h2 % 12)}
-        cy={14 + (h3 % 12)}
-        r="7"
-        fill="var(--text-main)"
-        fillOpacity="0.22"
-      />
-      <rect
-        x={10 + (h3 % 8)}
-        y={18 + (h4 % 8)}
-        width="16"
-        height="14"
-        rx="4"
-        fill="var(--text-main)"
-        fillOpacity="0.25"
-      />
-      <text
-        x="20"
-        y="24"
-        textAnchor="middle"
-        fill="var(--text-inverse)"
-        fontSize="12"
-        fontWeight="700"
-        fontFamily="ui-monospace, monospace"
-      >
-        {initials}
-      </text>
-    </svg>
+      {letter}
+    </span>
   );
 };
 
@@ -115,9 +100,9 @@ const NAV_ITEMS: Array<{
   label: string;
   icon: React.FC<{ size?: number }>;
 }> = [
-    { id: 'open_chat', label: 'Chats', icon: MessageSquare },
-    { id: 'payments', label: 'Payments', icon: CreditCard },
-    { id: 'support', label: 'Support', icon: LifeBuoy },
+    { id: 'open_chat', label: 'Messages', icon: MessageSquare },
+    { id: 'payments', label: 'Membership', icon: CreditCard },
+    { id: 'support', label: 'Concierge', icon: LifeBuoy },
   ];
 
 export const Header: React.FC<HeaderProps> = ({
@@ -133,9 +118,10 @@ export const Header: React.FC<HeaderProps> = ({
   theme,
   onToggleTheme,
   gated = false,
-  connectLabel = 'Connect MetaMask',
+  connectLabel = 'Connect to MetaMask',
   connectBusy = false,
   supportUnread = 0,
+  totalPaidWei = null,
 }) => {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -174,8 +160,8 @@ export const Header: React.FC<HeaderProps> = ({
     <header className={`console-topbar${gated ? ' console-topbar--gated' : ''}`}>
       {/* Brand Monolith */}
       <div className="brand-block" onClick={() => setActiveSection('open_chat')}>
-        <div className="brand-monolith">Z</div>
-        <div className="brand-title">zyphra.in</div>
+        <div className="brand-monolith" aria-hidden="true">Z</div>
+        <div className="brand-title">Zyphra</div>
       </div>
 
       {/* Responsive 9-Section Navigation Bar (hidden until access is granted) */}
@@ -183,13 +169,6 @@ export const Header: React.FC<HeaderProps> = ({
         <nav
           className="console-switcher"
           aria-label="Platform sections"
-          style={{
-            overflowX: 'auto',
-            maxWidth: '100%',
-            padding: '3px',
-            gap: '2px',
-            scrollbarWidth: 'none',
-          }}
         >
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
@@ -208,31 +187,25 @@ export const Header: React.FC<HeaderProps> = ({
                 type="button"
                 className={`switcher-btn ${isActive ? 'active' : ''}`}
                 onClick={() => setActiveSection(item.id)}
-                style={{
-                  padding: '6px 12px',
-                  fontSize: '0.78rem',
-                  whiteSpace: 'nowrap',
-                  gap: '6px',
-                }}
+                style={{ whiteSpace: 'nowrap' }}
               >
-                <Icon size={13} />
+                <Icon size={16} />
                 <span>{item.label}</span>
                 {item.id === 'support' && supportUnread > 0 && (
                   <span
-                    aria-label={`${supportUnread} unread admin replies`}
+                    aria-label={`${supportUnread} unread replies from the concierge`}
                     style={{
-                      minWidth: 16,
-                      height: 16,
-                      borderRadius: 8,
-                      padding: '0 4px',
+                      minWidth: 20,
+                      height: 20,
+                      borderRadius: 10,
+                      padding: '0 6px',
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      fontSize: '0.64rem',
+                      fontSize: '0.9rem',
                       fontWeight: 700,
-                      background: 'var(--btn-primary-bg)',
-                      color: 'var(--btn-primary-text)',
-                      border: '1px solid var(--border-focus)',
+                      background: 'var(--accent)',
+                      color: 'var(--accent-ink)',
                     }}
                   >
                     {supportUnread}
@@ -248,14 +221,28 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="topbar-actions" style={{ position: 'relative' }} ref={dropdownRef}>
         {account && !gated ? (
           <>
+            {e2eeProfile && totalPaidWei !== null && totalPaidWei !== undefined && (
+              <button
+                type="button"
+                className="topbar-paid-badge"
+                onClick={() => setActiveSection('payments')}
+                title="Total verified amount paid — click to view payment history"
+                aria-label={`Paid amount: ${formatPaidAmount(totalPaidWei)}`}
+              >
+                <Receipt size={15} />
+                <span className="hide-on-mobile-text">Paid:</span>
+                <span className="topbar-paid-value">{formatPaidAmount(totalPaidWei)}</span>
+              </button>
+            )}
+            {e2eeProfile && !isWalletMismatch && <NotificationBell />}
             <button
               type="button"
               className="theme-toggle-btn"
               onClick={onToggleTheme}
-              title="Toggle Dark / Light Theme"
-              aria-label="Toggle Dark / Light Theme"
+              title="Switch between dark and light"
+              aria-label="Switch between dark and light"
             >
-              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
             </button>
             <button
               type="button"
@@ -264,9 +251,8 @@ export const Header: React.FC<HeaderProps> = ({
               onClick={() => setActiveSection('settings')}
               title="Settings"
               aria-label="Settings"
-              style={{ padding: '8px 14px', fontSize: '0.82rem', borderRadius: '9999px' }}
             >
-              <Settings size={14} />
+              <Settings size={16} />
               <span className="hide-on-mobile-text">Settings</span>
             </button>
             {account && (!e2eeProfile || isWalletMismatch) && (
@@ -275,14 +261,14 @@ export const Header: React.FC<HeaderProps> = ({
                 className="btn-solid"
                 disabled={siweLoading}
                 onClick={onAuthenticateSiwe}
-                style={{ padding: '6px 12px', fontSize: '0.76rem', borderRadius: '9999px' }}
+                style={{ padding: '6px 12px', fontSize: '0.86rem', borderRadius: '9999px' }}
                 title={
                   isWalletMismatch
-                    ? `Sign in as ${formatAddress(account, 4)} (or link this wallet in Vault)`
-                    : 'Sign EIP-4361 SIWE challenge to authenticate account & unlock E2EE Vault'
+                    ? `Sign in as ${formatAddress(account, 4)} (or add this wallet in Settings)`
+                    : 'Sign in with MetaMask (free, no payment)'
                 }
               >
-                <KeyRound size={13} />
+                <KeyRound size={14} />
                 <span>
                   {siweLoading
                     ? 'Signing...'
@@ -299,10 +285,10 @@ export const Header: React.FC<HeaderProps> = ({
               className={`profile-connected-pill ${activeSection === 'profile' ? 'active' : ''}`}
               onClick={() => setIsDropdownOpen((prev) => !prev)}
               aria-label="User Profile"
-              title={`Profile: ${e2eeProfile?.username ? '@' + e2eeProfile.username : formatAddress(account, 4)}`}
+              title={`Your profile: ${e2eeProfile?.username ? '@' + e2eeProfile.username : formatAddress(account, 4)}`}
             >
               <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                <AvatarCircle address={account} size={30} />
+                <AvatarCircle address={account} size={34} name={e2eeProfile?.username} />
                 <span className="profile-online-badge" />
               </div>
               <div className="profile-pill-text">
@@ -310,14 +296,14 @@ export const Header: React.FC<HeaderProps> = ({
                   {e2eeProfile?.username ? `@${e2eeProfile.username}` : formatAddress(account, 4)}
                 </span>
                 <span className="profile-pill-lvl">
-                  {(e2eeProfile as any)?.is_platform_paid ? 'Paid Member' : 'Member'}
+                  {(e2eeProfile as any)?.is_platform_paid ? 'Active member' : 'Membership inactive'}
                 </span>
               </div>
               <ChevronDown size={13} className="profile-pill-chevron" />
             </button>
 
             {isDropdownOpen && (
-              <div className="profile-dropdown-menu" style={{ width: '310px' }}>
+              <div className="profile-dropdown-menu">
                 <div
                   className="dropdown-user-header profile-clickable-header"
                   onClick={() => {
@@ -327,7 +313,7 @@ export const Header: React.FC<HeaderProps> = ({
                   title="Click to view & edit Profile"
                   style={{ cursor: 'pointer' }}
                 >
-                  <AvatarCircle address={account} size={42} />
+                  <AvatarCircle address={account} size={46} name={e2eeProfile?.username} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div
                       style={{
@@ -340,64 +326,53 @@ export const Header: React.FC<HeaderProps> = ({
                       <span
                         style={{
                           fontWeight: 600,
-                          fontSize: '0.86rem',
-                          fontFamily: 'ui-monospace, monospace',
+                          fontSize: '1rem',
                         }}
                       >
                         {e2eeProfile?.username
                           ? `@${e2eeProfile.username}`
                           : formatAddress(account, 4)}
                       </span>
-                      <span className="audit-status" style={{ fontSize: '0.64rem', padding: '1px 6px' }}>
-                        {(e2eeProfile as any)?.is_platform_paid ? 'Paid Member' : 'Member'}
+                      <span className="audit-status">
+                        {(e2eeProfile as any)?.is_platform_paid ? 'Active' : 'Inactive'}
                       </span>
                     </div>
                     <div
                       style={{
-                        fontSize: '0.74rem',
+                        fontSize: '0.9rem',
                         color: 'var(--text-secondary)',
                         marginTop: '2px',
-                        fontFamily: 'ui-monospace, monospace',
                       }}
                     >
-                      {formatAddress(account, 5)} &bull; {formatEth(balanceWei, 4)} ETH
+                      {formatAddress(account, 5)} · {formatEth(balanceWei, 4)} ETH
                     </div>
                     <div
                       style={{
-                        fontSize: '0.72rem',
-                        color: 'var(--text-main)',
-                        marginTop: '4px',
+                        fontSize: '0.9rem',
+                        color: 'var(--accent-strong)',
+                        marginTop: '6px',
                         fontWeight: 600,
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '4px',
+                        gap: '6px',
                       }}
                     >
-                      <User size={12} />
-                      <span>View &amp; Edit Profile &rarr;</span>
+                      <User size={14} />
+                      <span>View and edit your profile</span>
                     </div>
                   </div>
                 </div>
 
                 <button
                   type="button"
-                  className="btn-outline"
-                  style={{
-                    width: '100%',
-                    justifyContent: 'center',
-                    padding: '8px 12px',
-                    fontSize: '0.76rem',
-                    color: 'var(--color-danger, #ef4444)',
-                    borderColor: 'var(--border-subtle)',
-                    gap: '6px',
-                  }}
+                  className="dropdown-disconnect-btn"
                   onClick={() => {
                     setIsDropdownOpen(false);
                     onDisconnect();
                   }}
                 >
-                  <LogOut size={13} />
-                  <span>Disconnect Wallet</span>
+                  <LogOut size={15} />
+                  <span>Disconnect wallet</span>
                 </button>
               </div>
             )}
@@ -408,18 +383,18 @@ export const Header: React.FC<HeaderProps> = ({
               type="button"
               className="theme-toggle-btn"
               onClick={onToggleTheme}
-              title="Toggle Dark / Light Theme"
+              title="Switch between dark and light"
+              aria-label="Switch between dark and light"
             >
-              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
             </button>
             <button
               type="button"
-              className="btn-solid"
+              className="btn-solid topbar-connect-btn"
               onClick={onConnect}
               disabled={connectBusy}
-              style={{ padding: '8px 16px', fontSize: '0.82rem', borderRadius: '9999px' }}
             >
-              <Wallet size={14} />
+              <Wallet size={16} />
               <span>{connectLabel}</span>
             </button>
           </>
