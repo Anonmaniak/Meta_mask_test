@@ -1055,7 +1055,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ e2eeProfile, adm
               </div>
             </div>
 
-            <div className="admin-settings-grid">
+            <div className="admin-settings-grid admin-settings-grid--two">
               <div className="admin-settings-field">
                 <label className="admin-settings-label">Monthly price (USD $)</label>
                 <input

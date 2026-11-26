@@ -126,7 +126,7 @@ export const SupportView: React.FC<SupportViewProps> = ({ onUnreadChange }) => {
     <div className="deck-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div className="deck-title" style={{ justifyContent: 'space-between' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <LifeBuoy size={18} /> Your concierge
+          <LifeBuoy size={18} /> Contact Admin
         </span>
         <button
           type="button"

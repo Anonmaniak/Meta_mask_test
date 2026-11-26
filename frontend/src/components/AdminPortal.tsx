@@ -39,7 +39,7 @@ export const AdminPortal: React.FC = () => {
   }, [theme]);
 
   useEffect(() => {
-    document.title = 'Sign in';
+    document.title = 'Admin';
     const meta = document.createElement('meta');
     meta.name = 'robots';
     meta.content = 'noindex, nofollow';
@@ -111,7 +111,7 @@ export const AdminPortal: React.FC = () => {
         <header className="console-topbar">
           <div className="brand-block">
             <div className="brand-monolith">Z</div>
-            <div className="brand-title">Zyphra <span style={{ fontFamily: 'var(--font-ui)', fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500, marginLeft: 6 }}>Administration</span></div>
+            <div className="brand-title">Zyphra <span style={{ fontFamily: 'var(--font-ui)', fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500, marginLeft: 6 }}>Admin</span></div>
           </div>
           <div className="topbar-actions">{themeButton}</div>
         </header>
@@ -127,7 +127,7 @@ export const AdminPortal: React.FC = () => {
       <header className="console-topbar">
         <div className="brand-block">
           <div className="brand-monolith">Z</div>
-          <div className="brand-title">Zyphra <span style={{ fontFamily: 'var(--font-ui)', fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500, marginLeft: 6 }}>Administration</span></div>
+          <div className="brand-title">Zyphra <span style={{ fontFamily: 'var(--font-ui)', fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500, marginLeft: 6 }}>Admin</span></div>
         </div>
         <div className="topbar-actions">{themeButton}</div>
       </header>

@@ -18,7 +18,6 @@ import {
   Menu,
   X,
   Search,
-  Compass,
   AlertCircle,
   BellRing,
   Reply,
@@ -2852,35 +2851,6 @@ export const Chat: React.FC<ChatProps> = ({
             </div>
 
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', flexShrink: 0, marginLeft: 'auto' }}>
-              {activeTab === 'dm' && selectedPeer && (
-                <button
-                  type="button"
-                  className="btn-outline"
-                  style={{ padding: '6px 10px', fontSize: '0.9rem' }}
-                  onClick={() => {
-                    setChatIndividualError(null);
-                    setChatIndividualModalOpen(true);
-                  }}
-                  title="Start a private chat with another member"
-                >
-                  <Search size={14} />
-                  <span>Find a member</span>
-                </button>
-              )}
-
-              {activeTab === 'groups' && selectedGroup && (
-                <button
-                  type="button"
-                  className="btn-outline"
-                  style={{ padding: '6px 10px', fontSize: '0.9rem' }}
-                  onClick={() => setSelectedGroup(null)}
-                  title="Back to the group list"
-                >
-                  <Compass size={13} />
-                  <span>Browse groups</span>
-                </button>
-              )}
-
               {activeTab === 'dm' && selectedPeer && e2eeProfile && (
                 <>
                   <button
@@ -4082,11 +4052,11 @@ export const Chat: React.FC<ChatProps> = ({
                       style={{
                         width: '100%',
                         marginTop: '3px',
-                        background: 'var(--bg-input)',
+                        backgroundColor: 'var(--bg-input)',
                         border: '1px solid var(--border-strong)',
                         color: 'var(--text-main)',
                         borderRadius: '6px',
-                        padding: '6px',
+                        padding: '7px 36px 7px 10px',
                       }}
                     >
                       <option value="invite_only">Invite Only</option>
@@ -4103,11 +4073,11 @@ export const Chat: React.FC<ChatProps> = ({
                       style={{
                         width: '100%',
                         marginTop: '3px',
-                        background: 'var(--bg-input)',
+                        backgroundColor: 'var(--bg-input)',
                         border: '1px solid var(--border-strong)',
                         color: 'var(--text-main)',
                         borderRadius: '6px',
-                        padding: '6px',
+                        padding: '7px 10px',
                       }}
                     />
                   </div>

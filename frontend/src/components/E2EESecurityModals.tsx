@@ -570,10 +570,10 @@ export const MlsGroupSecurityModal: React.FC<MlsGroupSecurityModalProps> = ({
                   style={{
                     width: '100%',
                     marginTop: '4px',
-                    background: 'var(--bg-input)',
+                    backgroundColor: 'var(--bg-input)',
                     border: '1px solid var(--border-strong)',
                     borderRadius: '8px',
-                    padding: '8px 10px',
+                    padding: '8px 36px 8px 12px',
                     color: 'var(--text-main)',
                     fontSize: '0.9rem',
                   }}

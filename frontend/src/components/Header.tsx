@@ -102,7 +102,7 @@ const NAV_ITEMS: Array<{
 }> = [
     { id: 'open_chat', label: 'Messages', icon: MessageSquare },
     { id: 'payments', label: 'Membership', icon: CreditCard },
-    { id: 'support', label: 'Concierge', icon: LifeBuoy },
+    { id: 'support', label: 'Contact Admin', icon: LifeBuoy },
   ];
 
 export const Header: React.FC<HeaderProps> = ({
@@ -193,7 +193,7 @@ export const Header: React.FC<HeaderProps> = ({
                 <span>{item.label}</span>
                 {item.id === 'support' && supportUnread > 0 && (
                   <span
-                    aria-label={`${supportUnread} unread replies from the concierge`}
+                    aria-label={`${supportUnread} unread replies from admin`}
                     style={{
                       minWidth: 20,
                       height: 20,
