@@ -11,7 +11,7 @@ WebSocket Endpoints:
 ## 1. System & Health
 
 ### `GET /api/health`
-Returns service health (`status: "healthy"`), `timestamp`, `service`, `storage` (`postgresql` or `sqlite_fallback`), and cached Ethereum RPC network status (`_RPC_HEALTH_TTL_SECS = 30.0`). Passing `?deep=1` also runs `chat_db.ping_pg_health()` (`database: "ok" | "unavailable"`) to wake a suspended Neon compute and refresh pooled connections on initial app load.
+Returns service health (`status: "healthy"`), `timestamp`, `service`, `storage` (`postgresql` or `sqlite_fallback`), and the last known Ethereum RPC network status (`eth_rpc.peek_rpc_health_status()`) without triggering live RPC network calls (probing happens at startup and on the `/Admin456` overview via `get_cached_rpc_health_status()`, `RPC_HEALTH_TTL_SECS = 30.0`). Passing `?deep=1` also runs `chat_db.ping_pg_health()` (`database: "ok" | "unavailable"`) to wake a suspended Neon compute and refresh pooled connections on initial app load.
 
 ---
 
@@ -47,7 +47,7 @@ Returns service health (`status: "healthy"`), `timestamp`, `service`, `storage` 
 | `POST /api/e2ee/groups/{group_id}/welcomes/{welcome_id}/ack` | Session | Acknowledges receipt of a pending MLS welcome, returning `{"success": true, "acknowledged": true, "consumed": true}`. |
 | `POST /api/e2ee/groups/{group_id}/messages` | Session | Relays an MLS `PrivateMessage` ciphertext (enforcing active device status, membership, and Paid / ETH group access policy). |
 | `GET /api/e2ee/groups/{group_id}/messages` | Session | Returns MLS group ciphertexts strictly for `epoch >= joined_epoch` (pre-join secrecy) with `after_seq` and `limit` support. |
-| `POST /api/e2ee/attachments` | Session | Uploads `AES-256-GCM` ciphertext blob (up to 14 MB) after constant-time `SHA-256` digest verification and scope authorization. |
+| `POST /api/e2ee/attachments` | Session | Uploads `AES-256-GCM` ciphertext blob (up to 14 MB) after rejecting muted accounts (`403`), validating uploader device & scope via `_resolve_upload_attachment_scope` (active membership for `group`; existing non-blocked peer for `dm` `usr_...`; active participant & non-blocked peer for `dm` `conv_...`; self-target rejected with `400`), and verifying constant-time `SHA-256` digest. |
 | `GET /api/e2ee/attachments/{id}` | Session | Downloads authorized attachment ciphertext (`410 Gone` if revoked, `403` if unauthorized/blocked). |
 | `POST /api/e2ee/attachments/{id}/revoke` | Session | Marks an uploaded encrypted attachment revoked. |
 
@@ -59,7 +59,7 @@ Returns service health (`status: "healthy"`), `timestamp`, `service`, `storage` 
 | :--- | :---: | :--- |
 | `GET /api/platform/pricing` | Public | Returns public platform admission pricing: `platform_entry_fee_usd`, `platform_entry_fee_eth`, `platform_entry_fee_wei`, `eth_usd_price`, `rate_source` (`live` / `live_cached` / `live_stale` / `admin_fixed`), `use_live_eth_price`, `authorized_payment_destination`, `allowed_payment_chain_ids`, and `quoted_at`. |
 | `GET /api/platform/membership/status` | Session | Returns caller's platform membership status: `{ user_id, wallet_address, is_platform_paid, platform_paid_at, platform_paid_until, platform_period, membership_is_free, total_verified_wei, total_verified_eth, group_subscriptions, pricing }`. |
-| `GET /api/platform/groups/{group_id}/pricing` | Optional / Session | Returns group admission pricing: `{ group_id, name, is_paid, entry_fee_eth, entry_fee_wei, entry_fee_usd, eth_usd_price, rate_source, has_paid, authorized_payment_destination, allowed_payment_chain_ids }`. |
+| `GET /api/platform/groups/{group_id}/pricing` | Optional / Session | Returns group admission pricing: `{ group_id, name, is_paid, entry_fee_eth, entry_fee_wei, entry_fee_usd, eth_usd_price, rate_source, has_paid, authorized_payment_destination, allowed_payment_chain_ids }`. Resolves caller session from `HttpOnly` cookie or case-insensitive `Bearer` header (`get_optional_session`). |
 | `PUT /api/platform/admin/pricing` | Superadmin | Updates USD admission fee (`platform_entry_fee_usd`), live price toggle (`use_live_eth_price`), fallback/fixed ETH/USD rate (`eth_usd_price`), legacy ETH fee (`platform_entry_fee_eth`), and/or `authorized_payment_destination`. Records audit log with actor, timestamp, previous value, and new value. |
 | `POST /api/platform/payments/verify` | Session | Submits an on-chain transaction reference (`transaction_reference`, `purpose` e.g. `platform_entry` or `group_entry`, optional `group_id`). Verifies on-chain: receipt status == 1, sender matches user's wallet, recipient matches `authorized_payment_destination`, chain is allowed, and transaction is unique (never counted twice). Marks `is_platform_paid = True` on platform entry. |
 | `GET /api/platform/payments/history` | Session | Returns user's authoritative payment history (`payment_records`) and total verified payment amount. |
@@ -75,7 +75,7 @@ Returns service health (`status: "healthy"`), `timestamp`, `service`, `storage` 
 | `POST /api/platform/blocks` & `DELETE .../blocks/{target_user_id}` | Session | Blocks or unblocks a `user_id` (enforced across DMs, prekey claims, group commits, and Open Chat). |
 | `POST /api/platform/dm/read-receipt` & `GET .../dm/read-receipts/{peer_user_id}` | Session | Records or retrieves opt-in DM read receipt watermarks (`last_read_seq`). Rejects if caller and peer are mutually blocked. |
 | `GET /api/platform/groups/discover` | Optional | Lists discoverable encrypted groups with member counts, paid group status (`is_paid`, `entry_fee_eth`), and whether caller has paid. |
-| `GET /api/platform/groups/{group_id}/policy` & `PUT ...` | Session / Admin | Reads or updates group policy including `is_paid`, `entry_fee_eth`, `visibility`, `min_eth_balance_wei`, and `description` (accepts `/Admin456` session token). |
+| `GET /api/platform/groups/{group_id}/policy` & `PUT ...` | Session / Admin | Reads or updates group policy including `visibility`, `min_eth_balance_wei`, `require_invitation`, and `description`. Pricing fields (`is_paid`, `entry_fee_usd`, `entry_fee_yearly_usd`) are strictly restricted to verified `superadmin` callers (a bogus `X-Admin-Token` falls back to regular session rights without escalating). |
 | `POST /api/platform/groups/{group_id}/invites`, `GET ...` & `DELETE .../{invite_code}` | Group Admin | Creates, lists, or revokes expiring / max-use group invite codes. |
 | `POST /api/platform/groups/join-by-invite/{invite_code}` | Session | Validates invite code + Paid/ETH eligibility and queues join request for MLS `Welcome` onboarding. |
 | `POST /api/platform/groups/{group_id}/join-request` | Session | Submits a join request for a `public` group (verifies Paid/ETH eligibility and `require_invitation` policy). |

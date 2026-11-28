@@ -845,8 +845,12 @@ export const AccountDevicesVaultModal: React.FC<AccountDevicesVaultModalProps> =
 
   if (!open || !profile) return null;
 
+  // Only an ACTIVE link counts (same rule as PlatformViews): an unlinked/removed wallet may be linked again.
   const isConnectedWalletAlreadyLinked = profile.wallets.some(
-    (w) => connectedWallet && w.wallet_address.toLowerCase() === connectedWallet.toLowerCase()
+    (w) =>
+      connectedWallet &&
+      w.status === 'active' &&
+      w.wallet_address.toLowerCase() === connectedWallet.toLowerCase()
   );
   const activeDevices = devices.filter((d) => d.status === 'active');
   const otherDevices = activeDevices.filter((d) => d.device_id !== localDeviceId);

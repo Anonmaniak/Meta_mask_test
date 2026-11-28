@@ -24,20 +24,12 @@ import {
   hasStoredSessionToken,
   setE2EESessionToken,
   logoutE2EESession,
-  registerE2EEDeviceBundle,
-  replenishE2EEPrekeys,
   type E2EEAccountProfile,
 } from './services/e2eeApi';
 import { subscribeE2EERealtime } from './services/e2eeRealtime';
 import { startNotifications } from './services/notificationStore';
 import { NotificationToast } from './components/NotificationBell';
-import { wipeUserDeviceVault } from './services/e2eeVault';
-import {
-  getOrCreateLocalOlmDevice,
-  markLocalPrekeysPublished,
-  generateMoreOlmPrekeys,
-} from './services/olmService';
-import { generateMlsKeyPackagesForDevice } from './services/mlsGroupService';
+import { ensureLocalDeviceRegistered } from './services/deviceProvisioning';
 import {
   connectMemberPresenceWebSocket,
   fetchMembershipStatus,
@@ -304,7 +296,8 @@ export const MainApp: React.FC = () => {
   // Poll Backend Health
   useEffect(() => {
     let mounted = true;
-    const poll = async () => {
+    const poll = async (force = false) => {
+      if (!force && document.visibilityState !== 'visible') return; // hidden tabs don't poll
       try {
         const h = await fetchHealth();
         if (mounted) {
@@ -314,9 +307,9 @@ export const MainApp: React.FC = () => {
         if (mounted) setServerHealthy(false);
       }
     };
-    poll();
+    void poll(true);
     // Once a minute is plenty (thousands of open tabs polling every 20 s was needless server load).
-    const timer = setInterval(poll, 60000);
+    const timer = setInterval(() => void poll(), 60000);
     return () => {
       mounted = false;
       clearInterval(timer);
@@ -395,47 +388,11 @@ export const MainApp: React.FC = () => {
         applyMembershipResult(membership.paid, membership.paidUntil, enterAfterAuthRef.current);
         enterAfterAuthRef.current = false;
 
-        // Safe non-blocking initialization & publish of on-device E2EE bundle + MLS KeyPackages
+        // Non-blocking publish of the on-device E2EE bundle + MLS KeyPackages. Shared with Chat.tsx
+        // (ensureLocalDeviceRegistered is single-flight per user), so signing in never registers the
+        // device twice, and a 403 only wipes the vault when the server confirms this device is revoked.
         try {
-          const uid = verified.user.user_id;
-          let localDev = await getOrCreateLocalOlmDevice(uid, 'Web browser');
-          let mlsPkgs = localDev.isNewDevice
-            ? await generateMlsKeyPackagesForDevice(uid, localDev.record.deviceId, 8)
-            : [];
-          let regRes;
-          try {
-            regRes = await registerE2EEDeviceBundle({
-              ...localDev.registrationBundle,
-              mls_key_packages: mlsPkgs,
-            });
-          } catch (regErr: any) {
-            if (regErr?.status === 403) {
-              // Stored local device was revoked on the server: replace it with a fresh device identity.
-              await wipeUserDeviceVault(uid);
-              localDev = await getOrCreateLocalOlmDevice(uid, 'Web browser');
-              mlsPkgs = await generateMlsKeyPackagesForDevice(uid, localDev.record.deviceId, 8);
-              regRes = await registerE2EEDeviceBundle({
-                ...localDev.registrationBundle,
-                mls_key_packages: mlsPkgs,
-              });
-            } else {
-              throw regErr;
-            }
-          }
-          await markLocalPrekeysPublished(uid);
-
-          if (
-            regRes.available_counts.one_time_prekeys < 5 ||
-            regRes.available_counts.mls_key_packages < 3
-          ) {
-            const rep = await generateMoreOlmPrekeys(uid, 12, false);
-            const extraMls = await generateMlsKeyPackagesForDevice(uid, localDev.record.deviceId, 6);
-            await replenishE2EEPrekeys(localDev.record.deviceId, {
-              ...rep,
-              mls_key_packages: extraMls,
-            });
-            await markLocalPrekeysPublished(uid);
-          }
+          await ensureLocalDeviceRegistered(verified.user.user_id);
           const fresh = await fetchMyE2EEAccount();
           if (fresh?.user) {
             setE2eeProfile(fresh.user);

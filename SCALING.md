@@ -64,9 +64,9 @@ Paying for a bigger plan will not raise the limit past about 2,000 to 3,000. The
 | `CAP_USERS_PER_CPU` | 2000 | Users one full CPU core serves; lower it if the server feels slow |
 | `PAYMENT_PRICE_TOLERANCE_PCT` | 5 | Allowed ETH price movement while paying |
 
-## Measured: 100 members polling (Nov 2026)
+## Measured: 100 members polling vs smart polling (Nov 2026)
 
-Every signed-in member's app asks the server for updates about 4 times every 4.5 seconds (private chats, groups, welcome messages, account), about 1 request per second per member, on top of the live connections. `backend/loadtest_polling.py` simulates that against a real running server (it only ever uses a temporary in-memory database, never your real one):
+Previously, every signed-in member's app polled the server about 4 times every 4.5 seconds (private chats, groups, welcome messages, account), about 1 request per second per member, on top of the live connections. **Now (`e2eeRealtime.ts` + `Chat.tsx` + `App.tsx`)**, while `/ws/e2ee` is live and authenticated (`isE2EERealtimeLive()`), the app only runs a `30 s` safety-net poll (dropping to `4.5 s` only when the live socket is down), pauses both chat and `/api/health` polling in hidden browser tabs, and catches up on tab return or WebSocket reconnect. In addition, `GET /api/health` calls `eth_rpc.peek_rpc_health_status()` and never triggers live Ethereum RPC probes. `backend/loadtest_polling.py` simulates the worst-case 4.5 s fallback polling against a real running server (it only ever uses a temporary in-memory database, never your real one):
 
 | Members | Requests per second | Response time: median / 95th / 99th | Server CPU | Memory |
 |---|---|---|---|---|

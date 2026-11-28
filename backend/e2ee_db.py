@@ -204,6 +204,9 @@ def ensure_e2ee_tables() -> None:
                         created_bucket VARCHAR(40) NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS idx_dm_conv_seq ON chat_dm_messages(conversation_id, seq ASC);
+                    -- The sidebar lists DM conversations by sender OR recipient on every sync; both sides need an index.
+                    CREATE INDEX IF NOT EXISTS idx_dm_sender_seq ON chat_dm_messages(sender_user_id, seq);
+                    CREATE INDEX IF NOT EXISTS idx_dm_recipient_seq ON chat_dm_messages(recipient_user_id, seq);
 
                     CREATE TABLE IF NOT EXISTS chat_groups (
                         group_id VARCHAR(64) PRIMARY KEY,
@@ -417,6 +420,9 @@ def ensure_e2ee_tables() -> None:
                 created_bucket TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_dm_conv_seq ON chat_dm_messages(conversation_id, seq ASC);
+            -- The sidebar lists DM conversations by sender OR recipient on every sync; both sides need an index.
+            CREATE INDEX IF NOT EXISTS idx_dm_sender_seq ON chat_dm_messages(sender_user_id, seq);
+            CREATE INDEX IF NOT EXISTS idx_dm_recipient_seq ON chat_dm_messages(recipient_user_id, seq);
 
             CREATE TABLE IF NOT EXISTS chat_groups (
                 group_id TEXT PRIMARY KEY,

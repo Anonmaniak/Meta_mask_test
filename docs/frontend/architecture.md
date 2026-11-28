@@ -65,7 +65,11 @@ graph TD
 | `olmService.ts` | Vodozemac Olm v2 account/session lifecycle, Ed25519 bundle signing, OTK replenishment, and 60-digit Safety Numbers. |
 | `mlsGroupService.ts` | RFC 9420 MLS `KeyPackage` generation, `Create`/`Add`/`Remove`/`Update` Commits, `Welcome` onboarding, and `PrivateMessage` AEAD. |
 | `e2eeAttachmentCrypto.ts` | On-device `AES-256-GCM` file encryption and `SHA-256` ciphertext verification. |
-| `e2eeApi.ts` | Typed REST & `/ws/e2ee` client for SIWE auth, identity/wallet linking, device bundles, Olm DM relay, and MLS group commits/messages. |
+| `deviceProvisioning.ts` | Single-flight E2EE device registration & MLS KeyPackage provisioning (`ensureLocalDeviceRegistered`) shared across `App.tsx` and `Chat.tsx`. |
+| `deviceRevocation.ts` | Safe vault-wipe decision helper (`shouldWipeLocalDevice`): wipes local E2EE keys/sessions/history strictly when the server explicitly confirms local device revocation (never on suspended/muted or permission `403`s). |
+| `e2eeRealtime.ts` | Shared `/ws/e2ee` subscriber tracking connection state (`isE2EERealtimeLive()` from `authenticated` / `ws_closed` events) so `Chat.tsx` uses a `30 s` safety poll while connected and `4.5 s` fallback only when disconnected (pausing hidden tabs). |
+| `chatEvents.ts` | Encrypted event folding (reactions, edits, polls, deletes) and `isSingleEmoji` validator mirroring backend `is_single_emoji` (supports keycaps, flags, skin tones, and ZWJ sequences). |
+| `e2eeApi.ts` | Typed REST & `/ws/e2ee` client (emitting `ws_closed` on disconnect) for SIWE auth, identity/wallet linking, device bundles, Olm DM relay, and MLS group commits/messages. |
 | `platformApi.ts` | Typed REST & `/ws/public-chat` / `/ws/member-presence` client for pricing, membership status, RPC wallet verification, Open Public Chat, `@username` search, blocks, read receipts, group policies/invites/join requests, reports, "Talk to admin" support threads, `/Admin456` session login (`adminLogin`, `adminSessionValid`, `adminLogout`), and RBAC admin APIs. |
 | `resilientFetch.ts` | Cold-start & transient error retry helper for idempotent (`GET`/`HEAD`/`OPTIONS`) requests (`resilientFetch`, `NetworkUnreachableError`, `backoffDelay`) plus `onWake` listener to reconnect WebSockets on `online` / `visibilitychange`. |
 | `api.ts` | Health status check, `warmUpBackend()` (`GET /api/health?deep=1`), and backend base URL resolver (Node-safe for automated unit tests). |

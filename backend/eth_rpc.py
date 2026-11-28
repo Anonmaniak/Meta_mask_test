@@ -10,8 +10,24 @@ Security Guarantees:
 
 import os
 import re
+import sys
+import threading
+import time
 from typing import Optional, Dict, Any, List, Tuple
 from web3 import Web3
+
+
+def is_test_environment() -> bool:
+    """Single source of truth for "are we running under a test runner?".
+
+    Covers pytest, unittest and the explicit TESTING=1 switch so every module
+    (app.py, lifespan, RPC helpers) agrees on when to skip live network calls.
+    """
+    return (
+        os.getenv("TESTING") == "1"
+        or "pytest" in sys.modules
+        or "unittest" in sys.modules
+    )
 
 
 class EthereumRpcUnavailableError(RuntimeError):
@@ -19,7 +35,7 @@ class EthereumRpcUnavailableError(RuntimeError):
 
 
 def _init_provider(url: Optional[str]) -> Optional[Web3]:
-    if os.getenv("TESTING") == "1":
+    if is_test_environment():
         return None
     cleaned = (url or "").strip()
     if not cleaned:
@@ -121,8 +137,9 @@ def verify_onchain_eth_balance(wallet_address: str, chain_id: int = 1) -> Dict[s
 
 
 def get_rpc_health_status() -> Dict[str, Any]:
-    import sys
-    if "unittest" in sys.modules or os.getenv("TESTING") == "1":
+    """Live probe of every configured RPC (slow: up to 10 s per provider). Prefer the
+    cached variant below from request handlers."""
+    if is_test_environment():
         return {
             "mainnet": {"configured": True, "connected": True},
             "sepolia": {"configured": True, "connected": True},
@@ -157,6 +174,81 @@ def get_rpc_health_status() -> Dict[str, Any]:
             "connected": sepolia_connected,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Cached health (stale-while-revalidate) so polled endpoints never block on RPC.
+# ---------------------------------------------------------------------------
+RPC_HEALTH_TTL_SECS = 30.0
+_rpc_health_cache: Dict[str, Any] = {"at": 0.0, "value": None}
+_rpc_health_lock = threading.Lock()
+_rpc_health_refreshing = threading.Event()
+
+
+def _refresh_rpc_health() -> Dict[str, Any]:
+    try:
+        value = get_rpc_health_status()
+        with _rpc_health_lock:
+            _rpc_health_cache["value"] = value
+            _rpc_health_cache["at"] = time.monotonic()
+        return value
+    finally:
+        _rpc_health_refreshing.clear()
+
+
+def _configured_only_status() -> Dict[str, Any]:
+    """Cheap placeholder used before the first probe finishes (no network I/O)."""
+    if is_test_environment():
+        return get_rpc_health_status()
+    mainnet_configured = bool(
+        (os.getenv("RPC_URL_MAINNET") or "").strip()
+        or (os.getenv("RPC_URL_MAINNET_FALLBACK") or "").strip()
+        or (os.getenv("RPC_URL") or "").strip()
+    )
+    sepolia_configured = bool(
+        (os.getenv("RPC_URL_SEPOLIA") or "").strip() or (os.getenv("RPC_URL") or "").strip()
+    )
+    return {
+        "mainnet": {"configured": mainnet_configured, "connected": False, "checking": True},
+        "sepolia": {"configured": sepolia_configured, "connected": False, "checking": True},
+    }
+
+
+def get_cached_rpc_health_status(block_if_empty: bool = False) -> Dict[str, Any]:
+    """Returns the last RPC health result, refreshing it in the background once it is older
+    than RPC_HEALTH_TTL_SECS. Never blocks on the network unless `block_if_empty` is True and
+    there is no result yet."""
+    if is_test_environment():
+        return get_rpc_health_status()
+
+    # Read the cache and claim the single "refresher" slot atomically, so two requests arriving at
+    # the same instant can never both start a probe.
+    with _rpc_health_lock:
+        cached = _rpc_health_cache["value"]
+        age = time.monotonic() - _rpc_health_cache["at"]
+        if cached is not None and age < RPC_HEALTH_TTL_SECS:
+            return cached
+        claimed = not _rpc_health_refreshing.is_set()
+        if claimed:
+            _rpc_health_refreshing.set()
+
+    if claimed and cached is None and block_if_empty:
+        return _refresh_rpc_health()
+    if claimed:
+        # Stale or empty: one background refresh, answer immediately.
+        threading.Thread(target=_refresh_rpc_health, name="rpc-health-refresh", daemon=True).start()
+    return cached if cached is not None else _configured_only_status()
+
+
+def peek_rpc_health_status() -> Dict[str, Any]:
+    """Last known RPC health WITHOUT any network call or refresh. For endpoints that every visitor
+    polls (/api/health): reporting status must not cost an RPC request. The admin dashboard
+    (get_cached_rpc_health_status) and startup are what actually probe."""
+    if is_test_environment():
+        return get_rpc_health_status()
+    with _rpc_health_lock:
+        cached = _rpc_health_cache["value"]
+    return cached if cached is not None else _configured_only_status()
 
 
 def verify_onchain_payment_transaction(
@@ -247,7 +339,9 @@ def verify_onchain_payment_transaction(
                     "chain_id": cid,
                     "verification_source": rpc_source,
                 }
-            if recipient and recipient.lower() != norm_expected_recipient.lower():
+            # A contract-creation tx (to=None) can never pay the authorized destination, so it
+            # fails immediately too, exactly like the mined-path check below.
+            if not recipient or recipient.lower() != norm_expected_recipient.lower():
                 return {
                     "verified": False,
                     "status": "failed",

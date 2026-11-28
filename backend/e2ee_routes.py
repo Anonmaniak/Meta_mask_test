@@ -2167,7 +2167,8 @@ def send_group_mls_message(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your account is currently muted by moderation",
         )
-    meets, reason = platform_db.verify_user_meets_group_policy(group_id, user_id)
+    # Sending uses the saved balance (checked fresh when the member joined): never an RPC call per message.
+    meets, reason = platform_db.verify_user_meets_group_policy(group_id, user_id, refresh_balance=False)
     if not meets:
         # Paid group whose subscription ran out: 402 with the group's id and name, exactly like
         # reading and Accept, so the app opens the renew window instead of showing a bare error.
@@ -2487,7 +2488,8 @@ def set_my_conversation_pref(payload: ConversationPrefRequest, ctx: Dict[str, An
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown chat")
     if key.startswith("dm:") and not e2ee_db.get_user_by_id(key[3:]):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
-    if key.startswith("group:") and not e2ee_db.get_member_record(key[6:], uid):
+    # Only CURRENT members: people who left, were removed or declined must not write group prefs.
+    if key.startswith("group:") and not e2ee_db.is_active_group_member(key[6:], uid):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only group members can do this")
     try:
         pref = chat_features_db.set_pref(uid, key, mute=payload.mute, archived=payload.archived)
@@ -2520,6 +2522,47 @@ def _authorize_attachment_scope(scope_type: str, scope_id: str, user_id: str) ->
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized for this DM attachment conversation",
         )
+    else:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unsupported attachment scope")
+
+
+def _resolve_upload_attachment_scope(scope_type: str, scope_id: str, user_id: str) -> str:
+    """Authorizes an attachment UPLOAD and returns the scope id to store it under.
+
+    - group: the uploader must be an active member.
+    - dm to a user id (usr_...): the peer must exist, must not be the uploader, and no block may
+      exist in either direction. Stored under the deterministic DM conversation id.
+    - dm to a conversation id (conv_...): the uploader must already be a participant, and no block
+      may exist with the other participant.
+    Anything else is refused (fail closed)."""
+    if scope_type == "group":
+        _authorize_attachment_scope("group", scope_id, user_id)
+        return scope_id
+    if scope_type != "dm":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported attachment scope")
+
+    if scope_id.startswith("usr_"):
+        if scope_id == user_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot send a private attachment to yourself")
+        if not e2ee_db.get_user_by_id(scope_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipient not found")
+        _authorize_attachment_scope("dm", scope_id, user_id)  # block check
+        return e2ee_db.make_dm_conversation_id(user_id, scope_id)
+
+    if scope_id.startswith("conv_"):
+        convs = e2ee_db.list_dm_conversations_for_user(user_id)
+        match = next((c for c in convs if c.get("conversation_id") == scope_id), None)
+        if not match:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized for this DM attachment conversation",
+            )
+        peer = match.get("peer_user_id")
+        if peer and platform_db.is_blocked_between(user_id, peer):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot exchange attachments with blocked user")
+        return scope_id
+
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid DM attachment scope")
 
 
 @router.post("/attachments")
@@ -2528,9 +2571,13 @@ def upload_encrypted_attachment(
     ctx: Dict[str, Any] = Depends(require_paid_member),
 ):
     user_id = ctx["user"]["user_id"]
+    if ctx["user"].get("account_status") == "muted":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account is currently muted by moderation")
     dev = e2ee_db.get_device(payload.uploader_device_id)
     if not dev or dev["user_id"] != user_id or dev["status"] != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid uploader device")
+    # Authorize the destination BEFORE spending rate-limit / daily quota or decoding megabytes.
+    scope_id = _resolve_upload_attachment_scope(payload.scope_type, payload.scope_id, user_id)
 
     raw_ct = _decode_b64_any(payload.ciphertext_b64, "ciphertext_b64")
     if len(raw_ct) > MAX_ATTACHMENT_BYTES:
@@ -2555,12 +2602,6 @@ def upload_encrypted_attachment(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Attachment ciphertext SHA-256 integrity mismatch",
         )
-
-    scope_id = payload.scope_id
-    if payload.scope_type == "dm" and scope_id.startswith("usr_"):
-        scope_id = e2ee_db.make_dm_conversation_id(user_id, scope_id)
-    elif payload.scope_type == "group":
-        _authorize_attachment_scope("group", scope_id, user_id)
 
     stored = e2ee_db.store_encrypted_attachment(
         scope_type=payload.scope_type,

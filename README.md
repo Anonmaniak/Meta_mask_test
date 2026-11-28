@@ -64,8 +64,10 @@
     - **8-Tab RBAC Console** (`Overview`, `Users & Wallets`, `Groups & Policies` with monthly + yearly paid-group prices, `Payments` with Retry for stuck payments, `Moderation & Reports`, `Support Inbox`, `Platform Settings`, `Audit Logs`) with **automatic 5-second background polling** (no manual Refresh button needed) and instant single-query user filtering (`admin_list_users`).
     - Role-based administrators (`superadmin`, `moderator`) configure **Active Ethereum Network** (`Ethereum Mainnet (1)` vs `Sepolia Testnet (11155111)` selecting `RPC_URL_MAINNET` / `RPC_URL_SEPOLIA`), **`Username change Hrs`**, monthly + yearly USD membership pricing (`platform_entry_fee_usd`, `platform_yearly_fee_usd`), live/fixed ETH valuation (`use_live_eth_price`, `eth_usd_price`), authorized treasury destination, paid group tagging with monthly + yearly USD prices, **Support Inbox**, public chat moderation, user mutes/suspensions, group access policies, abuse reports, and `audit_logs`.
     - **Reorganized Platform Settings UI**: Structured into 3 clear cards with uniform 42px controls and `align-items: start`: (1) **Usernames & Identity** (cooldown hours & quarantine days), (2) **Members' Room** (max length, edit window, and retention days with live WebSocket sync to connected clients), and (3) **Membership, Pricing & Payments** (network toggle, treasury destination, USD pricing, and live ETH oracle toggles).
-12. **Cold-Start & Connection Resilience**
-    - Frontend `warmUpBackend()` (`GET /api/health?deep=1`) wakes Neon/Render on page load, `resilientFetch.ts` automatically retries idempotent `GET`/`HEAD`/`OPTIONS` requests with backoff (`onWake` reconnects WebSockets immediately on online/tab focus), and `backend/app.py` explicitly loads `backend/.env` (`override=True`) and converts dropped PostgreSQL/Neon connections into `503 Retry-After: 1` after flushing idle pool sockets.
+12. **Cold-Start, Smart Polling & On-Demand RPC Resilience**
+    - Frontend `warmUpBackend()` (`GET /api/health?deep=1`) wakes Neon/Render on page load while skipping hidden-tab health polls; `resilientFetch.ts` automatically retries idempotent `GET`/`HEAD`/`OPTIONS` requests with backoff (`onWake` reconnects WebSockets immediately on online/tab focus); `e2eeRealtime.ts` tracks live `/ws/e2ee` authentication so `Chat.tsx` polls every `30 s` as a safety net while connected and drops to `4.5 s` only when disconnected.
+    - `GET /api/health` calls `eth_rpc.peek_rpc_health_status()` with zero RPC network calls (probing runs at startup and on the admin dashboard), while group min-balance checks refresh stale on-chain balances on demand only on join/discovery (`BALANCE_REFRESH_SECS=600`) and never on message sends.
+    - Client device provisioning (`deviceProvisioning.ts`) is single-flight per user, and local key vault wipes (`deviceRevocation.ts`) trigger strictly on server-confirmed device revocation (preserving keys and message history across temporary suspensions or permission `403`s).
 
 ---
 
@@ -74,25 +76,28 @@
 ```text
 MetaMask_chatonly/
 ├── backend/                     # Python FastAPI + WebSockets + Neon PostgreSQL backend
-│   ├── app.py                   # ASGI entrypoint, backend/.env loader, security headers, CORS, 503 DB recovery & router mounting
+│   ├── app.py                   # ASGI entrypoint, backend/.env loader, security headers, CORS, 503 DB recovery, zero-RPC /api/health & router mounting
 │   ├── admin_auth.py            # /Admin456 login verifier, global login slowdown (no IPs) & session guard
-│   ├── eth_rpc.py               # Server-side Ethereum Mainnet/Sepolia RPC balance & tx verifier
+│   ├── eth_rpc.py               # Server-side Ethereum Mainnet/Sepolia RPC balance/tx verifier & cached health probe
 │   ├── price_oracle.py          # Live ETH/USD spot oracle (Coinbase/Kraken) with admin fixed fallback
-│   ├── e2ee_db.py               # Permanent identity, SIWE sessions, Olm prekeys & MLS group store
-│   ├── e2ee_routes.py           # /api/e2ee/* REST endpoints + /ws/e2ee real-time ciphertext hub (admins excluded from online presence)
-│   ├── platform_db.py           # Admission paywall, paid groups, payments, Open Chat, single-query admin user listing, RBAC & audit DB
+│   ├── chat_features_db.py      # Atomic pins (advisory/RLock + monotonic timestamps), timers, mute/archive, announcement mode & single-emoji validator
+│   ├── read_markers_db.py       # DM & group unread counters and read baselines
+│   ├── public_attachments_db.py # Members' room non-encrypted attachment storage & retention purge
+│   ├── e2ee_db.py               # Permanent identity, SIWE sessions, Olm prekeys, MLS group store & DM sender/recipient indexes
+│   ├── e2ee_routes.py           # /api/e2ee/* REST endpoints + /ws/e2ee hub (active-member pref guard, DM upload block/participant check)
+│   ├── platform_db.py           # Admission paywall, paid groups, on-demand balance refresh, access grants, Open Chat, RBAC & audit DB
 │   ├── platform_routes.py       # /api/platform/* REST endpoints + /ws/public-chat & /ws/member-presence
 │   ├── support_db.py            # "Talk to admin" support threads & messages persistence
 │   ├── chat_db.py               # Database connection pool (PostgreSQL / SQLite fallback)
-│   ├── migrations/              # Versioned PostgreSQL SQL migrations (001 through 010; 010 is a one-time grandfathering step)
+│   ├── migrations/              # Versioned PostgreSQL SQL migrations (001 through 015)
 │   ├── run_migrations.py        # Idempotent PostgreSQL migration runner & default settings seeder
-│   └── test_*.py                # 125 automated backend unit & end-to-end security integration tests (+1 live Neon test)
+│   └── test_*.py                # 267 automated backend unit & end-to-end security integration tests (+1 live Neon test)
 ├── frontend/                    # React 19 + TypeScript + Tailwind CSS v4 + Vite 8 SPA
 │   ├── public/favicon.svg       # Circular brass "Z" browser tab favicon
 │   ├── src/components/          # Responsive UI: WelcomeGate/Splash, Header, Messages, Membership, Contact Admin, Settings & /Admin456
-│   ├── src/services/            # SIWE, Web3, Payments, Pricing, Olm v2, RFC 9420 MLS, Vault, resilientFetch & API clients
+│   ├── src/services/            # SIWE, Web3, Payments, Pricing, Olm v2, RFC 9420 MLS, Vault, deviceProvisioning/Revocation, chatEvents, e2eeRealtime & resilientFetch
 │   ├── vercel.json              # SPA route rewrite rules (/, /settings, /payments, /support, /Admin456)
-│   └── tests/                   # 48 automated Node.js cryptographic, vault, CSP, notification & sync tests
+│   └── tests/                   # 56 automated Node.js cryptographic, vault, CSP, notification, chat-event, revocation & sync tests
 └── docs/                        # Threat model, system architecture, API reference, and workflows
 ```
 
@@ -122,10 +127,10 @@ npm run dev
 
 ### 3. Run All Automated Tests
 ```bash
-# Backend (132 unit/integration tests across permanent identity, SIWE, verified payments, paid membership/groups, Open Chat, Olm v2, MLS, /Admin456 login & RBAC)
+# Backend (267 unit/integration tests across permanent identity, SIWE, verified payments, paid membership/groups, RPC on-demand, data isolation, chat features, Olm v2, MLS, /Admin456 login & RBAC)
 TESTING=1 python -m pytest backend -k "not test_neon_conn" -q
 
-# Frontend (43 cryptographic, vault, MLS, sync & failed-send retry tests + linter + production build)
+# Frontend (56 cryptographic, vault, revocation, MLS, sync, CSP, notification & chat-event tests + linter + production build)
 npm --prefix frontend test
 npm --prefix frontend run lint
 npm --prefix frontend run build

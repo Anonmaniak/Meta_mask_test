@@ -1614,12 +1614,18 @@ def update_group_policy_endpoint(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
 
     actor_uid: Optional[str] = None
+    # True only when _resolve_admin_actor actually verified a superadmin. A header that is merely
+    # present (stale, forged or garbage) must never grant pricing control.
+    admin_verified = False
     if x_admin_token:
         try:
             actor = _resolve_admin_actor(request, authorization, x_admin_token, min_role="superadmin")
             actor_uid = actor["actor_user_id"]
+            admin_verified = actor.get("role") == "superadmin"
         except HTTPException:
-            pass
+            # Invalid admin token: fall back to the caller's normal session, with normal rights.
+            actor_uid = None
+            admin_verified = False
 
     if not actor_uid:
         ctx = require_authenticated_session(request, authorization)
@@ -1630,7 +1636,7 @@ def update_group_policy_endpoint(
 
     # Only the platform's superadmin decides whether a group is paid and what it costs.
     # Group owners can still edit everything else; their payment fields are ignored.
-    is_superadmin = bool(x_admin_token and actor_uid) or platform_db.get_admin_role(actor_uid) == "superadmin"
+    is_superadmin = admin_verified or platform_db.get_admin_role(actor_uid) == "superadmin"
     current = platform_db.get_group_access_policy(group_id)
     if is_superadmin:
         eff_paid = bool(current.get("is_paid")) if payload.is_paid is None else bool(payload.is_paid)
@@ -1859,7 +1865,7 @@ def admin_overview_endpoint(admin_ctx: Dict[str, Any] = Depends(require_moderato
         "stats": platform_db.admin_get_overview_stats(),
         # The admin view counts admin wallets that are using the chat too (members never see them).
         "online": realtime_hub.get_online_stats(include_admins=True),
-        "networks": eth_rpc.get_rpc_health_status(),
+        "networks": eth_rpc.get_cached_rpc_health_status(),
     }
 
 
@@ -2375,13 +2381,12 @@ def get_group_pricing_endpoint(
 
     has_paid = False
     try:
-        if authorization and authorization.startswith("Bearer "):
-            token = authorization.split(" ", 1)[1].strip()
-            sess = e2ee_db.get_session_by_token(token)
-            if sess:
-                has_paid = platform_db.has_user_paid_group_entry(sess["user_id"], group_id)
+        # Same token resolution as every other endpoint: case-insensitive Bearer OR session cookie.
+        ctx = get_optional_session(request, authorization)
+        if ctx:
+            has_paid = platform_db.has_user_paid_group_entry(ctx["user"]["user_id"], group_id)
     except Exception:
-        pass
+        logger.warning("group pricing: could not resolve caller payment status", exc_info=True)
 
     return {
         "group_id": group_id,

@@ -153,7 +153,7 @@ Because E2EE encrypts content rather than providing mixnet/onion anonymous routi
 
 ### 9.1 Encrypted File Attachment Protocol
 1. Before upload, [`encryptAttachmentOnDevice`](file:///c:/Users/hp/OneDrive/Desktop/MetaMask_chatonly/frontend/src/services/e2eeAttachmentCrypto.ts) generates a fresh random 256-bit `AES-256-GCM` key and 96-bit IV on-device and encrypts the file with AAD `zyphra-e2ee-attachment-v1|<scopeType>|<fileName>|<mimeType>`.
-2. The client computes `SHA-256(ciphertext)` and uploads **only** `(ciphertext_b64, ciphertext_sha256, scope_type, scope_id)` to `POST /api/e2ee/attachments`. The server verifies `SHA-256(ciphertext)` in constant time (`secrets.compare_digest`) and never sees the file name, MIME type, or AES key.
+2. The client computes `SHA-256(ciphertext)` and uploads **only** `(ciphertext_b64, ciphertext_sha256, scope_type, scope_id)` to `POST /api/e2ee/attachments`. `_resolve_upload_attachment_scope` verifies non-muted status, active group membership (`group`), or non-blocked participation (`dm` via `usr_...` or `conv_...`) before decoding or storing; the server verifies `SHA-256(ciphertext)` in constant time (`secrets.compare_digest`) and never sees the file name, MIME type, or AES key.
 3. The attachment key descriptor `{ attachment_id, key_b64, iv_b64, sha256_hex, file_name, mime_type, size_bytes }` is sent **exclusively inside** the Olm v2 or MLS `PrivateMessage` encrypted envelope.
 4. On download (`GET /api/e2ee/attachments/{id}`), the server enforces participant/group membership authorization and revocation state (`410 Gone` if revoked via `POST /api/e2ee/attachments/{id}/revoke`), and the recipient verifies `SHA-256(ciphertext)` in constant time **before** invoking `AES-256-GCM` decryption.
 

@@ -40,7 +40,6 @@ import {
 } from '../services/e2eeVault';
 import {
   OLM_PROTOCOL_ID,
-  getOrCreateLocalOlmDevice,
   generateFreshLocalOlmDevice,
   markLocalPrekeysPublished,
   generateMoreOlmPrekeys,
@@ -63,6 +62,8 @@ import {
   getMlsGroupSecurityInfo,
   clearLocalMlsGroupState,
 } from '../services/mlsGroupService';
+import { ensureLocalDeviceRegistered } from '../services/deviceProvisioning';
+import { shouldWipeLocalDevice } from '../services/deviceRevocation';
 import {
   encryptAttachmentOnDevice,
   decryptAttachmentOnDevice,
@@ -75,7 +76,6 @@ import {
   updateMyE2EEUsername,
   linkNewWalletToE2EEAccount,
   resolveE2EEPeer,
-  registerE2EEDeviceBundle,
   replenishE2EEPrekeys,
   revokeE2EEDevice,
   resetLostE2EEIdentity,
@@ -164,7 +164,7 @@ import {
   ChatStatusChips,
 } from './chat/MessageExtras';
 import { setNotificationMutedScopes } from '../services/notificationStore';
-import { subscribeE2EERealtime } from '../services/e2eeRealtime';
+import { subscribeE2EERealtime, isE2EERealtimeLive } from '../services/e2eeRealtime';
 import {
   useNotifications,
   setActiveConversation,
@@ -212,6 +212,10 @@ interface ResolvedPeerTarget {
   devices: PeerActiveDeviceDescriptor[];
 }
 
+/** Poll every 4.5 s while the live connection is down; every 30 s (safety net) while it is up. */
+const FAST_POLL_MS = 4500;
+const SAFETY_POLL_MS = 30_000;
+
 interface FailedSendPayload {
   channelType: 'dm' | 'groups';
   targetId: string;
@@ -221,6 +225,8 @@ interface FailedSendPayload {
   createdAt: number;
   /** Encrypted files already uploaded for this message (re-used on Retry). */
   attachmentIds?: string[];
+  /** People @mentioned in a group message, so Retry still notifies them. */
+  mentionIds?: string[];
 }
 
 interface RichDisplayMessage extends ChatMessage {
@@ -363,6 +369,14 @@ export const Chat: React.FC<ChatProps> = ({
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const vaultInitInFlightRef = useRef<string | null>(null);
+  // A group that the server already created while adding its first members failed. Retrying the
+  // form then only adds the members instead of creating a second, duplicate group.
+  const halfCreatedGroupRef = useRef<Awaited<ReturnType<typeof createServerMlsGroup>>['group'] | null>(null);
+  // KeyPackages are one-time: claiming consumes them on the server. Keep the ones claimed by a
+  // failed attempt (per user id) so Retry re-uses them instead of burning a fresh batch.
+  const claimedKeyPackagesRef = useRef<
+    Record<string, Array<{ user_id: string; device_id: string; key_package_b64: string }>>
+  >({});
 
   const setE2eeProfile = useCallback(
     (next: E2EEAccountProfile | null) => {
@@ -564,6 +578,14 @@ export const Chat: React.FC<ChatProps> = ({
     return () => clearTimeout(timer);
   }, [createGroupModalOpen, groupMemberInput, e2eeProfile, pendingGroupMembers]);
 
+  useEffect(() => {
+    // Closing the form ends the retry window; the half-created group stays in the sidebar.
+    if (!createGroupModalOpen) {
+      halfCreatedGroupRef.current = null;
+      claimedKeyPackagesRef.current = {};
+    }
+  }, [createGroupModalOpen]);
+
   const scrollToBottom = (smooth = true) => {
     if (chatBodyRef.current) {
       chatBodyRef.current.scrollTo({
@@ -639,54 +661,14 @@ export const Chat: React.FC<ChatProps> = ({
       if (vaultInitInFlightRef.current === userId) return;
       vaultInitInFlightRef.current = userId;
       try {
-        let localDev = await getOrCreateLocalOlmDevice(userId, 'Web browser');
-        let mlsPackages = localDev.isNewDevice
-          ? await generateMlsKeyPackagesForDevice(userId, localDev.record.deviceId, 8)
-          : [];
-
-        let regRes;
-        try {
-          regRes = await registerE2EEDeviceBundle({
-            ...localDev.registrationBundle,
-            mls_key_packages: mlsPackages,
-          });
-        } catch (regErr: any) {
-          if (regErr?.status === 403) {
-            // Local device was revoked on the server: wipe stale vault and provision a new device.
-            await wipeUserDeviceVault(userId);
-            localDev = await getOrCreateLocalOlmDevice(userId, 'Web browser');
-            mlsPackages = await generateMlsKeyPackagesForDevice(userId, localDev.record.deviceId, 8);
-            regRes = await registerE2EEDeviceBundle({
-              ...localDev.registrationBundle,
-              mls_key_packages: mlsPackages,
-            });
-          } else {
-            throw regErr;
-          }
-        }
-        await markLocalPrekeysPublished(userId);
-
-        if (
-          regRes.available_counts.one_time_prekeys < 5 ||
-          regRes.available_counts.mls_key_packages < 3
-        ) {
-          const moreOlm = await generateMoreOlmPrekeys(userId, 12, false);
-          const moreMls = await generateMlsKeyPackagesForDevice(
-            userId,
-            localDev.record.deviceId,
-            6
-          );
-          await replenishE2EEPrekeys(localDev.record.deviceId, {
-            ...moreOlm,
-            mls_key_packages: moreMls,
-          });
-          await markLocalPrekeysPublished(userId);
-        }
+        // Shared, single-flight registration (also started by App.tsx right after sign-in): a second
+        // caller waits for the first run instead of registering the device and KeyPackages again.
+        const provisioned = await ensureLocalDeviceRegistered(userId);
 
         const freshMe = await fetchMyE2EEAccount();
         setE2eeProfile(freshMe.user);
         setMyDevices(freshMe.devices);
-        setLocalDeviceId(localDev.record.deviceId);
+        setLocalDeviceId(provisioned.deviceId);
         setVaultBoundUserId(userId);
       } finally {
         if (vaultInitInFlightRef.current === userId) {
@@ -915,9 +897,15 @@ export const Chat: React.FC<ChatProps> = ({
       } while (syncQueuedRef.current);
     } catch (err: any) {
       if (err?.status === 403 && e2eeProfile) {
-        // Active device was revoked on the server: clear stale local device so vault re-initializes cleanly.
-        wipeUserDeviceVault(e2eeProfile.user_id)
-          .then(() => {
+        // A 403 can mean many things (suspended account, block, "not in this group"...). Wipe the
+        // local vault ONLY when the server confirms this exact device is revoked; otherwise keep
+        // every key, session and cached message.
+        const uid = e2eeProfile.user_id;
+        const devId = localDeviceId;
+        shouldWipeLocalDevice(err, devId, fetchMyE2EEAccount)
+          .then(async (revoked) => {
+            if (!revoked) return;
+            await wipeUserDeviceVault(uid);
             setLocalDeviceId(null);
             setVaultBoundUserId(null);
           })
@@ -1002,8 +990,13 @@ export const Chat: React.FC<ChatProps> = ({
     }
   }, [activeScope, isVaultReadyForProfile, e2eeProfile?.user_id, localDeviceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Stable primitives for hooks: depending on the whole profile object would re-create the sync
+  // loop and re-subscribe the realtime socket every time the profile is refreshed.
+  const myProfileUserId = e2eeProfile?.user_id ?? null;
+  const myProfileSendReceipts = e2eeProfile?.send_read_receipts;
+
   const loadActiveChannelMessages = useCallback(async () => {
-    if (!isVaultReadyForProfile || !e2eeProfile || !localDeviceId) {
+    if (!isVaultReadyForProfile || !myProfileUserId || !localDeviceId) {
       return;
     }
     const scopeAtStart = activeScopeRef.current;
@@ -1017,15 +1010,15 @@ export const Chat: React.FC<ChatProps> = ({
     if (scopeSyncPendingRef.current[scopeAtStart]) return;
     scopeSyncPendingRef.current[scopeAtStart] = true;
 
-    const myUserId = e2eeProfile.user_id;
+    const myUserId = myProfileUserId;
     const myDevId = localDeviceId;
-    const mySendReceipts = e2eeProfile.send_read_receipts !== false;
+    const mySendReceipts = myProfileSendReceipts !== false;
     const myGen = loadGenRef.current;
     const isStillCurrent = () =>
       activeScopeRef.current === scopeAtStart && loadGenRef.current === myGen;
 
     const prevChain = scopeSyncChainRef.current[scopeAtStart] || Promise.resolve();
-    const run = prevChain.catch(() => {}).then(async () => {
+    const run = prevChain.catch(() => { }).then(async () => {
       scopeSyncPendingRef.current[scopeAtStart] = false;
       try {
         // 1. PRIVATE 1-TO-1 CHAT (Olm v2 Double Ratchet)
@@ -1100,16 +1093,16 @@ export const Chat: React.FC<ChatProps> = ({
           // Run peer device check in parallel with fetching new DM ciphertexts.
           const secPromise = needSecCheck
             ? fetchPeerActiveDevices(targetPeerId)
-                .then(async (latestPeer) => {
-                  await evaluateAndRecordPeerTrust(
-                    myUserId,
-                    targetPeerId,
-                    latestPeer.identity_version,
-                    latestPeer.devices
-                  );
-                  peerSecCacheRef.current[secKey] = { at: Date.now() };
-                })
-                .catch(() => {})
+              .then(async (latestPeer) => {
+                await evaluateAndRecordPeerTrust(
+                  myUserId,
+                  targetPeerId,
+                  latestPeer.identity_version,
+                  latestPeer.devices
+                );
+                peerSecCacheRef.current[secKey] = { at: Date.now() };
+              })
+              .catch(() => { })
             : Promise.resolve();
 
           const fetchDmPromise = (async () => {
@@ -1301,35 +1294,72 @@ export const Chat: React.FC<ChatProps> = ({
   }, [
     activeTab,
     isVaultReadyForProfile,
-    e2eeProfile?.user_id,
-    e2eeProfile?.send_read_receipts,
+    myProfileUserId,
+    myProfileSendReceipts,
     localDeviceId,
     selectedPeerId,
     selectedGroupId,
     syncSidebarLists,
   ]);
 
+  // Polling is a safety net. New messages, commits, invitations and receipts arrive instantly over the
+  // live connection, so while it is up we only re-check every 30 s; when it is down (or the server is
+  // full) we poll every 4.5 s as before. A hidden tab does not poll at all and catches up on return.
   useEffect(() => {
     isFirstLoadRef.current = true;
     void loadActiveChannelMessages();
-    const interval = setInterval(() => {
+    let last = Date.now();
+    const tick = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (isE2EERealtimeLive() && Date.now() - last < SAFETY_POLL_MS) return;
+      last = Date.now();
       void loadActiveChannelMessages();
-    }, 4500);
-    return () => clearInterval(interval);
+    };
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      last = Date.now();
+      void loadActiveChannelMessages();
+    };
+    const interval = setInterval(tick, FAST_POLL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [loadActiveChannelMessages]);
 
   useEffect(() => {
     if (!isVaultReadyForProfile) return;
     void syncSidebarLists();
-    const interval = setInterval(() => {
+    let last = Date.now();
+    const tick = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (isE2EERealtimeLive() && Date.now() - last < SAFETY_POLL_MS) return;
+      last = Date.now();
       void syncSidebarLists();
-    }, 4500);
-    return () => clearInterval(interval);
+    };
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      last = Date.now();
+      void syncSidebarLists();
+    };
+    const interval = setInterval(tick, FAST_POLL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [isVaultReadyForProfile, syncSidebarLists]);
 
   useEffect(() => {
     if (!isVaultReadyForProfile) return;
     return subscribeE2EERealtime((evt) => {
+      if (evt.type === 'authenticated') {
+        // (Re)connected: fetch whatever arrived while the live connection was down.
+        void loadActiveChannelMessages();
+        void syncSidebarLists();
+        return;
+      }
       if (
         evt.type === 'dm_ciphertext' ||
         evt.type === 'dm_read_receipt' ||
@@ -1344,9 +1374,9 @@ export const Chat: React.FC<ChatProps> = ({
         evt.type === 'identity_event'
       ) {
         if (evt.type === 'identity_event') forceSecurityRefreshRef.current = true;
-        if (evt.type === 'group_deleted' && (evt as any).group_id && e2eeProfile) {
+        if (evt.type === 'group_deleted' && (evt as any).group_id && myProfileUserId) {
           // The group no longer exists: drop its keys from this device. The list refresh below removes it from view.
-          void clearLocalMlsGroupState(e2eeProfile.user_id, String((evt as any).group_id)).catch(() => { });
+          void clearLocalMlsGroupState(myProfileUserId, String((evt as any).group_id)).catch(() => { });
         }
         if (evt.type === 'group_join_request' && (evt as any).group_id) {
           setJoinRequestAlertGroupId(String((evt as any).group_id));
@@ -1371,7 +1401,7 @@ export const Chat: React.FC<ChatProps> = ({
         window.dispatchEvent(new CustomEvent('zyphra:support-reply', { detail: evt }));
       }
     });
-  }, [isVaultReadyForProfile, loadActiveChannelMessages, syncSidebarLists]);
+  }, [isVaultReadyForProfile, loadActiveChannelMessages, syncSidebarLists, myProfileUserId]);
 
   // ====================================================================================
   // CHAT FEATURES: reactions, edits, delete for everyone, polls, pins, typing, search,
@@ -1898,51 +1928,70 @@ export const Chat: React.FC<ChatProps> = ({
         }
       }
 
-      // 1. Initialize MLS Group at Epoch 0
-      const localInit = await initializeNewMlsGroupLocal(e2eeProfile.user_id, localDeviceId);
-      const created = await createServerMlsGroup({
-        name: newGroupName.trim(),
-        mls_group_id_b64: localInit.mlsGroupIdB64,
-        creator_device_id: localDeviceId,
-        ciphersuite: MLS_CIPHERSUITE_NAME,
-        visibility: newGroupVisibility,
-        min_eth_balance_wei: parseEthStringToWeiString(newGroupMinEth),
-        require_invitation: true,
-        ...(isSuperadmin && newGroupPaid
-          ? { is_paid: true, entry_fee_usd: feeUsd, entry_fee_yearly_usd: Number(newGroupYearlyFeeUsd) || 0 }
-          : {}),
-      });
-      await localInit.finalizeWithServerGroupId(created.group.group_id);
+      // 1. Claim every member's MLS KeyPackages BEFORE anything is created, so the usual failure
+      //    ("member has not opened Messages yet") stops here and leaves no group behind.
+      const claimedAll: Array<{
+        user_id: string;
+        device_id: string;
+        key_package_b64: string;
+      }> = [];
+      if (finalMembers.length > 0) {
+        const cache = claimedKeyPackagesRef.current;
+        // Claim secondary devices for creator if any exist (once per form session)
+        if (!cache[e2eeProfile.user_id]) {
+          try {
+            const myExtraPkgs = await claimPeerMlsKeyPackages(e2eeProfile.user_id);
+            cache[e2eeProfile.user_id] = myExtraPkgs.filter((p) => p.device_id !== localDeviceId);
+          } catch {
+            cache[e2eeProfile.user_id] = []; // no other devices
+          }
+        }
+        claimedAll.push(...cache[e2eeProfile.user_id]);
+        for (const member of finalMembers) {
+          if (!cache[member.user_id]?.length) {
+            const pkgs = await claimPeerMlsKeyPackages(member.user_id);
+            if (pkgs.length === 0) {
+              throw new Error(
+                `${member.username ? `@${member.username}` : 'This member'} cannot be added right now. Ask them to open Messages once, then try again.`
+              );
+            }
+            cache[member.user_id] = pkgs;
+          }
+          claimedAll.push(...cache[member.user_id]);
+        }
+      }
+
+      // 2. Create the group (Epoch 0) — unless a previous attempt already created it.
+      let created: { group: Awaited<ReturnType<typeof createServerMlsGroup>>['group'] };
+      const reuse = halfCreatedGroupRef.current;
+      if (reuse) {
+        created = { group: reuse };
+      } else {
+        const localInit = await initializeNewMlsGroupLocal(e2eeProfile.user_id, localDeviceId);
+        created = await createServerMlsGroup({
+          name: newGroupName.trim(),
+          mls_group_id_b64: localInit.mlsGroupIdB64,
+          creator_device_id: localDeviceId,
+          ciphersuite: MLS_CIPHERSUITE_NAME,
+          visibility: newGroupVisibility,
+          min_eth_balance_wei: parseEthStringToWeiString(newGroupMinEth),
+          require_invitation: true,
+          ...(isSuperadmin && newGroupPaid
+            ? { is_paid: true, entry_fee_usd: feeUsd, entry_fee_yearly_usd: Number(newGroupYearlyFeeUsd) || 0 }
+            : {}),
+        });
+        await localInit.finalizeWithServerGroupId(created.group.group_id);
+        // From here on the group exists: remember it and show it, so a failure below is retried
+        // as "add members" instead of creating a duplicate.
+        halfCreatedGroupRef.current = created.group;
+        const justCreated = created.group;
+        setGroups((prev) => [justCreated, ...prev.filter((g) => g.group_id !== justCreated.group_id)]);
+      }
 
       let activeGroupRecord = created.group;
 
-      // 2. If members were selected, claim their MLS KeyPackages & batch-commit Epoch 1 + Welcomes
-      if (finalMembers.length > 0) {
-        const claimedAll: Array<{
-          user_id: string;
-          device_id: string;
-          key_package_b64: string;
-        }> = [];
-
-        // Claim secondary devices for creator if any exist
-        try {
-          const myExtraPkgs = await claimPeerMlsKeyPackages(e2eeProfile.user_id);
-          const filteredExtra = myExtraPkgs.filter((p) => p.device_id !== localDeviceId);
-          claimedAll.push(...filteredExtra);
-        } catch {
-          // ignore if no other devices
-        }
-
-        for (const member of finalMembers) {
-          const pkgs = await claimPeerMlsKeyPackages(member.user_id);
-          if (pkgs.length === 0) {
-            throw new Error(
-              `${member.username ? `@${member.username}` : 'This member'} cannot be added right now. Ask them to open Messages once, then try again.`
-            );
-          }
-          claimedAll.push(...pkgs);
-        }
-
+      // 3. Commit Epoch 1 with the members + send their Welcomes.
+      if (claimedAll.length > 0) {
         const updatedGrp = await executeMlsCommitWithRetry(
           created.group.group_id,
           () =>
@@ -1958,6 +2007,8 @@ export const Chat: React.FC<ChatProps> = ({
         }
       }
 
+      halfCreatedGroupRef.current = null;
+      claimedKeyPackagesRef.current = {}; // used by the successful commit
       setNewGroupName('');
       setNewGroupPaid(false);
       setNewGroupYearlyFeeUsd('0');
@@ -1973,7 +2024,12 @@ export const Chat: React.FC<ChatProps> = ({
       handleSelectChannelTab('groups');
       await syncSidebarLists();
     } catch (err: any) {
-      setCreateGroupError(friendlyError(err, 'Failed to create encrypted group'));
+      const msg = friendlyError(err, 'Failed to create encrypted group');
+      setCreateGroupError(
+        halfCreatedGroupRef.current
+          ? `The group was created, but adding members failed: ${msg} Press Create again to retry adding them.`
+          : msg
+      );
     } finally {
       setCreatingGroupBusy(false);
     }
@@ -2280,6 +2336,7 @@ export const Chat: React.FC<ChatProps> = ({
             },
             createdAt: Date.now(),
             attachmentIds: allFilesUploaded ? attachmentIds : [],
+            mentionIds,
           },
         };
         // Replace the optimistic bubble with the failed one (which offers Retry).
@@ -2295,6 +2352,8 @@ export const Chat: React.FC<ChatProps> = ({
     if (!failedMsg.failedPayload || sending) return;
     const { channelType, targetId, plainEnvelope, createdAt } = failedMsg.failedPayload;
     const retryAttachmentIds = failedMsg.failedPayload.attachmentIds || [];
+    // Mentions must survive a retry (older failed entries only have them inside the envelope).
+    const retryMentionIds = failedMsg.failedPayload.mentionIds ?? plainEnvelope.mentions ?? [];
     setSending(true);
     try {
       const isFresh = Date.now() - createdAt < 300000; // 5 min freshness
@@ -2341,6 +2400,7 @@ export const Chat: React.FC<ChatProps> = ({
           epoch: mlsEncrypted.epoch,
           mls_ciphertext_b64: mlsEncrypted.mlsCiphertextB64,
           attachment_ids: retryAttachmentIds,
+          mention_user_ids: retryMentionIds,
         });
         await saveVaultDecryptedMessage(e2eeProfile!.user_id, retryMsgId, freshPlain);
       }
@@ -3365,37 +3425,37 @@ export const Chat: React.FC<ChatProps> = ({
                     Boolean(currentPref?.muted) ||
                     Boolean(convState && convState.pins.length > 0) ||
                     Boolean(featureNotice)) && (
-                  <div className="chat-extras-bar">
-                    {(Boolean(convState?.disappearing_ttl) || adminsOnlyHere || Boolean(currentPref?.muted)) && (
-                      <div className="chat-extras-row">
-                        <ChatStatusChips timer={convState?.disappearing_ttl} adminsOnly={adminsOnlyHere} muted={Boolean(currentPref?.muted)} />
-                      </div>
-                    )}
-                    {convState && convState.pins.length > 0 && (
-                      <PinnedBar
-                        pins={convState.pins}
-                        previewFor={(id) => {
-                          const m = displayMessages.find((x) => x.id === id);
-                          if (!m) return null;
-                          if (m.deleted) return 'Deleted message';
-                          return m.poll ? `Poll: ${m.poll.question}` : m.message || 'Message';
-                        }}
-                        onJump={(id) => {
-                          if (!jumpToMessage(id)) setFeatureNotice('That pinned message is not loaded on this device.');
-                        }}
-                        onUnpin={convState.can_manage ? (id) => void togglePin(id, false) : undefined}
-                      />
-                    )}
-                    {featureNotice && (
-                      <div className="chat-extras-row" role="alert">
-                        <span className="chat-chip" style={{ whiteSpace: 'normal' }}>{featureNotice}</span>
-                        <button type="button" className="chat-icon-btn" aria-label="Dismiss" onClick={() => setFeatureNotice(null)}>
-                          <X size={13} />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
+                    <div className="chat-extras-bar">
+                      {(Boolean(convState?.disappearing_ttl) || adminsOnlyHere || Boolean(currentPref?.muted)) && (
+                        <div className="chat-extras-row">
+                          <ChatStatusChips timer={convState?.disappearing_ttl} adminsOnly={adminsOnlyHere} muted={Boolean(currentPref?.muted)} />
+                        </div>
+                      )}
+                      {convState && convState.pins.length > 0 && (
+                        <PinnedBar
+                          pins={convState.pins}
+                          previewFor={(id) => {
+                            const m = displayMessages.find((x) => x.id === id);
+                            if (!m) return null;
+                            if (m.deleted) return 'Deleted message';
+                            return m.poll ? `Poll: ${m.poll.question}` : m.message || 'Message';
+                          }}
+                          onJump={(id) => {
+                            if (!jumpToMessage(id)) setFeatureNotice('That pinned message is not loaded on this device.');
+                          }}
+                          onUnpin={convState.can_manage ? (id) => void togglePin(id, false) : undefined}
+                        />
+                      )}
+                      {featureNotice && (
+                        <div className="chat-extras-row" role="alert">
+                          <span className="chat-chip" style={{ whiteSpace: 'normal' }}>{featureNotice}</span>
+                          <button type="button" className="chat-icon-btn" aria-label="Dismiss" onClick={() => setFeatureNotice(null)}>
+                            <X size={13} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                 {/* Message Stream */}
                 <div className="chat-stream-body" ref={chatBodyRef}>

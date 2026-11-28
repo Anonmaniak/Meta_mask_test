@@ -29,9 +29,15 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 
+def _is_test_env() -> bool:
+    """Same rule as eth_rpc.is_test_environment() (defined here too because this runs before
+    any project module is imported): pytest, unittest, or TESTING=1."""
+    return os.getenv("TESTING") == "1" or "unittest" in sys.modules or "pytest" in sys.modules
+
+
 def _ensure_backend_dependencies() -> None:
     """Checks and automatically installs requirements.txt if any required packages are missing."""
-    if os.getenv("TESTING") == "1" or "unittest" in sys.modules or "pytest" in sys.modules:
+    if _is_test_env():
         return
 
     req_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
@@ -76,7 +82,7 @@ _ensure_backend_dependencies()
 
 try:
     from dotenv import load_dotenv
-    if os.getenv("TESTING") != "1" and "unittest" not in sys.modules and "pytest" not in sys.modules:
+    if not _is_test_env():
         _backend_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
         load_dotenv(_backend_env, override=True)
 except Exception:
@@ -139,7 +145,7 @@ def _keep_alive_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    is_testing = "unittest" in sys.modules or os.getenv("TESTING") == "1"
+    is_testing = _is_test_env()
     # Let sync route handlers (threadpool) hand real-time events to this loop.
     from e2ee_routes import capture_main_loop
     capture_main_loop()
@@ -169,7 +175,7 @@ async def lifespan(app: FastAPI):
             ka_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
             ka_thread.start()
 
-        rpc_status = eth_rpc.get_rpc_health_status()
+        rpc_status = eth_rpc.get_cached_rpc_health_status(block_if_empty=True)  # one probe, seeds the cache
         print(
             f"[OK] Zyphra Chat Platform ready | "
             f"Mainnet RPC={rpc_status['mainnet']['connected']} | "
@@ -416,26 +422,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # HEALTH & PLATFORM METADATA ROUTES
 # =============================================================
 
-_RPC_HEALTH_TTL_SECS = 30.0
-_rpc_health_cache: dict = {"at": 0.0, "value": None}
-_rpc_health_lock = threading.Lock()
-
-
 def _cached_rpc_health() -> dict:
-    """RPC probes make live network calls (1-3 s). Cache them so /api/health stays instant."""
-    now = time.monotonic()
-    cached = _rpc_health_cache["value"]
-    if cached is not None and now - _rpc_health_cache["at"] < _RPC_HEALTH_TTL_SECS:
-        return cached
-    with _rpc_health_lock:
-        now = time.monotonic()
-        cached = _rpc_health_cache["value"]
-        if cached is not None and now - _rpc_health_cache["at"] < _RPC_HEALTH_TTL_SECS:
-            return cached
-        value = eth_rpc.get_rpc_health_status()
-        _rpc_health_cache["value"] = value
-        _rpc_health_cache["at"] = time.monotonic()
-        return value
+    """Last known RPC status, with no RPC call: /api/health is polled by every open tab and the
+    keep-alive pings, so it only reports. Probing happens at startup and on the admin dashboard."""
+    return eth_rpc.peek_rpc_health_status()
 
 
 def _realtime_health() -> dict:

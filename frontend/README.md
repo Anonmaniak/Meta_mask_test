@@ -27,7 +27,9 @@ The top command bar (`Header.tsx`) presents a `[Z] Zyphra` brand monolith (match
 - **`olmService.ts`**: Matrix Foundation `@towns-protocol/vodozemac@0.1.0` WASM wrapper for Olm v2 3DH + Double Ratchet, Ed25519 device bundle signing, OTK replenishment, and 60-digit Safety Numbers.
 - **`mlsGroupService.ts`**: `ts-mls@1.6.4` (`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`) wrapper for signed `KeyPackage`s, `Create` / `Add` / `Remove` / `Update` Commits, `Welcome` onboarding, `PrivateMessage` encryption, and `epochAuthenticator` verification.
 - **`e2eeAttachmentCrypto.ts`**: Per-file ephemeral 256-bit `AES-256-GCM` encryption + constant-time `SHA-256` digest verification before decryption.
-- **`web3.ts`, `e2eeApi.ts`, `platformApi.ts`, `api.ts`, `resilientFetch.ts`**: MetaMask EIP-1193 provider integration, EIP-4361 SIWE authentication, typed REST/WebSocket clients, initial `warmUpBackend()` (`/api/health?deep=1`), and automatic idempotent retry + `onWake` WebSocket reconnection on transient cold-start/network failures.
+- **`deviceProvisioning.ts` & `deviceRevocation.ts`**: Single-flight device registration & KeyPackage upload (`ensureLocalDeviceRegistered`) shared by `App.tsx` and `Chat.tsx`, plus safe vault-wipe gating (`shouldWipeLocalDevice`) that wipes local keys only upon server-confirmed device revocation.
+- **`e2eeRealtime.ts` & `chatEvents.ts`**: Shared `/ws/e2ee` subscriber tracking connection state (`isE2EERealtimeLive()` so `Chat.tsx` uses a `30 s` safety poll when connected and `4.5 s` fallback only when disconnected, skipping hidden tabs) plus encrypted message/event folding and `isSingleEmoji` reaction validation.
+- **`web3.ts`, `e2eeApi.ts`, `platformApi.ts`, `api.ts`, `resilientFetch.ts`**: MetaMask EIP-1193 provider integration, EIP-4361 SIWE authentication, typed REST/WebSocket clients (`ws_closed` disconnect signaling), initial `warmUpBackend()` (`/api/health?deep=1`), visibility-aware health polling, and automatic idempotent retry + `onWake` WebSocket reconnection on transient cold-start/network failures.
 
 ---
 
@@ -54,7 +56,7 @@ npm install
 # Start Vite development server (http://localhost:5173)
 npm run dev
 
-# Run all 48 Node.js cryptographic, vault, MLS, CSP, notification & chat-event unit tests
+# Run all 56 Node.js cryptographic, vault, revocation, MLS, CSP, notification & chat-event unit tests across 14 suites
 npm test
 
 # Run Oxlint static analysis

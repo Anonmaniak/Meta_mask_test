@@ -122,7 +122,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ e2eeProfile, adm
   const [refreshFailing, setRefreshFailing] = useState(false);
   const pollBusyRef = useRef(false);
   const userQueryRef = useRef(userQuery);
-  userQueryRef.current = userQuery;
+  // Keep the poller's view of the search box current without writing a ref during render.
+  useEffect(() => {
+    userQueryRef.current = userQuery;
+  }, [userQuery]);
   const userSearchSeqRef = useRef(0);
 
   const runUserSearch = useCallback(async (q: string) => {

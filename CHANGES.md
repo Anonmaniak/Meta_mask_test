@@ -11,6 +11,28 @@ frontend/src/tests/browserCryptoRunner.ts, frontend/test-crypto.html,
 frontend/tests/chatCrypto.node.test.ts, frontend/tests/chatCryptoMulti.node.test.ts,
 frontend/tests/chatKeyService.node.test.ts, frontend/tests/failedSendHandling.node.test.ts, frontend/src/App.css
 
+## 17. Security audit fixes, on-demand RPC, smart polling & isolation (Nov 2026)
+- **Group policy superadmin check (`backend/platform_routes.py`)**: `update_group_policy_endpoint` now grants superadmin pricing privileges (`is_paid`, `entry_fee_usd`, `entry_fee_yearly_usd`) only when `_resolve_admin_actor` actually verifies `role == "superadmin"` or the caller's session account holds `superadmin`; stale or forged `X-Admin-Token` headers fall back to ordinary session rights instead of escalating privileges.
+- **DM attachment upload & inactive group prefs hardening (`backend/e2ee_routes.py`)**:
+  - `upload_encrypted_attachment` now routes all uploads through `_resolve_upload_attachment_scope` before base64 decoding or quota consumption: refuses muted accounts (`403`), enforces bidirectional `user_blocks` for both `usr_...` and `conv_...` targets, rejects self-targets (`400`) and unknown recipients (`404`), and requires active participation for `conv_...` uploads (`403`).
+  - `set_my_conversation_pref` now requires `e2ee_db.is_active_group_member(group_id, uid)` so members who left, were removed, or declined cannot write group preferences.
+- **Group pricing session resolution (`backend/platform_routes.py`)**: `get_group_pricing_endpoint` now uses `get_optional_session(request, authorization)`, honoring both `HttpOnly` session cookies and case-insensitive `Bearer` headers when computing `has_paid`.
+- **Zero-RPC `/api/health`, cached admin RPC health & on-demand balance checks (`backend/app.py`, `backend/eth_rpc.py`, `backend/platform_db.py`, `backend/e2ee_routes.py`)**:
+  - `/api/health` calls `eth_rpc.peek_rpc_health_status()` and never triggers live Ethereum RPC probes (probing runs at startup via `get_cached_rpc_health_status(block_if_empty=True)` and in `/api/platform/admin/overview` via non-blocking stale-while-revalidate `get_cached_rpc_health_status()`, TTL `30 s`).
+  - `verify_user_meets_group_policy(..., refresh_balance=True)` triggers `refresh_verified_balance_if_stale` (cooldown `60 s`, staleness `BALANCE_REFRESH_SECS=600`) only when a stored balance fails a group's minimum-ETH requirement on join/discovery, never on group message sends (`refresh_balance=False`) or at login. Unmined contract-creation txs (`to=None`) now fail verification immediately.
+  - Added unified `is_test_environment()` / `_is_test_env()` detection across `app.py` and `eth_rpc.py` covering `TESTING=1`, `pytest`, and `unittest`.
+- **Atomic pins, DB indexes & connection-identity schema guards (`backend/chat_features_db.py`, `backend/e2ee_db.py`, `backend/support_db.py`)**:
+  - `set_pin` now runs inside `_in_transaction(..., lock_key="pins:" + scope_key)` (PostgreSQL `pg_advisory_xact_lock` / SQLite `RLock`) with strictly monotonic `pinned_at` (`+1 µs` on fast-clock ties) so concurrent pins never exceed `PIN_LIMIT` (`3`) or evict the wrong message.
+  - `chat_features_db._ready_for` and `support_db._sqlite_schema_ready_for` compare DB connection/pool objects via `is` instead of `id()` ints or booleans.
+  - Added `idx_dm_sender_seq` and `idx_dm_recipient_seq` indexes on `chat_dm_messages`.
+- **Consistent single-emoji reaction validator (`backend/chat_features_db.py`, `frontend/src/services/chatEvents.ts`)**: Added `is_single_emoji` / `isSingleEmoji` accepting keycaps (`1️⃣`, `#️⃣`, `*️⃣`), flags, skin tones, variation selectors, and ZWJ sequences (up to 16 code points) while rejecting plain ASCII and non-emoji text in any script.
+- **Single-flight E2EE provisioning, confirmed-only vault wipe & smart polling (`frontend/src/services/deviceProvisioning.ts`, `frontend/src/services/deviceRevocation.ts`, `frontend/src/services/e2eeRealtime.ts`, `frontend/src/services/e2eeApi.ts`, `frontend/src/App.tsx`, `frontend/src/components/Chat.tsx`, `frontend/src/components/AdminDashboard.tsx`, `frontend/src/components/E2EESecurityModals.tsx`)**:
+  - Added `ensureLocalDeviceRegistered` so `App.tsx` and `Chat.tsx` share one in-flight device/KeyPackage registration per user.
+  - Added `shouldWipeLocalDevice` so `wipeUserDeviceVault` runs only when the server explicitly confirms revocation of the local device (never on `Account suspended`, `muted`, or permission `403`s).
+  - Tracked `/ws/e2ee` live state via `isE2EERealtimeLive()` (`authenticated` / `ws_closed` events); `Chat.tsx` now polls every `30 s` while connected, falls back to `4.5 s` only when disconnected, pauses polling in hidden tabs, and syncs on reconnect/tab return. `App.tsx` also skips hidden-tab `/api/health` polls.
+  - `handleCreateMlsGroup` claims peer KeyPackages up front and caches them (`claimedKeyPackagesRef`) alongside `halfCreatedGroupRef` across retries; `handleRetryFailedMessage` preserves `mentionIds`; `AccountDevicesVaultModal` checks `w.status === 'active'`; `AdminDashboard.tsx` moves `userQueryRef` update into `useEffect`.
+- **Tests**: Added `backend/test_audit_fixes_round2.py` (21), `backend/test_rpc_on_demand.py` (6), `backend/test_user_isolation.py` (5), and `frontend/tests/auditFixes.node.test.ts` (8). Verified: **267 passed** backend tests, **56 passed** frontend Node tests across 14 suites, `oxlint` `0` errors (`28` warnings), and `tsc -b` `0` errors.
+
 ## 0000000. UI polish, instant isolated chat switching & branding (NEW)
 - **Instant, strictly isolated chat switching (`Chat.tsx`, `PlatformViews.tsx`)**:
   - Clicking a **Private chat** in the sidebar now selects the peer immediately without blocking on a network lookup, and refreshes device details in the background only when missing or stale.
@@ -273,27 +295,7 @@ Tests: backend 178 passed (7 new in `test_admin_stats_and_sessions.py`: session 
 - **Real-time WebSocket sync**: When an administrator saves platform settings in `/Admin456`, `backend/platform_routes.py` broadcasts `{"type": "public_policy_updated", "policy": ...}` over `/ws/public-chat`.
 - Connected clients in `PlatformViews.tsx` listen for `public_policy_updated` and update their local `policy` state immediately, so any change made in Admin456 automatically updates the retention notice on all active members' screens without needing a page refresh.
 
-## 16. Hide attachment (paperclip) icon across all 3 chat types (`ChatComposer.tsx`, `PlatformViews.tsx`, `Chat.tsx`)
-- **Disabled file attachments in all chats**: Hid the `<Paperclip />` button across all three chat interfaces:
-  1. **Members' Room / Open Chat** (`PlatformViews.tsx`)
-  2. **1-to-1 Private Chats** (`Chat.tsx`)
-  3. **Group Chats** (`Chat.tsx`)
-- Set `canAttach = false` as default in `ChatComposer.tsx` and explicitly passed `canAttach={false}` in all three parent callers.
-- When `canAttach` is `false`, the paperclip button is hidden, the hidden `<input type="file">` is omitted, file drag-and-drop is disabled, and clipboard paste file handling is prevented, keeping the composer focused solely on text, emoji, and replies.
-
-## 14. Admin456 Platform Settings UI redesign (`AdminDashboard.tsx`, `index.css`)
-- **Organized 3-card layout**: Replaced the cluttered horizontal row layout with three structured, clean visual cards:
-  1. **Usernames & Identity**: 2-column grid covering *Hours between username changes* (`username_cooldown_hours`) and *Days an old username stays reserved* (`username_quarantine_days`).
-  2. **Members' Room**: 3-column grid covering *Longest message (characters)* (`public_chat_max_message_chars`), *Minutes a message can be edited* (`public_chat_edit_window_minutes`), and *Keep messages for (days)* (`public_chat_retention_days`).
-  3. **Membership, Pricing & Payments**: Dedicated panel card covering *Payment network* segmented pill (Ethereum Mainnet vs Sepolia Testnet), *Payment wallet (treasury address)* (`authorized_payment_destination`), *Monthly price (USD $)* (`platform_entry_fee_usd`), *Yearly price (USD $)* (`platform_yearly_fee_usd`), *ETH price source* (`use_live_eth_price`), and *Backup price of 1 ETH (USD)* (`eth_usd_price`).
-- **Standardized styles**: Added `.admin-settings-card`, `.admin-settings-grid-2`, `.admin-settings-grid-3`, `.admin-settings-label`, `.admin-settings-input`, `.admin-settings-select`, and `.admin-settings-hint`. Replaced jagged `alignItems: 'end'` with uniform `align-items: start`, fixed control heights at 42px, and added clear explanatory helper text below each input.
-
-## 15. Members' room retention display & real-time sync (`platform_routes.py`, `PlatformViews.tsx`, `platformApi.ts`)
-- **Retention display in Members' room**: Added `retention_days` to `_public_chat_policy_dict` on the backend (`backend/platform_routes.py`) and typed in `PublicChatFeedResponse['policy']` (`frontend/src/services/platformApi.ts`). The room banner in `PlatformViews.tsx` now dynamically displays `"Messages kept for {policy.retention_days} days"` on the right-hand side of the warning notice.
-- **Real-time WebSocket sync**: When an administrator saves platform settings in `/Admin456`, `backend/platform_routes.py` broadcasts `{"type": "public_policy_updated", "policy": ...}` over `/ws/public-chat`.
-- Connected clients in `PlatformViews.tsx` listen for `public_policy_updated` and update their local `policy` state immediately, so any change made in Admin456 automatically updates the retention notice on all active members' screens without needing a page refresh.
-
-## 16. Hide attachment (paperclip) icon across all 3 chat types (`ChatComposer.tsx`, `PlatformViews.tsx`, `Chat.tsx`)
+## 16. Hide attachment (paperclip) icon across all 3 chat interfaces (`ChatComposer.tsx`, `PlatformViews.tsx`, `Chat.tsx`)
 - **Disabled file attachments in all chats**: Hid the `<Paperclip />` button across all three chat interfaces:
   1. **Members' Room / Open Chat** (`PlatformViews.tsx`)
   2. **1-to-1 Private Chats** (`Chat.tsx`)

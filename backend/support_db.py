@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS support_messages (
 CREATE INDEX IF NOT EXISTS idx_support_messages_thread ON support_messages(thread_id, created_at);
 """
 
-_sqlite_schema_ready = False
+# The SQLite connection the tables were created on (same pattern as read_markers_db): a plain
+# True/False would skip creating them on a replaced connection and every support call would fail.
+_sqlite_schema_ready_for: object = None
 
 
 def _now() -> str:
@@ -54,19 +56,22 @@ def _is_pg() -> bool:
 
 def _ensure_schema() -> None:
     """PostgreSQL gets its tables from migration 008; SQLite is created here on first use."""
-    global _sqlite_schema_ready
+    global _sqlite_schema_ready_for
     platform_db.ensure_platform_tables()
-    if _is_pg() or _sqlite_schema_ready:
+    if _is_pg():
+        return
+    conn = chat_db._sqlite_conn
+    if conn is not None and _sqlite_schema_ready_for is conn:
         return
     with chat_db._sqlite_lock:
         chat_db._sqlite_conn.executescript(SQLITE_SCHEMA)
         chat_db._sqlite_conn.commit()
-    _sqlite_schema_ready = True
+    _sqlite_schema_ready_for = chat_db._sqlite_conn
 
 
 def reset_for_tests() -> None:
-    global _sqlite_schema_ready
-    _sqlite_schema_ready = False
+    global _sqlite_schema_ready_for
+    _sqlite_schema_ready_for = None
 
 
 def _run(statements: List[Tuple[str, tuple]], fetch: Optional[str] = None) -> Any:

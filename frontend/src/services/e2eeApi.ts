@@ -923,6 +923,7 @@ export function connectE2EEWebSocket(onEvent: (evt: Record<string, any>) => void
       };
       ws.onclose = (ev) => {
         if (pingInterval) clearInterval(pingInterval);
+        onEvent({ type: 'ws_closed', code: ev.code }); // lets the chat fall back to fast polling
         if (ev.code === 4503) scheduleReconnect(serverFullDelayMs());
         else if (ev.code !== 4401) scheduleReconnect();
       };

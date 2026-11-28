@@ -4142,7 +4142,66 @@ def upsert_group_access_policy(
     return get_group_access_policy(group_id)
 
 
-def verify_user_meets_group_policy(group_id: str, candidate_user_id: str) -> Tuple[bool, str]:
+# On-demand balance refresh for groups with a minimum ETH balance. The RPC is asked only when a
+# member actually fails that rule, and at most once per BALANCE_REFRESH_SECS per member (failed
+# attempts are throttled too), so sending messages never turns into an RPC call per message.
+BALANCE_REFRESH_SECS = int(os.getenv("BALANCE_REFRESH_SECS", "600"))
+_balance_attempts: Dict[str, float] = {}
+_balance_attempts_lock = threading.Lock()
+
+
+def refresh_verified_balance_if_stale(user_id: str) -> bool:
+    """Re-reads the member's primary-wallet balance from the RPC if the saved one is older than
+    BALANCE_REFRESH_SECS. Returns True when a fresh balance was saved. Never raises."""
+    import time as _time
+
+    now = _time.monotonic()
+    with _balance_attempts_lock:
+        if now - _balance_attempts.get(user_id, -1e9) < 60:
+            return False  # tried within the last minute (success or failure)
+        _balance_attempts[user_id] = now
+    try:
+        ext = get_extended_user_fields(user_id) or {}
+        last = ext.get("last_balance_verified_at")
+        if last:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(last).replace("Z", "+00:00"))).total_seconds()
+                if age < BALANCE_REFRESH_SECS:
+                    return False
+            except ValueError:
+                pass
+        user = e2ee_db.get_user_by_id(user_id) or {}
+        wallet = user.get("primary_wallet")
+        if not wallet:
+            return False
+        import eth_rpc  # local import: only needed on this rare path
+
+        chain_id = int(get_platform_settings().get("default_balance_chain_id") or 11155111)
+        res = eth_rpc.verify_onchain_eth_balance(wallet, chain_id=chain_id)
+        record_verified_balance_snapshot(
+            user_id=user_id,
+            wallet_address=res["wallet_address"],
+            chain_id=res["chain_id"],
+            balance_wei_int=res["balance_wei_int"],
+            block_number=res["block_number"],
+            rpc_source=res["rpc_source"],
+        )
+        return True
+    except Exception:
+        logger.warning("on-demand balance refresh failed for %s", user_id, exc_info=True)
+        return False
+
+
+def _min_balance_message(req_bal: int, user_bal: int) -> str:
+    return (
+        f"This group requires a wallet balance of at least {Web3.from_wei(req_bal, 'ether')} ETH "
+        f"(your verified balance: {Web3.from_wei(user_bal, 'ether')} ETH). Top up, then try again."
+    )
+
+
+def verify_user_meets_group_policy(
+    group_id: str, candidate_user_id: str, refresh_balance: bool = True
+) -> Tuple[bool, str]:
     """
     Server-side group access policy gate enforcing:
     1. Active non-suspended account
@@ -4161,6 +4220,11 @@ def verify_user_meets_group_policy(group_id: str, candidate_user_id: str) -> Tup
     user_bal = int(ext.get("qualifying_balance_wei") or "0")
 
     balance_ok = user_bal >= req_bal
+    if not balance_ok and refresh_balance and refresh_verified_balance_if_stale(candidate_user_id):
+        # The saved balance was old: one fresh on-chain read, then decide on the real number.
+        ext = get_extended_user_fields(candidate_user_id) or ext
+        user_bal = int(ext.get("qualifying_balance_wei") or "0")
+        balance_ok = user_bal >= req_bal
     # Paid group: joining AND staying require an active subscription (monthly or yearly).
     paid_ok = (not pol.get("is_paid")) or has_user_paid_group_entry(candidate_user_id, group_id)
     if balance_ok and paid_ok:
@@ -4174,7 +4238,7 @@ def verify_user_meets_group_policy(group_id: str, candidate_user_id: str) -> Tup
     if not balance_ok:
         return (
             False,
-            f"Requires verified ETH balance >= {req_bal} Wei (verify your wallet balance in Settings)",
+            _min_balance_message(req_bal, user_bal),
         )
     gp = get_group_pricing(group_id)
     return False, (
@@ -4262,7 +4326,7 @@ def list_discoverable_groups(viewer_user_id: Optional[str] = None) -> List[Dict[
             elif user_bal < req_bal:
                 eligible, reason = (
                     False,
-                    f"Requires verified ETH balance >= {req_bal} Wei (verify your wallet balance in Settings)",
+                    _min_balance_message(req_bal, user_bal),
                 )
             elif is_paid and not has_paid:
                 gp = get_group_pricing(gid)

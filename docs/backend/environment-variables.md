@@ -27,6 +27,7 @@ This document details all environment variables used by the **Zyphra.in** Chat P
 | `DB_POOL_VALIDATE_AFTER_SECS` | Optional | `5` | Idle duration (seconds) after which a pooled PostgreSQL connection is validated with `SELECT 1`. |
 | `DB_CONNECT_RETRIES` | Optional | `3` | Retry attempts when establishing initial Neon PostgreSQL connections. |
 | `AUTH_CACHE_TTL_SEC` | Optional | `30` | In-memory TTL (seconds) for session/user/settings lookups (`0` disables; invalidated immediately on writes). |
+| `BALANCE_REFRESH_SECS` | Optional | `600` | Age threshold (seconds) before a failed minimum-ETH group policy check triggers an on-demand RPC balance refresh (`60 s` per-user cooldown; never runs at login or per message send). |
 | `RENDER_EXTERNAL_URL` | Optional | `""` | Base URL for periodic self `/api/health` keep-alive pings on Render. |
 | `CHAT_KEY_CHALLENGE_TTL_SECONDS` | Optional | `300` | Challenge expiration window (seconds) for legacy public-room key challenges. |
 | `ADMIN_WALLET_ADDRESSES` | Optional | `""` | Comma-separated `0x...` wallet addresses automatically granted `superadmin` RBAC on SIWE login. |

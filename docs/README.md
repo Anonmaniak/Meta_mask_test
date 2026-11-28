@@ -9,7 +9,7 @@ Welcome to the system documentation for **Zyphra.in** — an **Ethereum Wallet-L
 | Section | Document | Description |
 | :--- | :--- | :--- |
 | **Security & Crypto** | [High-Security E2EE Architecture](e2ee-security-architecture.md) | Threat model, Olm v2 & RFC 9420 MLS protocol specifications, key lifecycle, vault storage, and limitations |
-| **System Overview** | [System Architecture](system-architecture.md) | Component topology, permanent `user_id` & wallet rotation flow, live ETH/USD oracle, support threads, and schema overview (`001`–`008`) |
+| **System Overview** | [System Architecture](system-architecture.md) | Component topology, permanent `user_id` & wallet rotation flow, live ETH/USD oracle, support threads, and schema overview (`001`–`015`) |
 | **System Overview** | [System & User Workflows](workflows.md) | Step-by-step sequence diagrams for Welcome Gate/SIWE login, wallet migration, on-chain payments, Talk to Admin support, Open Chat, Olm DMs & MLS Groups |
 | **System Overview** | [Platform Feature Catalog](features.md) | Complete feature breakdown across Welcome Gate/Splash, `Chats`, `/payments`, `/support` ("Talk to Admin"), `/settings`, `Profile`, and `/Admin456` RBAC console |
 | **Backend System** | [Backend Architecture](backend/architecture.md) | FastAPI + WebSocket architecture, Neon PostgreSQL pool resilience, live ETH/USD oracle, `support_db`, Ethereum RPC verifier, `/Admin456` login guard, and migration runner |

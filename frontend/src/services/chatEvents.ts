@@ -102,12 +102,61 @@ export function cleanPoll(raw: unknown): PollDefinition | undefined {
   return { question, options, multi: p.multi === true };
 }
 
-/** Reaction text from someone else's encrypted event: a short emoji, never letters or markup. */
+// One emoji = one "unit" (pictograph + optional variation selector / skin tone / tag sequence,
+// a keycap like 1️⃣, or a two-letter regional-indicator flag); units joined by ZWJ still count as
+// one emoji. Mirrors backend chat_features_db.is_single_emoji so both sides accept the same set.
+const PICTO_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00a9, 0x00a9], [0x00ae, 0x00ae], [0x203c, 0x203c], [0x2049, 0x2049], [0x2122, 0x2122],
+  [0x2139, 0x2139], [0x2194, 0x2199], [0x21a9, 0x21aa], [0x231a, 0x231b], [0x2328, 0x2328],
+  [0x23cf, 0x23cf], [0x23e9, 0x23f3], [0x23f8, 0x23fa], [0x24c2, 0x24c2], [0x25aa, 0x25ab],
+  [0x25b6, 0x25b6], [0x25c0, 0x25c0], [0x25fb, 0x25fe], [0x2600, 0x27bf], [0x2934, 0x2935],
+  [0x2b05, 0x2b07], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55], [0x3030, 0x3030],
+  [0x303d, 0x303d], [0x3297, 0x3297], [0x3299, 0x3299], [0x1f000, 0x1f1e5], [0x1f200, 0x1f3fa],
+  [0x1f400, 0x1faff], [0x1fc00, 0x1fffd],
+];
+const KEYCAP_BASES = new Set('0123456789#*'.split('').map((c) => c.codePointAt(0) as number));
+const MAX_EMOJI_CODEPOINTS = 16;
+const isPicto = (cp: number) => PICTO_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+const isRegional = (cp: number) => cp >= 0x1f1e6 && cp <= 0x1f1ff;
+const isSkin = (cp: number) => cp >= 0x1f3fb && cp <= 0x1f3ff;
+const isTag = (cp: number) => cp >= 0xe0020 && cp <= 0xe007e;
+
+export function isSingleEmoji(text: string): boolean {
+  const cps = Array.from(text, (c) => c.codePointAt(0) as number);
+  const n = cps.length;
+  if (!n || n > MAX_EMOJI_CODEPOINTS) return false;
+  const unit = (i: number): number => {
+    const cp = cps[i];
+    if (KEYCAP_BASES.has(cp)) {
+      let j = i + 1;
+      if (j < n && cps[j] === 0xfe0f) j++;
+      return j < n && cps[j] === 0x20e3 ? j + 1 : -1;
+    }
+    if (isRegional(cp)) return i + 1 < n && isRegional(cps[i + 1]) ? i + 2 : -1;
+    if (!isPicto(cp)) return -1;
+    let j = i + 1;
+    if (j < n && (cps[j] === 0xfe0e || cps[j] === 0xfe0f)) j++;
+    if (j < n && isSkin(cps[j])) j++;
+    if (j < n && isTag(cps[j])) {
+      while (j < n && isTag(cps[j])) j++;
+      if (j >= n || cps[j] !== 0xe007f) return -1;
+      j++;
+    }
+    return j;
+  };
+  let i = unit(0);
+  while (i > 0 && i < n) {
+    if (cps[i] !== 0x200d || i + 1 >= n) return false;
+    i = unit(i + 1);
+  }
+  return i === n;
+}
+
+/** Reaction text from someone else's encrypted event: exactly one emoji, never letters or markup. */
 export function cleanEmoji(raw: unknown): string {
   if (typeof raw !== 'string') return '';
   const e = raw.trim();
-  if (!e || e.length > 16 || /[\x00-\x7f]/.test(e)) return '';
-  return e;
+  return isSingleEmoji(e) ? e : '';
 }
 
 /**

@@ -86,7 +86,7 @@
 
 ## 8. Encrypted File Attachments & Non-Extractable Device Vault
 - **Encrypted Attachments**: Client-side `AES-256-GCM` per-file encryption + `SHA-256` ciphertext integrity verification (`e2eeAttachmentCrypto.ts`) with a 14 MB payload ceiling; decryption keys travel exclusively inside Olm/MLS ciphertexts. In the current interface, the paperclip attachment icon has been hidden across all three chat interfaces (Members' Room, 1-to-1 DMs, and Groups) via `canAttach = false` in `ChatComposer.tsx` to streamline the UI.
-- **Hardened Local Key Storage**: Non-extractable WebCrypto `AES-256-GCM` master key in IndexedDB (`e2eeVault.ts`) protecting pickled keys, sessions, and cached envelopes at rest. Inflight mutex serialization prevents master key initialization races across tabs.
+- **Hardened Local Key Storage**: Non-extractable WebCrypto `AES-256-GCM` master key in IndexedDB (`e2eeVault.ts`) protecting pickled keys, sessions, and cached envelopes at rest. `deviceProvisioning.ts` deduplicates concurrent registration across `App.tsx` and `Chat.tsx` (`ensureLocalDeviceRegistered`), and `deviceRevocation.ts` ensures vault wipes happen only upon confirmed device revocation (preserving keys and message history on suspension or permission `403`s). Inflight mutex serialization prevents master key initialization races across tabs.
 - **Complete Vault Cleanup**: Vault wipe purges decrypted message caches, trust records, and device bundles without leaving orphaned records.
 
 ## 9. RBAC Administrative Console & Audit Logging
@@ -108,8 +108,8 @@
 - **Cold-Start & Stale-Connection Recovery (`resilientFetch.ts`)**: Safe `GET`/`HEAD`/`OPTIONS` requests automatically retry transient `500`/`502`/`503`/`504` and network errors with jittered exponential backoff (`onWake` reconnects WebSockets on online/tab focus), while non-idempotent writes (`POST`/`PUT`/`PATCH`/`DELETE`) are never auto-retried to prevent duplicate sends.
 
 ## 11. Chat features (Nov 2026)
-- **Reactions, edit (15 min), delete for everyone (48 h; group admins any time)** in private chats, groups and the Members' room. In encrypted chats reactions and edits are encrypted events applied on each device.
+- **Reactions, edit (15 min), delete for everyone (48 h; group admins any time)** in private chats, groups and the Members' room. In encrypted chats reactions and edits are encrypted events applied on each device; `is_single_emoji` (backend) and `isSingleEmoji` (`chatEvents.ts`) validate single-emoji reactions including keycaps (`1️⃣`, `#️⃣`, `*️⃣`), flags, skin tones, and ZWJ sequences while rejecting non-emoji text. Failed group sends preserve `@mentions` on retry, and initial group creation caches claimed KeyPackages (`halfCreatedGroupRef` + `claimedKeyPackagesRef`) across retries.
 - **Typing indicator**, respecting "show my online status". **@mentions** with suggestions and a "mentioned you" notice.
-- **Polls** in groups (encrypted votes), **pinned messages** (up to 3), **search in a chat** (on the device), **mute / archive**, **disappearing messages** (24 h / 7 days / 90 days), **announcement groups** (only admins post).
+- **Polls** in groups (encrypted votes), **pinned messages** (up to 3, serialized per scope with monotonic timestamps), **search in a chat** (on the device), **mute / archive** (active group members only), **disappearing messages** (24 h / 7 days / 90 days), **announcement groups** (only admins post).
 - **Renewal reminders** (banner + bell at 7 days, 1 day and on expiry) and an **admin banner for everyone**.
 - **Invite links were removed**: a group admin adds people and they Accept or Reject; public groups take join requests.

@@ -64,7 +64,10 @@ _SCHEMA = [
     )""",
 ]
 
-_ready_for: Optional[int] = None  # id() of the connection/pool the tables were made on
+# The connection/pool object the tables were created on. We keep a real reference and compare with
+# `is`: an id() integer can be reused by a new object once the old one is garbage collected, which
+# would make us skip creating the tables on a brand-new database.
+_ready_for: Any = None
 
 
 def _now() -> datetime:
@@ -83,8 +86,8 @@ def _ensure_schema() -> None:
     """Creates the tables once per database connection (tests swap the SQLite database per class)."""
     global _ready_for
     e2ee_db._ready()
-    target = id(chat_db._pg_pool) if _is_pg() else id(chat_db._sqlite_conn)
-    if _ready_for == target:
+    target = chat_db._pg_pool if _is_pg() else chat_db._sqlite_conn
+    if target is not None and _ready_for is target:
         return
     if _is_pg():
         conn = chat_db._pg_pool.getconn()
@@ -137,6 +140,45 @@ def _run(sql: str, params: tuple = (), fetch: Optional[str] = None) -> Tuple[Any
             raise
 
 
+def _in_transaction(work, lock_key: Optional[str] = None):
+    """Runs `work(execute)` as ONE transaction. `execute(sql, params, fetch)` behaves like `_run`
+    but on the same connection. With `lock_key`, concurrent transactions for that key are
+    serialized (Postgres advisory lock across processes; the SQLite connection lock in-process)."""
+    _ensure_schema()
+    if _is_pg():
+        conn = chat_db._pg_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                if lock_key:
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,))
+
+                def execute(sql: str, params: tuple = (), fetch: Optional[str] = None):
+                    cur.execute(sql.format(p="%s"), params)
+                    return cur.fetchall() if fetch == "all" else (cur.fetchone() if fetch == "one" else None)
+
+                result = work(execute)
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            chat_db._pg_pool.putconn(conn)
+    with chat_db._sqlite_lock:  # RLock: held for the whole read-modify-write
+        cur = chat_db._sqlite_conn.cursor()
+        try:
+            def execute(sql: str, params: tuple = (), fetch: Optional[str] = None):
+                cur.execute(sql.format(p="?"), params)
+                return cur.fetchall() if fetch == "all" else (cur.fetchone() if fetch == "one" else None)
+
+            result = work(execute)
+            chat_db._sqlite_conn.commit()
+            return result
+        except Exception:
+            chat_db._sqlite_conn.rollback()
+            raise
+
+
 def _as_dt(val: Any) -> Optional[datetime]:
     return e2ee_db._as_dt(val)
 
@@ -158,35 +200,52 @@ def is_valid_pref_key(key: str) -> bool:
 
 
 # ----------------------------------------------------------------------------- pins
-def list_pins(scope_key: str) -> List[Dict[str, Any]]:
-    rows, _ = _run(
-        "SELECT message_id, pinned_by, pinned_at FROM chat_message_pins WHERE scope_key = {p}",
-        (scope_key,),
-        fetch="all",
-    )
-    pins = [{"message_id": r[0], "pinned_by": r[1], "pinned_at": _iso(_as_dt(r[2]))} for r in rows]
+def _pins_from_rows(rows) -> List[Dict[str, Any]]:
+    pins = [{"message_id": r[0], "pinned_by": r[1], "pinned_at": _iso(_as_dt(r[2]))} for r in rows or []]
     pins.sort(key=lambda x: x["pinned_at"] or "", reverse=True)  # newest first
     return pins
 
 
+_LIST_PINS_SQL = "SELECT message_id, pinned_by, pinned_at FROM chat_message_pins WHERE scope_key = {p}"
+
+
+def list_pins(scope_key: str) -> List[Dict[str, Any]]:
+    rows, _ = _run(_LIST_PINS_SQL, (scope_key,), fetch="all")
+    return _pins_from_rows(rows)
+
+
 def set_pin(scope_key: str, message_id: str, user_id: str, pinned: bool) -> Dict[str, Any]:
-    """Pins or unpins a message. Pinning a 4th replaces the oldest pin (returned as `replaced`)."""
-    replaced = None
-    if not pinned:
-        _run("DELETE FROM chat_message_pins WHERE scope_key = {p} AND message_id = {p}", (scope_key, message_id))
-        return {"pins": list_pins(scope_key), "replaced": None}
-    current = list_pins(scope_key)
-    if any(p["message_id"] == message_id for p in current):
-        return {"pins": current, "replaced": None}
-    if len(current) >= PIN_LIMIT:
-        oldest = current[-1]["message_id"]
-        _run("DELETE FROM chat_message_pins WHERE scope_key = {p} AND message_id = {p}", (scope_key, oldest))
-        replaced = oldest
-    _run(
-        "INSERT INTO chat_message_pins (scope_key, message_id, pinned_by, pinned_at) VALUES ({p}, {p}, {p}, {p})",
-        (scope_key, message_id, user_id, _now().isoformat()),
-    )
-    return {"pins": list_pins(scope_key), "replaced": replaced}
+    """Pins or unpins a message. Pinning a 4th replaces the oldest pin (returned as `replaced`).
+
+    The read (current pins), the eviction and the insert happen in one transaction that is
+    serialized per chat, so two people pinning at the same moment can never exceed PIN_LIMIT."""
+
+    def work(execute):
+        replaced = None
+        if not pinned:
+            execute("DELETE FROM chat_message_pins WHERE scope_key = {p} AND message_id = {p}", (scope_key, message_id))
+            return {"pins": _pins_from_rows(execute(_LIST_PINS_SQL, (scope_key,), "all")), "replaced": None}
+        current = _pins_from_rows(execute(_LIST_PINS_SQL, (scope_key,), "all"))
+        if any(p["message_id"] == message_id for p in current):
+            return {"pins": current, "replaced": None}
+        # Evict as many of the oldest as needed (normally one) to make room for the new pin.
+        while len(current) >= PIN_LIMIT:
+            oldest = current.pop()["message_id"]
+            execute("DELETE FROM chat_message_pins WHERE scope_key = {p} AND message_id = {p}", (scope_key, oldest))
+            replaced = replaced or oldest
+        # Strictly newer than every remaining pin: on fast clocks (Windows ~1 ms) two pins can get the
+        # same timestamp, and then "oldest" would be ambiguous and the wrong pin could be evicted.
+        pinned_at = _now()
+        newest = _as_dt(current[0]["pinned_at"]) if current else None
+        if newest is not None and pinned_at <= newest:
+            pinned_at = newest + timedelta(microseconds=1)
+        execute(
+            "INSERT INTO chat_message_pins (scope_key, message_id, pinned_by, pinned_at) VALUES ({p}, {p}, {p}, {p})",
+            (scope_key, message_id, user_id, pinned_at.isoformat()),
+        )
+        return {"pins": _pins_from_rows(execute(_LIST_PINS_SQL, (scope_key,), "all")), "replaced": replaced}
+
+    return _in_transaction(work, lock_key="pins:" + scope_key)
 
 
 def unpin_everywhere(message_id: str) -> None:
@@ -313,13 +372,85 @@ def is_muted(user_id: str, scope_key: str) -> bool:
 
 
 # ----------------------------------------------------------------------------- Members' room reactions
-_ASCII_RE = re.compile(r"[\x00-\x7f]")
+# One emoji = one "unit": a pictograph (optionally with variation selector, skin tone, tag
+# sequence), a keycap (0-9 # * + optional FE0F + U+20E3), or a flag (two regional indicators);
+# several units joined by ZWJ (U+200D) still count as one emoji (families, professions...).
+_PICTO_RANGES = (
+    (0x00A9, 0x00A9), (0x00AE, 0x00AE), (0x203C, 0x203C), (0x2049, 0x2049), (0x2122, 0x2122),
+    (0x2139, 0x2139), (0x2194, 0x2199), (0x21A9, 0x21AA), (0x231A, 0x231B), (0x2328, 0x2328),
+    (0x23CF, 0x23CF), (0x23E9, 0x23F3), (0x23F8, 0x23FA), (0x24C2, 0x24C2), (0x25AA, 0x25AB),
+    (0x25B6, 0x25B6), (0x25C0, 0x25C0), (0x25FB, 0x25FE), (0x2600, 0x27BF), (0x2934, 0x2935),
+    (0x2B05, 0x2B07), (0x2B1B, 0x2B1C), (0x2B50, 0x2B50), (0x2B55, 0x2B55), (0x3030, 0x3030),
+    (0x303D, 0x303D), (0x3297, 0x3297), (0x3299, 0x3299), (0x1F000, 0x1F1E5), (0x1F200, 0x1F3FA),
+    (0x1F400, 0x1FAFF), (0x1FC00, 0x1FFFD),
+)
+_KEYCAP_BASES = set("0123456789#*")
+_VS = (0xFE0E, 0xFE0F)
+_ZWJ = 0x200D
+_KEYCAP = 0x20E3
+MAX_EMOJI_CODEPOINTS = 16
+
+
+def _is_picto(cp: int) -> bool:
+    return any(lo <= cp <= hi for lo, hi in _PICTO_RANGES)
+
+
+def _is_regional(cp: int) -> bool:
+    return 0x1F1E6 <= cp <= 0x1F1FF
+
+
+def _is_skin(cp: int) -> bool:
+    return 0x1F3FB <= cp <= 0x1F3FF
+
+
+def _is_tag(cp: int) -> bool:
+    return 0xE0020 <= cp <= 0xE007E
+
+
+def is_single_emoji(text: str) -> bool:
+    cps = [ord(c) for c in text]
+    if not cps or len(cps) > MAX_EMOJI_CODEPOINTS:
+        return False
+    i, n = 0, len(cps)
+
+    def unit(i: int) -> int:
+        """Parses one emoji unit starting at i; returns the index after it, or -1."""
+        cp = cps[i]
+        if chr(cp) in _KEYCAP_BASES:
+            j = i + 1
+            if j < n and cps[j] == 0xFE0F:
+                j += 1
+            return j + 1 if j < n and cps[j] == _KEYCAP else -1
+        if _is_regional(cp):
+            return i + 2 if i + 1 < n and _is_regional(cps[i + 1]) else -1
+        if not _is_picto(cp):
+            return -1
+        j = i + 1
+        if j < n and cps[j] in _VS:
+            j += 1
+        if j < n and _is_skin(cps[j]):
+            j += 1
+        if j < n and _is_tag(cps[j]):  # subdivision flags, e.g. England
+            while j < n and _is_tag(cps[j]):
+                j += 1
+            if j >= n or cps[j] != 0xE007F:
+                return -1
+            j += 1
+        return j
+
+    i = unit(0)
+    while 0 < i < n:
+        if cps[i] != _ZWJ or i + 1 >= n:
+            return False  # a second emoji (or stray text) not joined by ZWJ
+        i = unit(i + 1)
+    return i == n
 
 
 def clean_reaction_emoji(raw: Any) -> str:
-    """One emoji (it may be several code points: skin tones, ZWJ sequences). No letters, digits or markup."""
+    """Exactly one emoji (skin tones, ZWJ sequences, flags and keycaps like 1️⃣ included).
+    Letters, digits on their own, other scripts (Cyrillic, CJK...) and markup are rejected."""
     e = str(raw or "").strip()
-    if not e or len(e) > 16 or _ASCII_RE.search(e):
+    if not is_single_emoji(e):
         raise ValueError("A reaction must be a single emoji")
     return e
 

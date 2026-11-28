@@ -11,8 +11,16 @@ type Listener = (evt: E2EERealtimeEvent) => void;
 
 const listeners = new Set<Listener>();
 let socket: { close: () => void } | null = null;
+let live = false;
+
+/** True while the live connection is open and signed in (server sent 'authenticated'). */
+export function isE2EERealtimeLive(): boolean {
+  return live;
+}
 
 function dispatch(evt: E2EERealtimeEvent) {
+  if (evt.type === 'authenticated') live = true;
+  else if (evt.type === 'ws_closed') live = false;
   // An admin gave or took back free access: refresh membership, groups and the Payments tab now.
   if (evt.type === 'access_changed' && typeof window !== 'undefined') {
     window.dispatchEvent(new Event('zyphra:groups-changed'));
@@ -34,6 +42,7 @@ export function subscribeE2EERealtime(listener: Listener): () => void {
     if (listeners.size === 0 && socket) {
       socket.close();
       socket = null;
+      live = false;
     }
   };
 }
